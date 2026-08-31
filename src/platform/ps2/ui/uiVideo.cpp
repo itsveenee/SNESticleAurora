@@ -808,8 +808,9 @@ void VideoSettingsLoad(void)
 			cfg.mx4sioenable = 0;
 
 		if (cfg.mode == GSK_VIDMODE_240P ||
-		    cfg.mode == GSK_VIDMODE_480I ||
-		    cfg.mode == GSK_VIDMODE_1080I)
+            cfg.mode == GSK_VIDMODE_480I ||
+            cfg.mode == GSK_VIDMODE_1080I ||
+            cfg.mode == GSK_VIDMODE_1080P)
 			g_GskVideoMode = cfg.mode;
 		else
 			g_GskVideoMode = GSK_VIDMODE_480I;
