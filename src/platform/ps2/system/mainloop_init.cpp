@@ -375,6 +375,7 @@ _AudMix = new AudMixBuffer(32000, TRUE);
     TextureNew(&_OutTex, 256, 256, GS_PSMCT32);
     TextureSetAddr(&_OutTex, _MainLoop_uOutTexTBP);
 TextureUpload(&_OutTex, _fbTexture[0]->GetLinePtr(0));
+    TextureSetFilter(&_OutTex, g_GskResolution ? 0 : 1);
 	PathExtAdd(MAINLOOP_ENTRYTYPE_GZ, (char *)"gz");
 	PathExtAdd(MAINLOOP_ENTRYTYPE_ZIP, (char *)"zip");
 

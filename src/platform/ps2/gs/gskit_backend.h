@@ -46,6 +46,14 @@ extern int g_GskDispOffY;     /* vertical display offset   (0 = centred) */
 extern int g_GskOverscan;     /* 0..100 shrink of the display area (0 = none) */
 extern int g_GskWidescreen;   /* 0 = 4:3, 1 = safe mode-specific 16:9           */
 
+/* Video Effects (selectable in the Video Effects settings page).
+   g_GskResolution: 0 = High (linear / smooth), 1 = Low (nearest / pixelated).
+   g_GskEffect:     0 = Normal, 1 = Scanlines overlay.
+   g_GskScanLevel:  scanline intensity 0..100 (0 = invisible, 100 = full black). */
+extern int g_GskResolution;
+extern int g_GskEffect;
+extern int g_GskScanLevel;
+
 /* Set the display offset live (no VRAM realloc) and remember it for the
    next GSK_Init. X is in VCK units, matching FCEUmm-PS2. */
 void GSK_SetDisplayOffset(int x, int y);

@@ -190,6 +190,21 @@ PolyRect(0.0f, 5.0f, 256.0f, 240.0f);
 PolyRect(0.0f, 7.0f, 256.0f, 240.0f);
         }
 
+        /* Scanline overlay: draw 120 semi-transparent black lines
+           over the 240-line game area (one per 2-pixel row). */
+        if (g_GskEffect == 1 && !_bMenu)
+        {
+            int i;
+            float scanAlpha = (float)g_GskScanLevel / 100.0f;
+            PolyTexture(NULL);
+            PolyBlend(TRUE);
+            PolyColor4f(0.0f, 0.0f, 0.0f, scanAlpha);
+            for (i = 0; i < 120; i++)
+            {
+                PolyRect(0.0f, 7.0f + (float)(i * 2), 256.0f, 1.0f);
+            }
+        }
+
         PolyBlend(TRUE);
     }
 

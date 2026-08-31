@@ -48,6 +48,9 @@ int g_GskDispOffX  = 0;
 int g_GskDispOffY  = 0;
 int g_GskOverscan  = 0;   /* 0..100 shrink of display area */
 int g_GskWidescreen = 0;  /* 0 = 4:3, 1 = safe 16:9 presentation */
+int g_GskResolution = 0;  /* 0 = High (smooth), 1 = Low (pixelated) */
+int g_GskEffect     = 0;  /* 0 = Normal, 1 = Scanlines */
+int g_GskScanLevel   = 35; /* scanline alpha 0..100 (default 35%) */
 static int _gsk_vck         = 4;   /* display-offset VCK units            */
 static int _gsk_fb_width    = 640; /* active FB width                     */
 static int _gsk_fb_height   = 480; /* active FB height                    */
