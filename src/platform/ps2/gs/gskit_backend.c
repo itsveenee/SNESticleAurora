@@ -238,19 +238,14 @@ void GSK_Init(int width, int height,
     gsKit_vram_clear(_pGsGlobal);
 
     gsKit_init_screen(_pGsGlobal);
-
-    /* gsKit maps a 640-wide source across all 1920 pixels in 1080i,
-       which turns 4:3 content into a horizontally stretched 16:9 image.
-       MAGH=1 reads all 640 source pixels into a 1280-pixel window. The
-       640x480 framebuffer is already mapped to 960 output rows (MAGV=1),
-       so the resulting centred 1280x960 window has the correct 4:3 ratio.
-       Widescreen remains an explicit user choice handled later. */
-    if (_gsk_active_mode == GSK_VIDMODE_1080I)
+   
+       /* Capture gsKit's computed DISPLAY params as the baseline... */
+    if (_gsk_active_mode == GSK_VIDMODE_1080I || _gsk_active_mode == GSK_VIDMODE_1080P) // <-- ADICIONADO O OPERADOR OU (||) COM 1080P
     {
         const int aspect_dw = 1280;
         _pGsGlobal->StartX += (_pGsGlobal->DW - aspect_dw) / 2;
         _pGsGlobal->MagH = 1;
-        _pGsGlobal->DW   = aspect_dw;
+        _pGsGlobal->DW = aspect_dw;
     }
 
     /* Capture gsKit's computed DISPLAY params as the baseline for the
