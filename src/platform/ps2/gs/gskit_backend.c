@@ -155,21 +155,26 @@ void GSK_Init(int width, int height,
     /* The legacy caller still passes its old interlace argument, but the
        backend now exposes interlaced modes only and owns this choice. */
     (void)interlace;
-    switch (g_GskVideoMode)
+        switch (g_GskVideoMode)
     {
-    case GSK_VIDMODE_1080I:
-        /* A full 1920x1080 RGBA framebuffer cannot fit in the PS2's 4 MiB
-           VRAM. Use a 640x480 source and let the PCRTC double it vertically.
-           After gsKit computes the mode registers below, the horizontal
-           display is reduced to 1280 pixels and centred: 1280x960 is 4:3,
-           so the default no longer stretches the game across 16:9. */
-        _pGsGlobal->Mode      = GS_MODE_DTV_1080I;
-        _pGsGlobal->Interlace = GS_INTERLACED;
-        _pGsGlobal->Field     = GS_FIELD;
-        _gsk_fb_width         = 640;
-        _gsk_fb_height        = 480;
-        _gsk_vck              = 1;
+    case GSK_VIDMODE_1080P: // <-- BLOCO NOVO ADICIONADO
+        _pGsGlobal->Mode = GS_MODE_DTV_1080P;
+        _pGsGlobal->Interlace = GS_NONINTERLACED;
+        _pGsGlobal->Field = GS_FRAME;
+        _gsk_fb_width = 640;
+        _gsk_fb_height = 480;
+        _gsk_vck = 1;
         break;
+
+    case GSK_VIDMODE_1080I:
+        _pGsGlobal->Mode = GS_MODE_DTV_1080I;
+        _pGsGlobal->Interlace = GS_INTERLACED;
+        _pGsGlobal->Field = GS_FIELD;
+        _gsk_fb_width = 640;
+        _gsk_fb_height = 480;
+        _gsk_vck = 1;
+        break;
+    // ... deixe o restante do switch (240p, 480i) como está
 
     case GSK_VIDMODE_240P:
         /*
