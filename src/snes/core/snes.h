@@ -306,6 +306,15 @@ Bool            m_bRegionLocked;
 	Int32		m_nLineIRQCycle;
 	Int32		m_nLineIRQClock;
 #endif
+
+	/* AURORA_RASTER_MMIO_CATCHUP_V1_20260907
+	 * Transient scheduler guards only; they are reconstructed every scanline
+	 * and intentionally are not part of the serialized SNES state. */
+	Bool		m_bRasterLineActive;
+	Bool		m_bRasterCatchupActive;
+	Bool		m_bRasterHBlankDone;
+	Bool		m_bRasterHDMADone;
+
 	Uint8		m_Ram[SNES_RAMSIZE] _ALIGN(16);
 	Uint8		m_SRam[SNES_SRAMSIZE] _ALIGN(16);
 
@@ -375,6 +384,7 @@ private:
 
 	void	SyncSPC(Int32 uExtra = 0);
 	void	SyncPPU();
+	void	CatchUpRasterEventsForCpuMMIO(SNCpuT *pCpu);
 #if SNES_HVIRQ_RESCHEDULE
 	Int32	CalculateLineIRQCycle();
 	void	RescheduleLineIRQ(Bool bAllowImmediate);

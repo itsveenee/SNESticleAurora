@@ -2,6 +2,7 @@
 #include <new>
 
 #include "gbhost.h"
+#include "snsgb_icd2.h"
 #include "sameboy_sgb_boot.h"
 
 extern "C" {
@@ -44,6 +45,9 @@ struct GBHost::Impl
     ResetHookT hresetHook;
     ResetHookT vresetHook;
     void *hookContext;
+
+    /* AURORA_SGB_HOTPATH_V2_20260907 */
+    SNSGBICD2 *icd2FastPath;
 
     Uint32 *screen;
 
@@ -146,9 +150,16 @@ void GBHost::PixelThunk(void *pOpaque, Uint8 pixel)
     if (!p)
         return;
 
-    /* AURORA_SGB_SAMEBOY_RUNTIME_CURE_V1_20260906
-     * SameBoy NO_SFC already emits the exact ICD color stream. Do not rebuild
-     * a synthetic scanline here; let SNSGBICD2 own hcounter/vcounter/banks. */
+    /* AURORA_SGB_HOTPATH_V2_20260907
+     * SameBoy NO_SFC already emits the exact ICD color stream. When this host
+     * belongs to SNSuperGameBoy, bypass the extra function-pointer + wrapper
+     * hop and feed ICD2 directly. */
+    if (p->icd2FastPath)
+    {
+        p->icd2FastPath->PPUWrite(pixel & 3U);
+        return;
+    }
+
     if (p->pixelHook)
         p->pixelHook(p->hookContext, pixel & 3U);
 }
@@ -156,14 +167,28 @@ void GBHost::PixelThunk(void *pOpaque, Uint8 pixel)
 void GBHost::HResetThunk(void *pOpaque)
 {
     Impl *p = (Impl *)pOpaque;
-    if (p && p->hresetHook)
+    if (!p)
+        return;
+    if (p->icd2FastPath)
+    {
+        p->icd2FastPath->PPUHReset();
+        return;
+    }
+    if (p->hresetHook)
         p->hresetHook(p->hookContext);
 }
 
 void GBHost::VResetThunk(void *pOpaque)
 {
     Impl *p = (Impl *)pOpaque;
-    if (p && p->vresetHook)
+    if (!p)
+        return;
+    if (p->icd2FastPath)
+    {
+        p->icd2FastPath->PPUVReset();
+        return;
+    }
+    if (p->vresetHook)
         p->vresetHook(p->hookContext);
 }
 
@@ -500,6 +525,13 @@ void GBHost::SetHooks(
     m_p->hresetHook = pHReset;
     m_p->vresetHook = pVReset;
     m_p->hookContext = pContext;
+}
+
+void GBHost::SetICD2FastPath(SNSGBICD2 *pICD2)
+{
+    if (!m_p)
+        return;
+    m_p->icd2FastPath = pICD2;
 }
 
 Bool GBHost::SaveState(StateT *pState) const

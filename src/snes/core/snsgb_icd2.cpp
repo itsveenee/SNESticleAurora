@@ -295,44 +295,8 @@ void SNSGBICD2::SubmitPacket(const Uint8 *pPacket)
     m_bPacketReady = TRUE;
 }
 
-/* AURORA_SGB_SAMEBOY_RUNTIME_CURE_V1_20260906
- * Direct external-ICD raster contract used by bsnes+SameBoy:
- * pixel shifts into current 2bpp tile row; H-reset advances line/bank;
- * V-reset resets raster counters but preserves ring writeBank.
- */
-void SNSGBICD2::PPUWrite(Uint8 uColor)
-{
-    Uint16 x = m_uHCounter++;
-    Uint8 y;
-    Uint32 off;
-    Uint8 *pBank;
-
-    if (x >= LCD_WIDTH)
-        return;
-
-    y = (Uint8)(m_nVCounter & 7);
-    off = (Uint32)y * 2U + ((Uint32)x >> 3) * 16U;
-    pBank = m_uOutput[m_uWriteBank & 3U];
-
-    pBank[off + 0U] =
-        (Uint8)((pBank[off + 0U] << 1) | ((uColor & 1U) ? 1U : 0U));
-    pBank[off + 1U] =
-        (Uint8)((pBank[off + 1U] << 1) | ((uColor & 2U) ? 1U : 0U));
-}
-
-void SNSGBICD2::PPUHReset()
-{
-    m_uHCounter = 0;
-    ++m_nVCounter;
-    if ((m_nVCounter & 7) == 0)
-        m_uWriteBank = (Uint8)((m_uWriteBank + 1U) & 3U);
-}
-
-void SNSGBICD2::PPUVReset()
-{
-    m_uHCounter = 0;
-    m_nVCounter = 0;
-}
+/* AURORA_SGB_HOTPATH_V2_20260907
+ * PPUWrite/PPUHReset/PPUVReset moved inline to snsgb_icd2.h. */
 
 void SNSGBICD2::PushLCDScanline(Int32 nLine, const Uint8 *pShade2Bit)
 {

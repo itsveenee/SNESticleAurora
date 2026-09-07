@@ -831,6 +831,71 @@ inline void SnesSystem::SyncPPU()
 #endif
 }
 
+
+/* AURORA_RASTER_MMIO_CATCHUP_V1_20260907
+ *
+ * The PS2 65816 executor is instruction-granular.  It may therefore finish
+ * an instruction a few master clocks beyond a horizontal scheduler target
+ * and carry the excess as negative Cycles.  That preserves total time, but a
+ * trapped MMIO access inside the overrun instruction can otherwise become
+ * visible before an HBlank/HDMA event which physically preceded the access.
+ *
+ * The ASM memory helpers save R_Cycles into SNCpuT before invoking a trap, so
+ * SNCPUGetCounter(LINE) is the beam position at this actual bus access.  If
+ * the access has crossed H=1096/H=1104, catch up the overdue event before the
+ * handler performs the read/write.  HDMA's cycle subtraction is deliberately
+ * left as CPU debt: later scheduler slices already pay that debt, exactly as
+ * the existing scanline path does for a transfer crossing a slice boundary.
+ *
+ * MDMA is excluded: it already owns the S-CPU bus and has separate scheduling.
+ * m_bRasterCatchupActive prevents recursion if an unusual HDMA A-bus source
+ * itself resolves through an MMIO trap.
+ */
+void SnesSystem::CatchUpRasterEventsForCpuMMIO(SNCpuT *pCpu)
+{
+	Int32 nClock;
+
+	if (!pCpu || pCpu != &m_Cpu ||
+		!m_bRasterLineActive || m_bRasterCatchupActive)
+		return;
+
+	if (pCpu->uSignal & SNCPU_SIGNAL_DMA)
+		return;
+
+	nClock = SNCPUGetCounter(pCpu, SNCPU_COUNTER_LINE);
+	if (nClock < SNES_HBLANK_START_CYCLE)
+		return;
+
+	m_bRasterCatchupActive = TRUE;
+
+	if (!m_bRasterHBlankDone && nClock >= SNES_HBLANK_START_CYCLE)
+	{
+		m_bRasterHBlankDone = TRUE;
+		m_IO.m_Regs.hvbjoy |= 0x40;
+	}
+
+	/* Process HDMA before the triggering CPU MMIO effect.  This preserves
+	 * FIFO order in the line-tagged PPU write queue when an instruction
+	 * straddles the HDMA boundary. */
+	nClock = SNCPUGetCounter(pCpu, SNCPU_COUNTER_LINE);
+	if (!m_bRasterHDMADone && nClock >= SNES_HDMA_START_CYCLE)
+	{
+		m_bRasterHDMADone = TRUE;
+		if (!(m_IO.m_Regs.hvbjoy & 0x80))
+		{
+#if SNDBG_LOG
+			Uint32 _tHDMA = ProfCtrGetCycle();
+#endif
+			m_DMAC.ProcessHDMA(m_uLine);
+#if SNDBG_LOG
+			g_TmgCycHDMA += ProfCtrGetCycle() - _tHDMA;
+#endif
+		}
+	}
+
+	m_bRasterCatchupActive = FALSE;
+}
+
 #if SNES_DEBUG
 Uint8 SNCPU_TRAPFUNC SnesSystem::Read2000Debug(SNCpuT *pCpu, Uint32 uAddr)
 {
@@ -847,6 +912,7 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::Read2000(SNCpuT *pCpu, Uint32 uAddr)
 	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
 	SnesPPURegsT *pPPURegs = (SnesPPURegsT *)pSnes->m_PPU.GetRegs();
 
+	pSnes->CatchUpRasterEventsForCpuMMIO(pCpu);
 	uAddr &= 0xFFFF;
 
 	if (pSnes->m_SA1.IsActive())
@@ -1054,6 +1120,7 @@ void SNCPU_TRAPFUNC SnesSystem::Write2000(SNCpuT *pCpu, Uint32 uAddr, Uint8 uDat
 {
 	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
 
+	pSnes->CatchUpRasterEventsForCpuMMIO(pCpu);
 	uAddr &= 0xFFFF;
 
 	if (pSnes->m_SA1.IsActive())
@@ -1177,6 +1244,7 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::Read4000(SNCpuT *pCpu, Uint32 uAddr)
 	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
 	SnesIO *pIO = &pSnes->m_IO;
 
+	pSnes->CatchUpRasterEventsForCpuMMIO(pCpu);
 	uAddr &= 0xFFFF;
 
 	if (uAddr >= 0x4300 && uAddr < 0x4380)
@@ -1311,6 +1379,7 @@ void SNCPU_TRAPFUNC SnesSystem::Write4000(SNCpuT *pCpu, Uint32 uAddr, Uint8 uDat
 {
 	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
 
+	pSnes->CatchUpRasterEventsForCpuMMIO(pCpu);
 	uAddr &= 0xFFFF;
 
 	if (uAddr >= 0x4300 && uAddr < 0x4380)
@@ -1689,6 +1758,12 @@ SnesSystem::SnesSystem()
 	m_nLineIRQCycle = -1;
 	m_nLineIRQClock = 0;
 #endif
+
+	/* AURORA_RASTER_MMIO_CATCHUP_V1_20260907 */
+	m_bRasterLineActive = FALSE;
+	m_bRasterCatchupActive = FALSE;
+	m_bRasterHBlankDone = FALSE;
+	m_bRasterHDMADone = FALSE;
 
 	// setup spc
 	SNSPCNew(&m_Spc);
@@ -2575,6 +2650,13 @@ void SnesSystem::ExecuteLine()
 	 * carries into the next line instead of lengthening the video line. */
 	SNCPUResetCounter(&m_Cpu, SNCPU_COUNTER_LINE);
 
+	/* AURORA_RASTER_MMIO_CATCHUP_V1_20260907
+	 * These guards describe only the live physical scanline. */
+	m_bRasterLineActive = TRUE;
+	m_bRasterCatchupActive = FALSE;
+	m_bRasterHBlankDone = FALSE;
+	m_bRasterHDMADone = FALSE;
+
 	Int32 nHIRQCycles = -1;
 	Int32 nHClock = 0;
 	/* ares S-CPU revision 2: setup=12+phase, refresh=538-phase.
@@ -2673,28 +2755,35 @@ void SnesSystem::ExecuteLine()
 
 	/* Normal HBlank starts at H=1096. */
 	AURORA_V7_RUN_TO(SNES_HBLANK_START_CYCLE);
+	m_bRasterHBlankDone = TRUE;
 	m_IO.m_Regs.hvbjoy |= 0x40;
 
 	/* HDMA starts eight clocks into HBlank, at H=1104. */
 	AURORA_V7_RUN_TO(SNES_HDMA_START_CYCLE);
-	if (!(m_IO.m_Regs.hvbjoy & 0x80) && nHClock < SNES_CYCLESPERLINE)
+	if (!m_bRasterHDMADone)
 	{
-		Int32 nBefore = m_Cpu.Cycles;
+		m_bRasterHDMADone = TRUE;
+		if (!(m_IO.m_Regs.hvbjoy & 0x80) && nHClock < SNES_CYCLESPERLINE)
+		{
+			Int32 nBefore = m_Cpu.Cycles;
 #if SNDBG_LOG
-		Uint32 _tHDMA = ProfCtrGetCycle();
+			Uint32 _tHDMA = ProfCtrGetCycle();
 #endif
-		m_DMAC.ProcessHDMA(m_uLine);
+			m_DMAC.ProcessHDMA(m_uLine);
 #if SNDBG_LOG
-		g_TmgCycHDMA += ProfCtrGetCycle() - _tHDMA;
+			g_TmgCycHDMA += ProfCtrGetCycle() - _tHDMA;
 #endif
-		Int32 nStolen = nBefore - m_Cpu.Cycles;
-		AURORA_V7_ACCOUNT_STEAL(nStolen);
+			Int32 nStolen = nBefore - m_Cpu.Cycles;
+			AURORA_V7_ACCOUNT_STEAL(nStolen);
+		}
 	}
 
 	AURORA_V7_RUN_TO(SNES_CYCLESPERLINE);
 
 	/* The PPU beam wraps regardless of whether a DMA debt carries into the
 	 * following line. */
+	m_bRasterLineActive = FALSE;
+	m_bRasterCatchupActive = FALSE;
 	m_IO.m_Regs.hvbjoy &= ~0x40;
 
 #undef AURORA_V7_ACCOUNT_STEAL
@@ -3361,21 +3450,25 @@ void SnesSystem::SyncSuperGameBoy()
     m_uSGBSyncClock = now;
 }
 
+/* AURORA_SGB_CORRECTNESS_V1_20260907
+ * Exactly one SGB catch-up per MMIO access. $7000-$700f is special: consume
+ * the ICD2 packet byte first, then advance SameBoy to the current S-CPU time.
+ * All other SGB MMIO remains pre-synchronized. */
 Uint8 SNCPU_TRAPFUNC SnesSystem::ReadSGB(SNCpuT *pCpu, Uint32 uAddr)
 {
     SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
+    Uint32 d;
 
-    /* AURORA_SGB_MMIO_SYNC_ORDERED_V0_6_31_20260906
-     * Poll/data ports are synchronized to the current S-CPU timestamp.
-     * The boot packet window $7000-$700f is deliberately excluded:
-     * consuming FB is itself part of the handshake and must happen before
-     * any GB-side advancement caused by this same MMIO read. */
-    {
-        Uint32 d = uAddr & 0x40f80fU;
-        if (!(d >= 0x7000U && d <= 0x700fU))
-            pSnes->SyncSuperGameBoy();
-    }
     if (!pSnes) return pCpu->uMDR;
+
+    d = uAddr & 0x40f80fU;
+    if (d >= 0x7000U && d <= 0x700fU)
+    {
+        Uint8 value = pSnes->m_SGB.Read(uAddr, pCpu->uMDR);
+        pSnes->SyncSuperGameBoy();
+        return value;
+    }
+
     pSnes->SyncSuperGameBoy();
     return pSnes->m_SGB.Read(uAddr, pCpu->uMDR);
 }
@@ -3384,14 +3477,9 @@ void SNCPU_TRAPFUNC SnesSystem::WriteSGB(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData
 {
     SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
 
-    /* AURORA_SGB_MMIO_SYNC_V0_6_30_20260906_WRITE
-     * ICD2 is asynchronous hardware. Bring the GB side up to the
-     * current S-CPU master-clock position at the MMIO boundary so
-     * tight firmware polling cannot phase-lock on a stale $6000,
-     * $6002 or $7800 value. This is SGB-only and does not alter the
-     * ordinary 65816 executor or non-SGB cartridges. */
-    pSnes->SyncSuperGameBoy();
     if (!pSnes) return;
+
+    /* Writes observe the GB/ICD2 at the current S-CPU timestamp, once. */
     pSnes->SyncSuperGameBoy();
     pSnes->m_SGB.Write(uAddr, uData);
 }

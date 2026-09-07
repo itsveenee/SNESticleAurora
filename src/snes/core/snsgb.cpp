@@ -103,6 +103,8 @@ Bool SNSuperGameBoy::AttachGame(const Uint8 *pData, Uint32 nBytes, ModelE eModel
     m_ICD2.Reset(m_eModel == MODEL_SGB2
         ? SNSGBICD2::MODEL_SGB2 : SNSGBICD2::MODEL_SGB1);
     AuroraSgbBootTrace("SGB 4G: install hooks");
+    /* AURORA_SGB_HOTPATH_V2_20260907 */
+    m_GB.SetICD2FastPath(&m_ICD2);
     m_GB.SetHooks(&SNSuperGameBoy::JoypHook,
                   &SNSuperGameBoy::PixelHook,
                   &SNSuperGameBoy::HResetHook,
@@ -115,6 +117,7 @@ Bool SNSuperGameBoy::AttachGame(const Uint8 *pData, Uint32 nBytes, ModelE eModel
 
 void SNSuperGameBoy::Detach()
 {
+    m_GB.SetICD2FastPath(NULL);
     m_GB.SetHooks(NULL, NULL, NULL, NULL, NULL);
     m_GB.UnloadROM();
     m_ICD2.Reset(SNSGBICD2::MODEL_NONE);
@@ -254,6 +257,8 @@ void SNSuperGameBoy::Reset()
     ResetBootHandshake();
     m_GB.Reset(m_eModel == MODEL_SGB2 ? GBHost::MODEL_SGB2 : GBHost::MODEL_SGB1);
     ResetAudioPipeline();
+    /* AURORA_SGB_HOTPATH_V2_20260907 */
+    m_GB.SetICD2FastPath(&m_ICD2);
     m_GB.SetHooks(&SNSuperGameBoy::JoypHook,
                   &SNSuperGameBoy::PixelHook,
                   &SNSuperGameBoy::HResetHook,
@@ -567,6 +572,8 @@ Bool SNSuperGameBoy::RestoreState(const void *pData, Uint32 nBytes)
     m_iAudioSumLeft = h.AudioSumLeft;
     m_iAudioSumRight = h.AudioSumRight;
     m_uAudioCount = h.AudioCount;
+    /* AURORA_SGB_HOTPATH_V2_20260907 */
+    m_GB.SetICD2FastPath(&m_ICD2);
     m_GB.SetHooks(&SNSuperGameBoy::JoypHook,
                   &SNSuperGameBoy::PixelHook,
                   &SNSuperGameBoy::HResetHook,

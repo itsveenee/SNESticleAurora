@@ -3,6 +3,8 @@
 
 #include "types.h"
 
+class SNSGBICD2;
+
 /* AURORA_SGB_SAMEBOY_BACKEND_V1_20260906
  * Neutral Game Boy host used by SNSuperGameBoy.
  *
@@ -67,6 +69,11 @@ public:
     void SetHooks(JoypHookT pJoyp, PixelHookT pPixel,
                   ResetHookT pHReset, ResetHookT pVReset,
                   void *pContext);
+
+    /* AURORA_SGB_HOTPATH_V2_20260907
+     * Optional SGB-only raster fast path. Generic callbacks remain the
+     * fallback so GBHost stays reusable outside SNSuperGameBoy. */
+    void SetICD2FastPath(SNSGBICD2 *pICD2);
 
     Bool SaveState(StateT *pState) const;
     Bool RestoreState(const StateT *pState);

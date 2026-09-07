@@ -50,10 +50,42 @@ public:
     Uint8 JoypWrite(Bool bP14, Bool bP15);
     void SubmitPacket(const Uint8 *pPacket);
 
-    /* Native SameBoy NO_SFC ICD raster contract. */
-    void PPUWrite(Uint8 uColor);
-    void PPUHReset();
-    void PPUVReset();
+    /* AURORA_SGB_HOTPATH_V2_20260907
+     * Native SameBoy NO_SFC ICD raster contract. Kept byte-for-byte equivalent
+     * to the former out-of-line implementation, but inline for the PS2 hot path. */
+    void PPUWrite(Uint8 uColor)
+    {
+        Uint16 x = m_uHCounter++;
+        Uint8 y;
+        Uint32 off;
+        Uint8 *pBank;
+
+        if (x >= LCD_WIDTH)
+            return;
+
+        y = (Uint8)(m_nVCounter & 7);
+        off = (Uint32)y * 2U + ((Uint32)x >> 3) * 16U;
+        pBank = m_uOutput[m_uWriteBank & 3U];
+
+        pBank[off + 0U] =
+            (Uint8)((pBank[off + 0U] << 1) | ((uColor & 1U) ? 1U : 0U));
+        pBank[off + 1U] =
+            (Uint8)((pBank[off + 1U] << 1) | ((uColor & 2U) ? 1U : 0U));
+    }
+
+    void PPUHReset()
+    {
+        m_uHCounter = 0;
+        ++m_nVCounter;
+        if ((m_nVCounter & 7) == 0)
+            m_uWriteBank = (Uint8)((m_uWriteBank + 1U) & 3U);
+    }
+
+    void PPUVReset()
+    {
+        m_uHCounter = 0;
+        m_nVCounter = 0;
+    }
 
     /* Legacy helpers retained for old source/state compatibility. */
     void PushLCDScanline(Int32 nLine, const Uint8 *pShade2Bit);
