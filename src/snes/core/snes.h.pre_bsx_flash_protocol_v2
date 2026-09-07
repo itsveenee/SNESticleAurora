@@ -83,36 +83,13 @@ public:
 
 private:
     Uint8 *m_pData;
+    Uint16 m_uCommand;
     Bool m_bAttached;
     Bool m_bDirty;
-
-    /* AURORA_BSXSLOT_FLASH_PROTOCOL_V2_20260907
-     * Sharp LH28F800SU-compatible 8-bit command state.
-     * Page buffers are volatile protocol state; the 1 MiB flash array itself
-     * remains the only .mpk payload persisted by the frontend. */
-    enum
-    {
-        BSX_FLASH_MODE_ARRAY = 0,
-        BSX_FLASH_MODE_CHIP,
-        BSX_FLASH_MODE_PAGE,
-        BSX_FLASH_MODE_COMPAT_STATUS,
-        BSX_FLASH_MODE_EXT_STATUS
-    };
-
-    Uint8 m_uFlashMode;
-    Uint8 m_uPageIndex;
-    Uint8 m_PageBuffer[2][256];
-
-    Uint8 m_uPendingCommand;
-    Uint8 m_uPendingStep;
-    Uint8 m_uPendingData;
-    Uint8 m_uPendingAddrOdd;
-    Uint16 m_uPendingCount;
-
-    void ProgramFlashByte(Uint32 uAddr, Uint8 uData);
-    void EraseFlashBlock(Uint32 uAddr);
-    void EraseFlashAll();
-
+    Bool m_bCSR;
+    Bool m_bESR;
+    Bool m_bVendorInfo;
+    Bool m_bWriteByte;
     Uint32 m_uReadCount;
     Uint32 m_uWriteCount;
     Uint32 m_uProgramCount;

@@ -1631,16 +1631,13 @@ void SNSuperWildCard::FdcFinishRW(Bool bOK, Uint8 uST1, Uint8 uST2)
 {
     Uint8 r[7];
 
-    /* AURORA_D88_WRITEBACK_MOTOR_FLUSH_V1_20260907
-     *
-     * D88 is already a complete RAM-backed medium. Completing every FDC
-     * WRITE/FORMAT with fwrite()+fflush() makes the emulated BIOS wait for
-     * slow PS2 mass-storage I/O before it can consume the result phase.
-     *
-     * Keep dirty sector/track/header state in RAM and acknowledge the FDC
-     * command immediately. Persistence is forced when the drive motor goes
-     * fully off, and remains forced by MountDisk()/SwapDisk()/Shutdown().
-     */
+    /* AURORA_SWC_MEGA_V9_20260831: physical floppy persistence is command-granular, not sector-granular. */
+    if (m_bDiskDirty && !FdcFlushDisk())
+    {
+        bOK = FALSE;
+        if (!uST1) uST1 = 0x20;
+    }
+
     r[0] = bOK ? (Uint8)((m_uDataH << 2) | m_uDrive)
                : (Uint8)(0x40 | (m_uDataH << 2) | m_uDrive);
     r[1] = uST1;
@@ -2511,20 +2508,6 @@ Bool SNSuperWildCard::WriteMode0(Uint8 bank, Uint16 addr, Uint8 uData,
     if (addr == 0xC002)
     {
         Uint8 old = m_uDOR;
-
-        /* AURORA_D88_WRITEBACK_MOTOR_FLUSH_V1_20260907
-         *
-         * Treat "all floppy motors became off" as the normal write-back
-         * persistence boundary. Do this before publishing the new DOR state
-         * or resetting the FDC so a completed dirty command is safely
-         * committed while the mounted FILE* and RAM image are still intact.
-         *
-         * A failed host flush intentionally leaves m_bDiskDirty set, so the
-         * existing MountDisk()/Shutdown() paths can retry it later.
-         */
-        if ((old & 0xF0) && !(uData & 0xF0) && m_bDiskDirty)
-            (void)FdcFlushDisk();
-
         m_uDOR = uData;
 
         /* AURORA_FRONT_FDC_DRIVE_MODEL_V10_3_20260831
@@ -2651,17 +2634,9 @@ Bool SNSuperWildCard::ReadEmulation(Uint8 bank, Uint16 addr, Uint8 *pData,
     /* AURORA_SWC_FLOPPY_V3_20260831
      * E00D enables the real cartridge in banks 20-5F/A0-DF. Aurora V3 has
      * no inserted cartridge, so those windows are physical open bus. */
-    /* AURORA_SWC_SRAM_RESTORE_BUS_FIX_V1_20260907
-     * E00D is also used by the BIOS to expose the copier B-RAM page while
-     * backing up/restoring SRAM.  A disk-only game must not lose 20-5F/A0-DF
-     * of its DRAM image merely because that latch is still set when the BIOS
-     * enters Mode 2/3.  Only a physically attached cartridge can take over
-     * those windows; the fixed copier B-RAM windows below retain priority
-     * when no external cartridge exists. */
-    if (m_bCartridgeMap && m_pCartRom && m_nCartBytes &&
-        !ExternalCartridgeIsDonor() &&
+    if (m_bCartridgeMap && !ExternalCartridgeIsDonor() &&
         ((bank >= 0x20 && bank <= 0x5F) ||
-         (bank >= 0xA0 && bank <= 0xDF))) /* AURORA_SWC_SRAM_RESTORE_BUS_FIX_V1_20260907 */
+         (bank >= 0xA0 && bank <= 0xDF)))
     {
         /* AURORA_SWC_CART_SRAM_MEMORY_FINAL_V5_3_20260901
          * E00D overlays the physical cartridge bus. HiROM battery RAM at
@@ -2739,10 +2714,9 @@ Bool SNSuperWildCard::WriteEmulation(Uint8 bank, Uint16 addr, Uint8 uData,
      * external-cartridge overlay must precede the copier SRAM mapping, just
      * as ReadEmulation already does. This is essential for HiROM cart SRAM
      * in the overlapping 30-33:6000-7FFF region. */
-    if (m_bCartridgeMap && m_pCartRom && m_nCartBytes &&
-        !ExternalCartridgeIsDonor() &&
+    if (m_bCartridgeMap && !ExternalCartridgeIsDonor() &&
         ((bank >= 0x20 && bank <= 0x5F) ||
-         (bank >= 0xA0 && bank <= 0xDF))) /* AURORA_SWC_SRAM_RESTORE_BUS_FIX_V1_20260907 */
+         (bank >= 0xA0 && bank <= 0xDF)))
     {
         Uint8 ignored;
         if (WriteExternalCartridgeSRAM(bank, addr, uData))
@@ -2865,10 +2839,9 @@ Bool SNSuperWildCard::ResolveDirectDram(Uint8 bank, Uint16 addr,
      * E004-E007 are write-only mode-select registers. SNCPUSetBank(...,
      * FALSE) keeps the direct read pointer while bRAM=0 sends every write
      * through the existing WriteSWC trap. */
-    if (m_bCartridgeMap && m_pCartRom && m_nCartBytes &&
-        !ExternalCartridgeIsDonor() &&
+    if (m_bCartridgeMap && !ExternalCartridgeIsDonor() &&
         ((bank >= 0x20 && bank <= 0x5F) ||
-         (bank >= 0xA0 && bank <= 0xDF))) /* AURORA_SWC_SRAM_RESTORE_BUS_FIX_V1_20260907 */
+         (bank >= 0xA0 && bank <= 0xDF)))
         return FALSE;
 
     if (!(m_uParallel & 0x02) &&
