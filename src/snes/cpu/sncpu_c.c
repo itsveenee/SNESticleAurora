@@ -503,18 +503,23 @@ static __inline Uint8 __SNCPURead8(SNCpuT *pCpu, Uint32 Addr)
 {
 	Uint32 iBank;
 	Uint8 *pBankMem;
+	Uint8 uData;
 
 	iBank = Addr >> SNCPU_BANK_SHIFT;
 	pBankMem = pCpu->Bank[iBank].pMem;
 
 	if (pBankMem)
 	{
-		return pBankMem[Addr];
+		uData = pBankMem[Addr];
 	}
 	else
 	{
-		return pCpu->Bank[iBank].pReadTrapFunc(pCpu, Addr);
+		uData = pCpu->Bank[iBank].pReadTrapFunc(pCpu, Addr);
 	}
+
+    /* AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: completed C/reference byte read becomes MDR. */
+    pCpu->uMDR = uData;
+    return uData;
 }
 
 static Uint8 _SNCPURead8(SNCpuT *pCpu, Uint32 Addr)
@@ -578,22 +583,8 @@ static Uint16 _SNCPURead16DP(SNCpuT *pCpu, Uint32 Addr, Uint32 uWrap)
 
 static __inline Uint8 __SNCPUFetch8(SNCpuT *pCpu, Uint32 Addr)
 {
-	Uint32 iBank;
-	Uint8 *pBankMem;
-
-	iBank = Addr >> SNCPU_BANK_SHIFT;
-	pBankMem = pCpu->Bank[iBank].pMem;
-
-	if (pBankMem)
-	{
-		return pBankMem[Addr];
-	}
-	else
-	{
-		//return 0x00;
-		return pCpu->Bank[iBank].pReadTrapFunc(pCpu, Addr);
-
-	}
+    /* AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: instruction fetch shares the physical S-CPU data bus. */
+    return __SNCPURead8(pCpu, Addr);
 }
 
 static Uint8 _SNCPUFetch8(SNCpuT *pCpu, Uint32 Addr)
@@ -637,6 +628,9 @@ static __inline void  __SNCPUWrite8(SNCpuT *pCpu, Uint32 Addr, Uint8 Data)
 {
 	Uint32 iBank;
 	Uint8 *pBankMem;
+
+	/* AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: writes drive MDR before device decode. */
+	pCpu->uMDR = Data;
 
 	iBank = Addr >> SNCPU_BANK_SHIFT;
 

@@ -404,6 +404,7 @@ Uint8 SNCPURead8(SNCpuT *pCpu, Uint32 Addr)
 {
 	Uint32 iBank;
 	Uint8 *pBankMem;
+	Uint8 uData;
 
 	iBank = Addr >> SNCPU_BANK_SHIFT;
 	pBankMem = pCpu->Bank[iBank].pMem;
@@ -419,16 +420,20 @@ Uint8 SNCPURead8(SNCpuT *pCpu, Uint32 Addr)
 //		char str[64];
 //		sprintf(str,"read[%04X]=%02X\n", Addr, pBankMem[Addr]);
 //		OutputDebugStr(str);
-		return pBankMem[Addr];
+		uData = pBankMem[Addr];
 	}
 	else
 	{
 //		ConDebug("readtrap[%04X]", Addr);
 		//call trap function
-		return pCpu->Bank[iBank].pReadTrapFunc(pCpu, Addr);
+		uData = pCpu->Bank[iBank].pReadTrapFunc(pCpu, Addr);
 
 //		return 0xFF;
 	}
+
+    /* AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: completed byte read becomes S-CPU MDR. */
+    pCpu->uMDR = uData;
+    return uData;
 }
 
 Uint16 SNCPURead16(SNCpuT *pCpu, Uint32 Addr)
@@ -531,6 +536,9 @@ void  SNCPUWrite8(SNCpuT *pCpu, Uint32 Addr, Uint8 Data)
 {
 	Uint32 iBank;
 	Uint8 *pBankMem;
+
+	/* AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: writes drive all eight data-bus bits. */
+	pCpu->uMDR = Data;
 
 	iBank = Addr >> SNCPU_BANK_SHIFT;
 

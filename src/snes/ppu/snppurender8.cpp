@@ -772,47 +772,87 @@ static _INLINE Uint8 _SnesPPUMode5PackMask4(Uint32 uMask, Bool bOdd)
 }
 
 
-static _INLINE Uint64 _SnesPPUMode5PackPair(
-	Uint64 uRow0,
-	Uint64 uRow1,
-	Bool bHFlip,
-	Bool bMosaic)
+/* AURORA_MDR_MODE5_CLEAN_V2_1_20260907
+ * Aurora outputs 256 logical pixels while Mode 5 carries two physical hires
+ * dots per logical position. Keep V1.1's preferred phase whenever it is
+ * opaque; only a transparent preferred sample may borrow the opposite phase.
+ * This helper is reached only from the existing Mode-5 CHR path.
+ */
+static _INLINE Uint32 _SnesPPUMode5PreferCoverage4(
+    Uint32 uPreferred,
+    Uint32 uAlternate)
 {
-	/*
-	 * Snes9x converter phase:
-	 *   main/no mosaic: normal=odd,  H-flip=even
-	 *   main/mosaic:    normal=even, H-flip=odd
-	 */
-	Bool bOdd = (Bool)((!bMosaic) ^ bHFlip);
-	Uint64 uOut =
-		(Uint64)_SnesPPUMode5Pack4(uRow0, bOdd) |
-		((Uint64)_SnesPPUMode5Pack4(uRow1, bOdd) << 32);
+    Uint32 uOut = 0;
+    Uint32 uP;
 
-	if (bHFlip)
-		uOut = SnesPPUChrCacheReverseBytes(uOut);
-
-	return uOut;
+    uP = (uPreferred >> 0) & 0xFF;
+    uOut |= (uP ? uP : ((uAlternate >> 0) & 0xFF)) << 0;
+    uP = (uPreferred >> 8) & 0xFF;
+    uOut |= (uP ? uP : ((uAlternate >> 8) & 0xFF)) << 8;
+    uP = (uPreferred >> 16) & 0xFF;
+    uOut |= (uP ? uP : ((uAlternate >> 16) & 0xFF)) << 16;
+    uP = (uPreferred >> 24) & 0xFF;
+    uOut |= (uP ? uP : ((uAlternate >> 24) & 0xFF)) << 24;
+    return uOut;
 }
+
+
+static _INLINE Uint32 _SnesPPUMode5Pack4Coverage(
+    Uint64 uData,
+    Bool bPreferredOdd)
+{
+    Uint32 uPreferred = _SnesPPUMode5Pack4(uData, bPreferredOdd);
+    Uint32 uAlternate = _SnesPPUMode5Pack4(uData, !bPreferredOdd);
+    return _SnesPPUMode5PreferCoverage4(uPreferred, uAlternate);
+}
+
+
+static _INLINE Uint8 _SnesPPUMode5PackMask4Coverage(
+    Uint32 uMask,
+    Bool bPreferredOdd)
+{
+    return (Uint8)(
+        _SnesPPUMode5PackMask4(uMask, bPreferredOdd) |
+        _SnesPPUMode5PackMask4(uMask, !bPreferredOdd)
+    );
+}
+
+
+static _INLINE Uint64 _SnesPPUMode5PackPair(
+    Uint64 uRow0,
+    Uint64 uRow1,
+    Bool bHFlip,
+    Bool bMosaic)
+{
+    Bool bPreferredOdd = (Bool)((!bMosaic) ^ bHFlip);
+    Uint64 uOut =
+        (Uint64)_SnesPPUMode5Pack4Coverage(uRow0, bPreferredOdd) |
+        ((Uint64)_SnesPPUMode5Pack4Coverage(uRow1, bPreferredOdd) << 32);
+
+    if (bHFlip)
+        uOut = SnesPPUChrCacheReverseBytes(uOut);
+    return uOut;
+}
+
 
 
 static _INLINE Uint8 _SnesPPUMode5PackPairMask(
-	Uint32 uMask0,
-	Uint32 uMask1,
-	Bool bHFlip,
-	Bool bMosaic)
+    Uint32 uMask0,
+    Uint32 uMask1,
+    Bool bHFlip,
+    Bool bMosaic)
 {
-	Bool bOdd = (Bool)((!bMosaic) ^ bHFlip);
-	Uint8 uOut =
-		(Uint8)(
-			_SnesPPUMode5PackMask4(uMask0, bOdd) |
-			(_SnesPPUMode5PackMask4(uMask1, bOdd) << 4)
-		);
+    Bool bPreferredOdd = (Bool)((!bMosaic) ^ bHFlip);
+    Uint8 uOut = (Uint8)(
+        _SnesPPUMode5PackMask4Coverage(uMask0, bPreferredOdd) |
+        (_SnesPPUMode5PackMask4Coverage(uMask1, bPreferredOdd) << 4)
+    );
 
-	if (bHFlip)
-		uOut = SnesPPUChrCacheReverseMask(uOut);
-
-	return uOut;
+    if (bHFlip)
+        uOut = SnesPPUChrCacheReverseMask(uOut);
+    return uOut;
 }
+
 
 
 static _INLINE void _SnesPPUMode5GetCHR2Row64(

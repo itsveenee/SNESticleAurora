@@ -32,17 +32,6 @@ Bool g_SnesCompatHongKong97SPCBoot = FALSE;
  * Exact clean normalized/headerless ROMs only. No ROM bytes are modified. */
 Bool g_SnesCompatTopGearFastRom = FALSE;
 
-/* AURORA_ACCELE_BRID_OPENBUS_CRC_V1_20260906_SNROM
- * Temporary exact-ROM compatibility gate for Accele Brid.
- *
- * The real cause is S-CPU MDR/open-bus behavior. Aurora's MDR tracking is
- * currently partial, so using pCpu->uMDR globally would risk regressions.
- * Restrict the historical $60D5 -> $60 workaround to the two known 2 MiB
- * normalized/headerless images instead:
- *   4A736C38 = Accele Brid (Japan), clean
- *   1C4DC36C = Accele Brid (Japan) [T+Eng1.00_AGTP]
- */
-Bool g_SnesCompatAcceleBridOpenBus = FALSE;
 
 /* AURORA_SUNSET_RIDERS_CRC_OBJ128_V2_ROM_20260825
  * Diagnostic-only exact-CRC flag. CRC is from normalized/headerless ROM data.
@@ -70,7 +59,6 @@ void SnesRomResetRuntimeCompatForExternalDevice(void)
     g_SnesCompatZeroInit = FALSE;
     g_SnesCompatHongKong97SPCBoot = FALSE;
     g_SnesCompatTopGearFastRom = FALSE;
-    g_SnesCompatAcceleBridOpenBus = FALSE;
     g_SnesCompatSunsetRidersObj128 = FALSE;
 }
 
@@ -1313,8 +1301,8 @@ Emu::Rom::LoadErrorE SnesRom::LoadRom(CDataIO *pFileIO, Uint8 *pBuffer, Uint32 n
 
 	/* AURORA_SNES_TURBOFILE_V4_20260829
 	 * Exact normalized/headerless CRC, before compatibility patching.
-	 * V1.2.1 reuses this already-required pass for Accele Brid, avoiding a
-	 * second full 2 MiB CRC calculation at ROM load. */
+	 * This normalized runtime-CRC pass remains for CRC-selected accessories;
+	 * open-bus accuracy no longer depends on a title identity. */
 	{
 		const Uint32 uRuntimeCRC =
 			(m_pRomData && m_uRomBytes)
@@ -1322,10 +1310,6 @@ Emu::Rom::LoadErrorE SnesRom::LoadRom(CDataIO *pFileIO, Uint8 *pBuffer, Uint32 n
 
 		SnesTurboFileSelectForCRC(uRuntimeCRC);
 
-		g_SnesCompatAcceleBridOpenBus =
-			(m_uRomBytes == 0x200000u) &&
-			((uRuntimeCRC == 0x4A736C38u) ||
-			 (uRuntimeCRC == 0x1C4DC36Cu));
 	}
 
 	/* AURORA_UPSTREAM_20260827_DSP1_OP28_REVISION_V1

@@ -541,7 +541,6 @@ extern "C" Int32 SNSPCExecute_C(SNSpcT *pCpu);
 /* AURORA_CRC_ZERO_INIT_CORE_V8
  * Set by snrom.cpp from the normalized ROM's exact CRC32. */
 extern Bool g_SnesCompatZeroInit;
-extern Bool g_SnesCompatAcceleBridOpenBus;
 
 
 // --- diagnostico de TIMING (ver sndbglog.h) ---
@@ -1293,7 +1292,7 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::Read4000(SNCpuT *pCpu, Uint32 uAddr)
     if (Snes_bDebugUnhandledIO)
 	    SnesDebugRead(uAddr);
 	#endif
-	return uAddr >> 8;
+	return pCpu->uMDR;
 }
 
 #if SNES_DEBUG
@@ -1505,26 +1504,13 @@ void SNCPU_TRAPFUNC SnesSystem::Write4000(SNCpuT *pCpu, Uint32 uAddr, Uint8 uDat
 Uint8 SNCPU_TRAPFUNC SnesSystem::ReadMem(SNCpuT *pCpu, Uint32 uAddr)
 {
 
-	/* AURORA_ACCELE_BRID_OPENBUS_CRC_V1_20260906_SNES
-	 * Historical workaround for Accele Brid's reserved/open-bus read.
-	 * Do not broaden this to pCpu->uMDR until both the ASM and C interpreter
-	 * maintain the S-CPU MDR on every hardware-relevant bus transfer.
-	 */
-	if (g_SnesCompatAcceleBridOpenBus &&
-	    ((uAddr & 0xFFFFu) == 0x60D5u))
-	{
-		const Uint32 uBank = (uAddr >> 16) & 0xFFu;
-		if (uBank <= 0x3Fu || (uBank >= 0x80u && uBank <= 0xBFu))
-			return 0x60;
-	}
-
 
 //	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
 	#if SNES_DEBUG
     if (Snes_bDebugUnhandledIO)
 	SnesDebugRead(uAddr);
 	#endif
-	return 0;
+	return pCpu->uMDR;
 }
 
 

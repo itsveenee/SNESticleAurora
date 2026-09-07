@@ -39,7 +39,7 @@
 #define SNCPU_bRunning      48(R_pCpu)
 #define SNCPU_uSignal       49(R_pCpu)
 #define SNCPU_uNmiDmaDelay  50(R_pCpu)
-#define SNCPU_uPad1         51(R_pCpu)
+#define SNCPU_uMDR         51(R_pCpu)  // AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907
 
 #define SNCPU_MemIO			52
 
@@ -412,15 +412,17 @@
         nop							;  \
         move	_dest,R_Data
 
-#define SNCPU_FETCH16(_dest)  		   \
-		jal		_SNCPU_Fetch16		;  \
-        nop							;  \
-        move	_dest,R_Data
+#define SNCPU_FETCH16(_dest)                 \
+        jal     _SNCPU_Fetch16          ;   \
+        nop                             ;   \
+        move    _dest,R_Data            ;   \
+        srl     R_Data,R_Data,8
 
-#define SNCPU_FETCH24(_dest)  		   \
-		jal		_SNCPU_Fetch24		;  \
-        nop							;  \
-        move	_dest,R_Data
+#define SNCPU_FETCH24(_dest)                 \
+        jal     _SNCPU_Fetch24          ;   \
+        nop                             ;   \
+        move    _dest,R_Data            ;   \
+        srl     R_Data,R_Data,16
 
 
 #define SNCPU_READ8(_addr,_data)  	   \
@@ -428,30 +430,35 @@
 		move	R_Addr, _addr		;  \
 		move	_data,R_Data		   \
 
-#define SNCPU_READ16(_addr,_data)  	   \
-		jal		_SNCPU_Read16		;  \
-		move	R_Addr, _addr		;  \
-		move	_data,R_Data		   \
+#define SNCPU_READ16(_addr,_data)            \
+        jal     _SNCPU_Read16           ;   \
+        move    R_Addr,_addr            ;   \
+        move    _data,R_Data            ;   \
+        srl     R_Data,R_Data,8
 
-#define SNCPU_READ24(_addr,_data)  	   \
-		jal		_SNCPU_Read24		;  \
-		move	R_Addr, _addr		;  \
-		move	_data,R_Data		   \
+#define SNCPU_READ24(_addr,_data)            \
+        jal     _SNCPU_Read24           ;   \
+        move    R_Addr,_addr            ;   \
+        move    _data,R_Data            ;   \
+        srl     R_Data,R_Data,16
 
-#define SNCPU_READ16_WRAP16(_addr,_data) \
-		jal		_SNCPU_Read16Wrap16	;\
-		move	R_Addr,_addr			;\
-		move	_data,R_Data
+#define SNCPU_READ16_WRAP16(_addr,_data)     \
+        jal     _SNCPU_Read16Wrap16     ;   \
+        move    R_Addr,_addr            ;   \
+        move    _data,R_Data            ;   \
+        srl     R_Data,R_Data,8
 
-#define SNCPU_READ24_WRAP16(_addr,_data) \
-		jal		_SNCPU_Read24Wrap16	;\
-		move	R_Addr,_addr			;\
-		move	_data,R_Data
+#define SNCPU_READ24_WRAP16(_addr,_data)     \
+        jal     _SNCPU_Read24Wrap16     ;   \
+        move    R_Addr,_addr            ;   \
+        move    _data,R_Data            ;   \
+        srl     R_Data,R_Data,16
 
-#define SNCPU_READ16_DP(_addr,_data) \
-		jal		_SNCPU_Read16DP		;\
-		move	R_Addr,_addr			;\
-		move	_data,R_Data
+#define SNCPU_READ16_DP(_addr,_data)         \
+        jal     _SNCPU_Read16DP         ;   \
+        move    R_Addr,_addr            ;   \
+        move    _data,R_Data            ;   \
+        srl     R_Data,R_Data,8
 
 #define SNCPU_READ16_DPX(_addr,_data) SNCPU_READ16_WRAP16(_addr,_data)
 
@@ -721,6 +728,8 @@ _SNCPU_Write8Trap:
 		// save volatile and temporary registers
 		sw		ra,SP_RA1				   
 		sw		R_Data,SP_Data0				   
+        /* AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: trapped write exposes its driven byte. */
+        sb      R_Data,SNCPU_uMDR
         SNCPU_SAVEREGSTATE()
 
 		// call trap handler
@@ -795,6 +804,7 @@ _SNCPU_Write16_Fast:
         sb		R_Data, 0(t0)							// store low byte 
 		subu	R_Cycles, R_Cycles, t2					// consume cycles for memory access
 
+        move    R_Data,t1        // AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: final bus byte
 		jr		ra										
         sb		t1, 1(t0)								// store high byte 
 
@@ -807,6 +817,8 @@ _SNCPU_Write16Trap:
 		// save volatile and temporary registers
 		sw		ra,SP_RA1				   
 		sw		R_Data,SP_Data0				   
+        /* AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: low byte drives first trapped write. */
+        sb      R_Data,SNCPU_uMDR
         SNCPU_SAVEREGSTATE()
 
         sw		t1, SP_SaveTrap
@@ -825,8 +837,10 @@ _SNCPU_Write16Trap:
 		move	a0, R_pCpu
 		addiu	a1, R_Addr, 1
         srl		a2,R_Data,8
-		jalr	t1
         andi	a2,a2, 0xFF
+        sb      a2,SNCPU_uMDR    // AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: high byte
+        jalr	t1
+        nop
 
 		// restore volatile and temporary registers
 		lw		ra,SP_RA1				   
@@ -834,7 +848,8 @@ _SNCPU_Write16Trap:
         SNCPU_LOADREGSTATE()
 
 		jr		ra
-        nop
+        srl     R_Data,R_Data,8    // AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: final MDR
+
 
 
 /* Store a word without allowing the high byte to carry into the next bank.
@@ -923,6 +938,8 @@ _SNCPU_Read8Trap:
 
 		// save volatile and temporary registers
 		sw		ra,SP_RA1				   
+        /* AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: trap sees the previous bus byte. */
+        sb      R_Data,SNCPU_uMDR
         SNCPU_SAVEREGSTATE()
         
 		// call trap handler
@@ -931,6 +948,7 @@ _SNCPU_Read8Trap:
 		move	a1, R_Addr
 
         andi	R_Data, v0, 0xFF
+        sb      R_Data,SNCPU_uMDR    // AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: trap result
 
 		lw		ra,SP_RA1				   
         SNCPU_LOADREGSTATE()
@@ -1010,6 +1028,8 @@ _SNCPU_Read16Trap:
 
 		// save volatile and temporary registers
 		sw		ra,SP_RA1				   
+        /* AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: first byte sees preceding MDR. */
+        sb      R_Data,SNCPU_uMDR
         SNCPU_SAVEREGSTATE()
 
         sw		t1, SP_SaveTrap
@@ -1019,6 +1039,7 @@ _SNCPU_Read16Trap:
 		jalr	t1
 		addiu	a1, R_Addr,0
         sb		v0,SP_Data0
+        sb      v0,SNCPU_uMDR    // AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: byte 0
 
         lw		t1, SP_SaveTrap
         
@@ -1027,6 +1048,7 @@ _SNCPU_Read16Trap:
 		jalr	t1
 		addiu	a1, R_Addr,1
         sb		v0,SP_Data1
+        sb      v0,SNCPU_uMDR    // AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: byte 1
 
 		lw		ra,SP_RA1				   
         lhu		R_Data,SP_Data0						
@@ -1627,6 +1649,7 @@ _SNCPU_SBC16:
 
 #define _SNCPU_DECIMAL_CALL(_helper) \
 		sw		ra,SP_RA0			;\
+        sb      R_Data,SNCPU_uMDR              ;\
 		SNCPU_SAVEREGSTATE()		;\
 		andi	a0,R_fC,1			;\
 		move	a1,t0				;\
@@ -1634,6 +1657,7 @@ _SNCPU_SBC16:
 		move	a2,R_t1			;\
 		move	R_t2,v0			;\
 		SNCPU_LOADREGSTATE()		;\
+        lbu     R_Data,SNCPU_uMDR              ;\
 		lw		ra,SP_RA0
 
 /* Keep the C and PS2 interpreters on one decimal implementation.  Besides
@@ -1702,6 +1726,8 @@ SNCPUExecute_ASM:
         sd		fp,0x48(sp)
 
 		move	R_pCpu, a0
+        /* AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: R_Data is the live MDR cache for the ASM slice. */
+        lbu     R_Data,SNCPU_uMDR
 
 
 //
@@ -1729,14 +1755,14 @@ SNCPUExecute_ASM:
 
 	// fetch opcode
 _SNCPUExecute_Loop:
-        
-		bltz	R_PCCount,_SNCPU_ExecuteFetchUpdate
+        /* AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: test slice budget before the opcode bus read. */
+blez	R_Cycles, _SNCPUExecute_Done
+        addiu	R_PC,R_PC,1
+
+bltz	R_PCCount,_SNCPU_ExecuteFetchUpdate
 		addiu	R_PCCount,R_PCCount,-1
 
-		lbu		R_Data,0(R_PC)
-
-		blez	R_Cycles, _SNCPUExecute_Done
-        addiu	R_PC,R_PC,1
+lbu		R_Data,-1(R_PC)
 
 
 		sll		t0, R_Data, 2							// R_Data = opcode * 4
@@ -1751,8 +1777,7 @@ _SNCPUExecute_Loop:
 
 
 _SNCPU_ExecuteFetchUpdate:
-		blez	R_Cycles, _SNCPUExecute_Done
-        addiu	R_PC,R_PC,1
+        /* AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: budget already checked in _SNCPUExecute_Loop. */
 
 
 		jal		_SNCPU_Fetch8Update				// reads data, pc+=1
@@ -1808,6 +1833,8 @@ _SNCPUExecute_DoneNoRewind:
         jal		_SNCPU_ComposeFlags		// decompose flags
         nop
 	  
+        /* AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: publish live MDR at the slice boundary. */
+        sb      R_Data,SNCPU_uMDR
 		SNCPU_SAVEREGSTATE();
 
 
