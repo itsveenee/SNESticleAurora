@@ -82,6 +82,8 @@ public:
     static void BootRomThunk(void *pOpaque, Int32 eBootType);
     static void JoypThunk(void *pOpaque, Uint8 value);
     static void PixelThunk(void *pOpaque, Uint8 pixel);
+    /* AURORA_SGB_SCANLINE_BATCH_V4_20260907 */
+    static void LineThunk(void *pOpaque, const Uint32 *pPixels, Int32 nLine);
     static void HResetThunk(void *pOpaque);
     static void VResetThunk(void *pOpaque);
     static void SampleThunk(void *pOpaque, Int16 left, Int16 right);

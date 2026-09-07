@@ -2675,10 +2675,17 @@ Bool SNSuperWildCard::ReadEmulation(Uint8 bank, Uint16 addr, Uint8 *pData,
 
     if (pSRAM && nSRAMBytes >= 0x8000)
     {
-        if (!(m_uParallel & 0x02) &&
-            bank == 0x70 && addr >= 0x8000)
+        /* AURORA_SWC_BRAM_LOROM_ALIAS_V1_1_20260907
+         *
+         * One 32-KiB Front B-RAM device.  Preserve the existing high-half
+         * aperture while mirroring the same physical device into the normal
+         * LoROM $70:0000-$7FFF save window.
+         *
+         * A15 therefore does not select another storage device here:
+         * both half-banks use the same 15-bit SRAM offset. */
+        if (!(m_uParallel & 0x02) && bank == 0x70)
         {
-            *pData = pSRAM[(addr - 0x8000) & 0x7FFF];
+            *pData = pSRAM[(Uint32)addr & 0x7FFFu];
             return TRUE;
         }
 
@@ -2752,10 +2759,11 @@ Bool SNSuperWildCard::WriteEmulation(Uint8 bank, Uint16 addr, Uint8 uData,
 
     if (pSRAM && nSRAMBytes >= 0x8000)
     {
-        if (!(m_uParallel & 0x02) &&
-            bank == 0x70 && addr >= 0x8000)
+        /* AURORA_SWC_BRAM_LOROM_ALIAS_V1_1_20260907
+         * Same physical decode as ReadEmulation(). */
+        if (!(m_uParallel & 0x02) && bank == 0x70)
         {
-            pSRAM[(addr - 0x8000) & 0x7FFF] = uData;
+            pSRAM[(Uint32)addr & 0x7FFFu] = uData;
             return TRUE;
         }
 

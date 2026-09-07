@@ -230,18 +230,14 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
         if (s_SafeFrameskipConsecutive >=
             (Uint32)s_SafeFrameskipLevel)
         {
-            s_SafeFrameskipConsecutive = 0;
-
-            if (s_SafeFrameskipSampleCount >= 3u && target > 0)
-            {
-                now = ProfCtrGetCycle();
-                s_SafeFrameskipAim = now + s_SafeFrameskipPeriod;
-            }
-            else
-            {
-                s_SafeFrameskipAim = 0;
-            }
-
+            /* AURORA_SAFE_FRAMESKIP_UNSTICK_V1_20260907
+             * max_skip means the next frame MUST be presented. Drop transient
+             * host timing debt completely instead of rebasing to a timestamp
+             * captured before that recovery frame executes. The learned
+             * VBlank period is intentionally preserved by ResetTiming().
+             * The next eligible host tick will establish a fresh aim after
+             * the forced presentation has actually completed. */
+            _MainLoopSafeFrameskipResetTiming();
             return FALSE;
         }
 
@@ -293,16 +289,22 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
         }
         else
         {
-            /* AURORA_CD_AUDIO_STREAM_V2_FRAMESKIP_REBASE_20260829
+            /* AURORA_SAFE_FRAMESKIP_UNSTICK_V1_20260907
              *
-             * We have already spent max_skip consecutive catch-up frames and
-             * are forcing a presentation now. Do not preserve stale host debt
-             * from an old I/O stall into the next burst: re-anchor to `now`.
-             * Persistent real overload can still trigger a new skip later,
-             * but a one-off CD read spike cannot leave Auto apparently stuck. */
-            s_SafeFrameskipConsecutive = 0;
-            s_SafeFrameskipAim = now;
-            diff = 0;
+             * We have spent max_skip consecutive catch-up frames, so this
+             * frame is a hard presentation boundary. The previous rebase used
+             * `now` BEFORE the recovery frame and then advanced aim again at
+             * the bottom of this function. Any latency in that forced frame
+             * could instantly recreate the old debt and latch Auto into
+             * repeated skip bursts.
+             *
+             * Reset only transient scheduler state. The calibrated VBlank
+             * samples/period stay intact; the next eligible tick seeds aim
+             * from the real post-presentation host time. This is the same
+             * debt-clearing effect that manually toggling Safe Frameskip
+             * Off/On had, but it now happens automatically at max_skip. */
+            _MainLoopSafeFrameskipResetTiming();
+            return FALSE;
         }
     }
     else

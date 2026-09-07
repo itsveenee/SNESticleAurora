@@ -1020,6 +1020,76 @@ static Bool _MainLoopLoadBSXMemoryPackFrom(MainLoopSramDeviceE eDevice)
     return TRUE;
 }
 
+/* AURORA_BSX_MPK_LIFECYCLE_V1_20260907
+ *
+ * A slotted cartridge always has a physical 8M Memory Pack attached while
+ * the game is running. Persistence therefore uses load-or-create semantics:
+ *
+ *   existing exact 1 MiB .mpk -> load it
+ *   no .mpk                  -> immediately create erased 1 MiB backing
+ *
+ * Never overwrite an existing-but-unreadable/wrong-size file here. That is
+ * treated as a storage problem so a damaged user image is not destroyed.
+ *
+ * When ordinary .srm selected a concrete device, the .mpk stays on that same
+ * device. AUTO without ordinary SRAM may create on USB, then fall back to MC.
+ */
+static Bool _MainLoopCreateBSXMemoryPackOn(MainLoopSramDeviceE eDevice)
+{
+    const Char *pRoot = _MainLoopSramRoot(eDevice);
+    const Bool bMemCard =
+        eDevice == MAINLOOP_SRAMDEVICE_MEMCARD ? TRUE : FALSE;
+    Uint8 *pData;
+    Int32 nBytes;
+    Char Path[1024];
+    struct stat Status;
+
+    if (_pSystem != _pSnes || !_pSnes || !_pSnes->HasBSXMemoryPack())
+        return FALSE;
+
+    if (eDevice == MAINLOOP_SRAMDEVICE_USB && !_MainLoopSramUsbReady())
+        return FALSE;
+
+    pData = _pSnes->GetBSXMemoryPackData();
+    nBytes = _pSnes->GetBSXMemoryPackBytes();
+    if (!pData || nBytes != SNES_BSX_MEMORY_PACK_BYTES)
+        return FALSE;
+
+    if (!_MainLoopSramEnsureSystemDirectory(pRoot, bMemCard))
+        return FALSE;
+
+    _MainLoopBSXMemoryPackBuildPath(Path, sizeof(Path), pRoot);
+
+    /* The load path already rejected this file. If something exists at the
+     * target name, preserve it instead of truncating it with fopen("wb"). */
+    if (stat(Path, &Status) == 0)
+    {
+        ConPrint("WARNING: BS-X Memory Pack exists but is not a valid/loadable 1 MiB image: %s\n",
+                 Path);
+        return FALSE;
+    }
+
+    if (!_MainLoopSramWriteFile(Path, pData, (Uint32)nBytes))
+    {
+        ConPrint("BS-X Memory Pack initial create FAILED: %s\n", Path);
+        return FALSE;
+    }
+
+    /* Verify at least the exact physical file size without allocating
+     * another 1 MiB temporary buffer. */
+    if (stat(Path, &Status) != 0 || S_ISDIR(Status.st_mode) ||
+        (Uint32)Status.st_size != (Uint32)nBytes)
+    {
+        ConPrint("BS-X Memory Pack initial create size verify FAILED: %s\n",
+                 Path);
+        return FALSE;
+    }
+
+    ConPrint("BS-X Memory Pack created: %s (%u bytes)\n",
+             Path, (unsigned)nBytes);
+    return TRUE;
+}
+
 /* AURORA_BSXSLOT_MEMORY_PACK_V1_3_COHERENT_BUNDLE_VERIFY_20260906
  * Keep ordinary cartridge SRAM and the slotted Memory Pack on the same save
  * device whenever an SRAM backing was actually selected.  This prevents AUTO
@@ -1029,41 +1099,125 @@ static Bool _MainLoopLoadBSXMemoryPackFrom(MainLoopSramDeviceE eDevice)
 static void _MainLoopLoadBSXMemoryPack(MainLoopSramDeviceE ePreferredDevice)
 {
     Bool bLoaded = FALSE;
+    Bool bCreated = FALSE;
+    MainLoopSramDeviceE eBackingDevice = MAINLOOP_SRAMDEVICE_AUTO;
 
     if (_pSystem != _pSnes || !_pSnes || !_pSnes->HasBSXMemoryPack())
         return;
 
+    /* First choice: keep .mpk coherent with an ordinary .srm backing if
+     * _MainLoopLoadSRAM() already resolved one concrete device. */
     if (ePreferredDevice == MAINLOOP_SRAMDEVICE_USB)
     {
         if (_MainLoopSramUsbReady())
-            bLoaded = _MainLoopLoadBSXMemoryPackFrom(MAINLOOP_SRAMDEVICE_USB);
+        {
+            bLoaded = _MainLoopLoadBSXMemoryPackFrom(
+                MAINLOOP_SRAMDEVICE_USB);
+            if (bLoaded)
+                eBackingDevice = MAINLOOP_SRAMDEVICE_USB;
+            else
+            {
+                bCreated = _MainLoopCreateBSXMemoryPackOn(
+                    MAINLOOP_SRAMDEVICE_USB);
+                if (bCreated)
+                    eBackingDevice = MAINLOOP_SRAMDEVICE_USB;
+            }
+        }
     }
     else if (ePreferredDevice == MAINLOOP_SRAMDEVICE_MEMCARD)
     {
-        bLoaded = _MainLoopLoadBSXMemoryPackFrom(MAINLOOP_SRAMDEVICE_MEMCARD);
+        bLoaded = _MainLoopLoadBSXMemoryPackFrom(
+            MAINLOOP_SRAMDEVICE_MEMCARD);
+        if (bLoaded)
+            eBackingDevice = MAINLOOP_SRAMDEVICE_MEMCARD;
+        else
+        {
+            bCreated = _MainLoopCreateBSXMemoryPackOn(
+                MAINLOOP_SRAMDEVICE_MEMCARD);
+            if (bCreated)
+                eBackingDevice = MAINLOOP_SRAMDEVICE_MEMCARD;
+        }
     }
     else if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_USB)
     {
         if (_MainLoopSramUsbReady())
-            bLoaded = _MainLoopLoadBSXMemoryPackFrom(MAINLOOP_SRAMDEVICE_USB);
+        {
+            bLoaded = _MainLoopLoadBSXMemoryPackFrom(
+                MAINLOOP_SRAMDEVICE_USB);
+            if (bLoaded)
+                eBackingDevice = MAINLOOP_SRAMDEVICE_USB;
+            else
+            {
+                bCreated = _MainLoopCreateBSXMemoryPackOn(
+                    MAINLOOP_SRAMDEVICE_USB);
+                if (bCreated)
+                    eBackingDevice = MAINLOOP_SRAMDEVICE_USB;
+            }
+        }
     }
     else if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_MEMCARD)
     {
-        bLoaded = _MainLoopLoadBSXMemoryPackFrom(MAINLOOP_SRAMDEVICE_MEMCARD);
+        bLoaded = _MainLoopLoadBSXMemoryPackFrom(
+            MAINLOOP_SRAMDEVICE_MEMCARD);
+        if (bLoaded)
+            eBackingDevice = MAINLOOP_SRAMDEVICE_MEMCARD;
+        else
+        {
+            bCreated = _MainLoopCreateBSXMemoryPackOn(
+                MAINLOOP_SRAMDEVICE_MEMCARD);
+            if (bCreated)
+                eBackingDevice = MAINLOOP_SRAMDEVICE_MEMCARD;
+        }
     }
     else
     {
+        /* AUTO with no ordinary SRAM backing:
+         * load USB -> load MC -> create USB -> create MC.
+         *
+         * Loading both locations before creating matters: an existing MC
+         * pack must beat creation of a new blank USB pack. */
         if (_MainLoopSramUsbReady())
-            bLoaded = _MainLoopLoadBSXMemoryPackFrom(MAINLOOP_SRAMDEVICE_USB);
+        {
+            bLoaded = _MainLoopLoadBSXMemoryPackFrom(
+                MAINLOOP_SRAMDEVICE_USB);
+            if (bLoaded)
+                eBackingDevice = MAINLOOP_SRAMDEVICE_USB;
+        }
+
         if (!bLoaded)
-            bLoaded = _MainLoopLoadBSXMemoryPackFrom(MAINLOOP_SRAMDEVICE_MEMCARD);
+        {
+            bLoaded = _MainLoopLoadBSXMemoryPackFrom(
+                MAINLOOP_SRAMDEVICE_MEMCARD);
+            if (bLoaded)
+                eBackingDevice = MAINLOOP_SRAMDEVICE_MEMCARD;
+        }
+
+        if (!bLoaded && _MainLoopSramUsbReady())
+        {
+            bCreated = _MainLoopCreateBSXMemoryPackOn(
+                MAINLOOP_SRAMDEVICE_USB);
+            if (bCreated)
+                eBackingDevice = MAINLOOP_SRAMDEVICE_USB;
+        }
+
+        if (!bLoaded && !bCreated)
+        {
+            bCreated = _MainLoopCreateBSXMemoryPackOn(
+                MAINLOOP_SRAMDEVICE_MEMCARD);
+            if (bCreated)
+                eBackingDevice = MAINLOOP_SRAMDEVICE_MEMCARD;
+        }
     }
 
+    /* Loading/initial creation establishes the persistent baseline. Runtime
+     * ProgramFlashByte()/erase operations will mark dirty again naturally. */
     _pSnes->ClearBSXMemoryPackDirty();
+
     ConPrint("BS-X Memory Pack backing: %s (device=%s)\n",
-             bLoaded ? "loaded" : "blank/erased",
-             ePreferredDevice == MAINLOOP_SRAMDEVICE_USB ? "USB" :
-             ePreferredDevice == MAINLOOP_SRAMDEVICE_MEMCARD ? "MC" : "AUTO");
+             bLoaded ? "loaded" :
+             bCreated ? "created" : "blank in RAM / backing FAILED",
+             eBackingDevice == MAINLOOP_SRAMDEVICE_USB ? "USB" :
+             eBackingDevice == MAINLOOP_SRAMDEVICE_MEMCARD ? "MC" : "NONE");
 }
 
 static Bool _MainLoopVerifyBSXMemoryPackFile(const Char *pPath,

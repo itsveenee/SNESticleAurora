@@ -7,6 +7,11 @@
 
 extern "C" {
 #include "../../third_party/sameboy/Core/gb.h"
+
+/* AURORA_SGB_SCANLINE_BATCH_V4_1_20260907
+ * Staged SameBoy helper: keep GB_gameboy_t internals on the C side.
+ * gbhost.cpp only consumes an opaque row pointer + completed line index. */
+void *AuroraSameBoyGetCompletedSGBScanline(GB_gameboy_t *gb, int *pLine);
 }
 
 extern "C" void AuroraSgbBootTrace(const char *pText);
@@ -164,6 +169,37 @@ void GBHost::PixelThunk(void *pOpaque, Uint8 pixel)
         p->pixelHook(p->hookContext, pixel & 3U);
 }
 
+/* AURORA_SGB_SCANLINE_BATCH_V4_20260907
+ * SameBoy NO_SFC has already produced exactly 160 2-bit LCD pixel values.
+ * Convert the completed scratch row to the existing ICD2 scanline helper.
+ * No pixel is skipped and no GB/SNES clock is changed.
+ */
+void GBHost::LineThunk(void *pOpaque, const Uint32 *pPixels, Int32 nLine)
+{
+    Impl *p = (Impl *)pOpaque;
+    Uint8 shade[SNSGBICD2::LCD_WIDTH];
+    Int32 x;
+
+    if (!p || !pPixels ||
+        nLine < 0 || nLine >= SNSGBICD2::LCD_VISIBLE_LINES)
+        return;
+
+    for (x = 0; x < SNSGBICD2::LCD_WIDTH; ++x)
+        shade[x] = (Uint8)(pPixels[x] & 3U);
+
+    if (p->icd2FastPath)
+    {
+        p->icd2FastPath->PushLCDScanline(nLine, shade);
+        return;
+    }
+
+    if (p->pixelHook)
+    {
+        for (x = 0; x < SNSGBICD2::LCD_WIDTH; ++x)
+            p->pixelHook(p->hookContext, shade[x]);
+    }
+}
+
 void GBHost::HResetThunk(void *pOpaque)
 {
     Impl *p = (Impl *)pOpaque;
@@ -230,7 +266,23 @@ static void AuroraSameBoyPixelCallback(GB_gameboy_t *gb, uint8_t pixel)
 
 static void AuroraSameBoyHResetCallback(GB_gameboy_t *gb)
 {
-    GBHost::HResetThunk(GB_get_user_data(gb));
+    void *pUser = GB_get_user_data(gb);
+    int line = -1;
+    const void *pRow = AuroraSameBoyGetCompletedSGBScanline(gb, &line);
+
+    /* AURORA_SGB_SCANLINE_BATCH_V4_1_20260907
+     * Same semantics as V4, but GB_gameboy_t layout stays private to SameBoy.
+     * One C helper call per completed LCD row replaces all C++ field peeks. */
+    if (pRow && line >= 0 &&
+        line < (int)SNSGBICD2::LCD_VISIBLE_LINES)
+    {
+        GBHost::LineThunk(
+            pUser,
+            (const Uint32 *)pRow,
+            (Int32)line);
+    }
+
+    GBHost::HResetThunk(pUser);
 }
 
 static void AuroraSameBoyVResetCallback(GB_gameboy_t *gb)
@@ -290,7 +342,11 @@ Bool GBHost::LoadROM(const Uint8 *pData, Uint32 nBytes, ModelE eModel)
         return FALSE;
     }
     memset(m_p->screen, 0, sizeof(Uint32) * 160U * 144U);
-    GB_set_pixels_output(&m_p->gb, m_p->screen);
+    /* AURORA_SGB_SCANLINE_BATCH_V4_1_20260907
+     * PS2 toolchain typedefs Uint32 and uint32_t to distinct C++ base types
+     * even though both are 32-bit. The storage is exactly 160*144 32-bit
+     * words, so make the ABI conversion explicit at the SameBoy boundary. */
+    GB_set_pixels_output(&m_p->gb, (uint32_t *)m_p->screen);
 
     GB_load_rom_from_buffer(&m_p->gb, pData, (size_t)nBytes);
 

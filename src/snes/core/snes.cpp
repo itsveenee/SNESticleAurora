@@ -1443,7 +1443,22 @@ void SNCPU_TRAPFUNC SnesSystem::Write4000(SNCpuT *pCpu, Uint32 uAddr, Uint8 uDat
             SNCPUSignalNMI(pCpu, pIO->m_Regs.rdnmi & pIO->m_Regs.nmitimen & 0x80);
 #if SNES_HVIRQ_RESCHEDULE
             if ((uOldNmitimen ^ uData) & 0x30)
-                pSnes->RescheduleLineIRQ(TRUE);
+            {
+                /* AURORA_SNES_IRQ_TOGGLE_PRECISION_V1_20260907
+                 *
+                 * Match mature S-CPU schedulers: changing $4200's H/V IRQ
+                 * mode always recalculates the event, but an already-passed
+                 * compare point may fire immediately only when IRQ is being
+                 * toggled completely OFF<->ON. Switching H<->V or
+                 * H/V<->H/V must not manufacture a stale instant IRQ.
+                 *
+                 * This is global hardware behavior, not a title/CRC hack. */
+                Uint8 uOldIRQMode = uOldNmitimen & 0x30;
+                Uint8 uNewIRQMode = uData & 0x30;
+                Bool bAllowImmediate =
+                    (uOldIRQMode == 0 || uNewIRQMode == 0) ? TRUE : FALSE;
+                pSnes->RescheduleLineIRQ(bAllowImmediate);
+            }
 #endif
             break;
         }
@@ -2501,6 +2516,7 @@ void SnesSystem::ExecuteCPU(Int32 nCycles)
         if (nElapsed > 0)
             m_SA1.Run(nElapsed);
     }
+
     SyncSuperGameBoy();
 }
 
