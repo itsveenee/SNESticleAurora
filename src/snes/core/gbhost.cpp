@@ -10,14 +10,14 @@
 #define HAVE_STDINT_H 1
 #define AURORA_UNDEF_HAVE_STDINT_H 1
 #endif
-#ifndef VIDEO_ABGR1555
-#define VIDEO_ABGR1555 1
-#define AURORA_UNDEF_VIDEO_ABGR1555 1
+#ifndef VIDEO_SGB_SHADE8
+#define VIDEO_SGB_SHADE8 1
+#define AURORA_UNDEF_VIDEO_SGB_SHADE8 1
 #endif
 #include "gambatte.h"
-#ifdef AURORA_UNDEF_VIDEO_ABGR1555
-#undef VIDEO_ABGR1555
-#undef AURORA_UNDEF_VIDEO_ABGR1555
+#ifdef AURORA_UNDEF_VIDEO_SGB_SHADE8
+#undef VIDEO_SGB_SHADE8
+#undef AURORA_UNDEF_VIDEO_SGB_SHADE8
 #endif
 #ifdef AURORA_UNDEF_HAVE_STDINT_H
 #undef HAVE_STDINT_H
@@ -27,11 +27,15 @@
 extern "C" void AuroraSgbBootTrace(const char *pText);
 
 static const Uint32 GBHOST_STATE_MAGIC = 0x424D4147U; /* "GAMB" LE */
-static const Uint32 GBHOST_STATE_VERSION = 4U; /* AURORA_SGB_GAMBATTE_XPOS168_RASTER_V1_2_1_20260907 */
+static const Uint32 GBHOST_STATE_VERSION = 5U; /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907 */
 static const Uint32 AUDIO_FRAMES = 4096U;
-static const Uint32 AUDIO_SCRATCH_FRAMES = 4096U;
+/* AURORA_SGB_GAMBATTE_SHADE8_JOYP_SYNC_PERF_V3_20260908
+ * 24576 GB clocks normally produce 12288 raw stereo frames. The 16K scratch
+ * leaves generous instruction/event headroom while cutting runForClocks()
+ * call frequency by ~6x versus V2's 4096-clock batch. */
+static const Uint32 AUDIO_SCRATCH_FRAMES = 16384U;
 static const Uint32 AUDIO_DECIMATE = 64U; /* raw 1/2 clocks -> FIFO 1/128 */
-static const Uint32 LCD_LINE_CLOCKS = 456U;
+static const Uint32 RUN_BATCH_CLOCKS = 24576U;
 static const Uint32 SGB1_CLOCK_HZ = 4295454U;
 static const Uint32 SGB2_CLOCK_HZ = 4194304U;
 
@@ -59,6 +63,7 @@ struct GBHost::Impl
     Uint32 romBytes;
     Uint32 romCRC;
     Int64 clockCredit;
+    Uint32 pendingClocks; /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907 */
 
     JoypHookT joypHook;
     PixelHookT pixelHook;
@@ -84,7 +89,7 @@ struct GBHost::Impl
 
     Impl()
         : initialized(TRUE), loaded(FALSE), model(MODEL_SGB1),
-          romBytes(0), romCRC(0), clockCredit(0),
+          romBytes(0), romCRC(0), clockCredit(0), pendingClocks(0),
           joypHook(NULL), pixelHook(NULL),
           hresetHook(NULL), vresetHook(NULL), hookContext(NULL),
           icd2FastPath(NULL),
@@ -106,16 +111,6 @@ struct GBHost::Impl
  * avoid reintroducing a generic libretro frontend. */
 static GBHost::Impl *g_AuroraGambatteRasterHost = NULL;
 
-static Uint8 AuroraGambatteDecodeShade(gambatte::video_pixel_t pixel)
-{
-    /* AURORA_SGB_GAMBATTE_DIRECT_SHADE_V1_2_2_20260907
-     *
-     * SGB ICD2 consumes the final DMG shade after BGP/OBP mapping.
-     * Gambatte's DMG base colors are programmed to literal 0,1,2,3,
-     * so the composited framebuffer itself is the required 2-bit signal. */
-    return (Uint8)((Uint16)pixel & 3U);
-}
-
 extern "C" void AuroraGambatteSgbNewLy(unsigned line)
 {
     GBHost::Impl *p = g_AuroraGambatteRasterHost;
@@ -123,13 +118,12 @@ extern "C" void AuroraGambatteSgbNewLy(unsigned line)
     if (!p || !p->loaded || line >= SNSGBICD2::LCD_TOTAL_LINES)
         return;
 
-    /* AURORA_SGB_GAMBATTE_BSNESPLUS_VIDEO_V1_2_4_20260907
-     * bsnes-plus does not feed ICD2 one line at a time. Gambatte keeps a
-     * complete 160x144 framebuffer; when LY enters a new 8-line row, ICD2
-     * publishes the PREVIOUS completed row into its four-slot ring. */
+    /* AURORA_SGB_GAMBATTE_SHADE8_JOYP_SYNC_PERF_V3_20260908
+     * video_pixel_t is one literal final DMG shade byte in this PS2-only
+     * Gambatte build. No RGB16 reinterpretation/conversion is involved. */
     if (p->icd2FastPath)
         p->icd2FastPath->GambatteNewLy(
-            line, (const Uint16 *)p->screen);
+            line, (const Uint8 *)p->screen);
 }
 
 GBHost::GBHost() : m_p(NULL) {}
@@ -211,29 +205,74 @@ static void AuroraGambattePushAudio(GBHost::Impl *p, Int16 left, Int16 right)
 
 static void AuroraGambatteConsumeAudio(GBHost::Impl *p, Uint32 nRawFrames)
 {
+    /* AURORA_SGB_GAMBATTE_SHADE8_JOYP_SYNC_PERF_V3_20260908
+     * Exact same 64-sample box filter as before, but operate on complete
+     * groups. V2 updated member accumulators and tested the threshold for
+     * every ~2.1 MHz raw sample. */
+    const gambatte::uint_least32_t *src = p->audioScratch;
+    Uint32 leftFrames = nRawFrames;
+    Uint32 count = p->audioDecimCount;
+    Int32 sumLeft = p->audioDecimLeft;
+    Int32 sumRight = p->audioDecimRight;
     Uint32 i;
 
-    for (i = 0; i < nRawFrames; ++i)
+    if (count && leftFrames)
     {
-        Uint32 packed = (Uint32)p->audioScratch[i];
-        Int16 left = (Int16)(packed & 0xffffU);
-        Int16 right = (Int16)((packed >> 16) & 0xffffU);
+        Uint32 take = AUDIO_DECIMATE - count;
+        if (take > leftFrames) take = leftFrames;
 
-        p->audioDecimLeft += (Int32)left;
-        p->audioDecimRight += (Int32)right;
-        ++p->audioDecimCount;
+        for (i = 0; i < take; ++i)
+        {
+            Uint32 packed = (Uint32)*src++;
+            sumLeft += (Int32)(Int16)(packed & 0xffffU);
+            sumRight += (Int32)(Int16)((packed >> 16) & 0xffffU);
+        }
 
-        if (p->audioDecimCount >= AUDIO_DECIMATE)
+        count += take;
+        leftFrames -= take;
+        if (count == AUDIO_DECIMATE)
         {
             AuroraGambattePushAudio(
                 p,
-                (Int16)(p->audioDecimLeft / (Int32)AUDIO_DECIMATE),
-                (Int16)(p->audioDecimRight / (Int32)AUDIO_DECIMATE));
-            p->audioDecimCount = 0;
-            p->audioDecimLeft = 0;
-            p->audioDecimRight = 0;
+                (Int16)(sumLeft / (Int32)AUDIO_DECIMATE),
+                (Int16)(sumRight / (Int32)AUDIO_DECIMATE));
+            count = 0;
+            sumLeft = 0;
+            sumRight = 0;
         }
     }
+
+    while (leftFrames >= AUDIO_DECIMATE)
+    {
+        Int32 blockLeft = 0;
+        Int32 blockRight = 0;
+
+        for (i = 0; i < AUDIO_DECIMATE; ++i)
+        {
+            Uint32 packed = (Uint32)src[i];
+            blockLeft += (Int32)(Int16)(packed & 0xffffU);
+            blockRight += (Int32)(Int16)((packed >> 16) & 0xffffU);
+        }
+
+        AuroraGambattePushAudio(
+            p,
+            (Int16)(blockLeft / (Int32)AUDIO_DECIMATE),
+            (Int16)(blockRight / (Int32)AUDIO_DECIMATE));
+        src += AUDIO_DECIMATE;
+        leftFrames -= AUDIO_DECIMATE;
+    }
+
+    while (leftFrames--)
+    {
+        Uint32 packed = (Uint32)*src++;
+        sumLeft += (Int32)(Int16)(packed & 0xffffU);
+        sumRight += (Int32)(Int16)((packed >> 16) & 0xffffU);
+        ++count;
+    }
+
+    p->audioDecimCount = count;
+    p->audioDecimLeft = sumLeft;
+    p->audioDecimRight = sumRight;
 }
 
 
@@ -256,6 +295,7 @@ Bool GBHost::LoadROM(const Uint8 *pData, Uint32 nBytes, ModelE eModel)
     /* Aurora HLE supplies the SGB header handshake; Gambatte starts post-boot. */
     m_p->gb.setBootloaderGetter(NULL);
     m_p->gb.setSgbJoypCallback(&GBHost::GambatteJoypCallback, m_p);
+    m_p->gb.setScanlineCallback(&AuroraGambatteSgbNewLy); /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907 */
 
     if (m_p->gb.load(
             pData, (unsigned)nBytes, gambatte::GB::FORCE_DMG) != 0)
@@ -263,6 +303,11 @@ Bool GBHost::LoadROM(const Uint8 *pData, Uint32 nBytes, ModelE eModel)
         m_p->loaded = FALSE;
         return FALSE;
     }
+
+    /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907
+     * HLE of the SGB bootstrap must leave the same accumulator value as the
+     * real SGB1/SGB2 bootstrap before cartridge execution begins. */
+    m_p->gb.setSgbPostBootState(m_p->model == MODEL_SGB2);
 
     /* AURORA_SGB_GAMBATTE_VIDEO_PERF_FIX_V1_1_3_20260907
      * Attach once after load/full_init. Never reset the active fbline_ on every
@@ -278,6 +323,7 @@ Bool GBHost::LoadROM(const Uint8 *pData, Uint32 nBytes, ModelE eModel)
     m_p->romBytes = nBytes;
     m_p->romCRC = AuroraGambatteCRC32(pData, nBytes);
     m_p->clockCredit = 0;
+    m_p->pendingClocks = 0; /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907 */
     m_p->lcdClock = 0;
     m_p->lcdLine = 0;
     m_p->audioRead = m_p->audioWrite = m_p->audioCount = 0;
@@ -307,6 +353,7 @@ void GBHost::UnloadROM()
     m_p->romBytes = 0;
     m_p->romCRC = 0;
     m_p->clockCredit = 0;
+    m_p->pendingClocks = 0; /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907 */
     m_p->lcdClock = 0;
     m_p->lcdLine = 0;
     ClearAudio();
@@ -319,9 +366,12 @@ void GBHost::Reset(ModelE eModel)
 
     m_p->model = (eModel == MODEL_SGB2) ? MODEL_SGB2 : MODEL_SGB1;
     m_p->gb.reset();
+    m_p->gb.setSgbPostBootState(m_p->model == MODEL_SGB2);
+    m_p->gb.setScanlineCallback(&AuroraGambatteSgbNewLy);
     m_p->gb.setSgbVideoBuffer(m_p->screen, SNSGBICD2::LCD_WIDTH);
 
     m_p->clockCredit = 0;
+    m_p->pendingClocks = 0; /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907 */
     m_p->lcdClock = 0;
     m_p->lcdLine = 0;
     ClearAudio();
@@ -421,48 +471,50 @@ void GBHost::ClearSavedataDirty()
         m_p->gb.clearSavedataDirty();
 }
 
-Uint32 GBHost::RunClocks(Uint32 nTargetClocks)
+/* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907
+ * Execute only clocks that the SFC has already granted.
+ *
+ * V1.1.3 forced every tiny grant up to 456 clocks and carried the overshoot as
+ * credit. That reduced call overhead, but LY callbacks and ICD2 ring writes
+ * became externally visible up to one GB scanline BEFORE SFC time reached
+ * them. The new scheduler batches in the opposite direction: time may remain
+ * pending internally, but it never runs ahead. Any SGB MMIO/audio observation
+ * calls FlushClocks() first.
+ */
+static Uint32 AuroraGambatteDrainPending(GBHost::Impl *p)
 {
     Uint64 target, credit, need, advanced = 0;
     Uint32 guard = 0;
 
-    if (!m_p || !m_p->loaded || !nTargetClocks)
+    if (!p || !p->loaded || !p->pendingClocks)
         return 0;
 
-    target = nTargetClocks;
-    credit = m_p->clockCredit > 0 ? (Uint64)m_p->clockCredit : 0;
+    target = (Uint64)p->pendingClocks;
+    p->pendingClocks = 0;
 
+    credit = p->clockCredit > 0 ? (Uint64)p->clockCredit : 0;
     if (credit >= target)
     {
-        m_p->clockCredit = (Int64)(credit - target);
-        return nTargetClocks;
+        p->clockCredit = (Int64)(credit - target);
+        return (Uint32)target;
     }
 
     need = target - credit;
-    m_p->clockCredit = 0;
+    p->clockCredit = 0;
 
     while (advanced < need && guard++ < 0x10000U)
     {
         Uint64 left = need - advanced;
         unsigned long request =
-            left > 4096ULL ? 4096UL : (unsigned long)left;
-
-        /* AURORA_SGB_GAMBATTE_VIDEO_PERF_FIX_V1_1_3_20260907
-         * Gambatte's normal API is designed for much larger chunks than
-         * Aurora's ~52-clock grant. One GB line is a conservative batch:
-         * large enough to cut call overhead ~9x, bounded to ~106 us lead. */
-        if (request < LCD_LINE_CLOCKS)
-            request = LCD_LINE_CLOCKS;
-
+            left > (Uint64)RUN_BATCH_CLOCKS
+                ? (unsigned long)RUN_BATCH_CLOCKS
+                : (unsigned long)left;
         unsigned samples = 0;
         unsigned long step;
 
-        /* V1.1: DO NOT clear audioScratch here. Gambatte setSoundBuffer()
-           resets its write position and fillSoundBuffer() returns the exact
-           initialized count. The V1 memset would clear 16 KiB per grant. */
-        step = m_p->gb.runForClocks(
-            m_p->screen, SNSGBICD2::LCD_WIDTH,
-            m_p->audioScratch, AUDIO_SCRATCH_FRAMES,
+        step = p->gb.runForClocks(
+            p->screen, SNSGBICD2::LCD_WIDTH,
+            p->audioScratch, AUDIO_SCRATCH_FRAMES,
             request, samples);
 
         if (!step)
@@ -470,20 +522,40 @@ Uint32 GBHost::RunClocks(Uint32 nTargetClocks)
 
         if (samples > AUDIO_SCRATCH_FRAMES)
             samples = AUDIO_SCRATCH_FRAMES;
-
-        AuroraGambatteConsumeAudio(m_p, (Uint32)samples);
-        /* AURORA_SGB_GAMBATTE_XPOS168_RASTER_V1_2_1_20260907
-         * Video/line phase is emitted inside Gambatte at real LY_COUNT. */
+        AuroraGambatteConsumeAudio(p, (Uint32)samples);
         advanced += (Uint64)step;
     }
 
     if (credit + advanced >= target)
     {
-        m_p->clockCredit = (Int64)(credit + advanced - target);
-        return nTargetClocks;
+        p->clockCredit = (Int64)(credit + advanced - target);
+        return (Uint32)target;
     }
 
+    p->pendingClocks = (Uint32)(target - (credit + advanced));
     return (Uint32)(credit + advanced);
+}
+
+Uint32 GBHost::RunClocks(Uint32 nTargetClocks)
+{
+    if (!m_p || !m_p->loaded || !nTargetClocks)
+        return 0;
+
+    if (m_p->pendingClocks > 0xffffffffU - nTargetClocks)
+        (void)AuroraGambatteDrainPending(m_p);
+
+    m_p->pendingClocks += nTargetClocks;
+
+    if (m_p->pendingClocks >= RUN_BATCH_CLOCKS)
+        (void)AuroraGambatteDrainPending(m_p);
+
+    return nTargetClocks;
+}
+
+void GBHost::FlushClocks()
+{
+    if (m_p && m_p->loaded)
+        (void)AuroraGambatteDrainPending(m_p);
 }
 
 Uint32 GBHost::DebugPreTickState() const { return 0; }
@@ -585,8 +657,8 @@ Bool GBHost::SaveState(StateT *pState) const
     pState->Model = (Uint32)m_p->model;
     pState->Reserved = (Uint32)n;
     pState->ClockCredit = m_p->clockCredit;
-    pState->LCDClock = 0; /* V1.2: retired synthetic raster fields */
-    pState->LCDLine = 0;
+    pState->PendingClocks = m_p->pendingClocks;
+    pState->Reserved2 = 0; /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907 */
     m_p->gb.saveState(pState->Serialized);
     return TRUE;
 }
@@ -608,8 +680,10 @@ Bool GBHost::RestoreState(const StateT *pState)
 
     m_p->model =
         pState->Model == MODEL_SGB2 ? MODEL_SGB2 : MODEL_SGB1;
+    m_p->gb.setScanlineCallback(&AuroraGambatteSgbNewLy);
     m_p->gb.setSgbVideoBuffer(m_p->screen, SNSGBICD2::LCD_WIDTH);
     m_p->clockCredit = pState->ClockCredit;
+    m_p->pendingClocks = pState->PendingClocks;
     m_p->lcdClock = 0;
     m_p->lcdLine = 0;
     g_AuroraGambatteRasterHost = m_p;

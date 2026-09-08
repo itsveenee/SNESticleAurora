@@ -57,8 +57,8 @@ Bool SNSuperGameBoy::AttachGame(const Uint8 *pData, Uint32 nBytes, ModelE eModel
     Detach();
     AuroraSgbBootTrace("SGB 4B: detached");
 
-    if (!pData || nBytes < 0x150U)
-        return FALSE;
+    if (!pData || nBytes < (0x104U + BOOT_HEADER_BYTES))
+        return FALSE; /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907 */
 
     g_uAuroraSgbRuntimeResetCount = 0;
     {
@@ -150,7 +150,7 @@ void SNSuperGameBoy::SubmitBootPacket()
     base = (Uint32)m_uBootPacketIndex * BOOT_PACKET_DATA_BYTES;
     for (i = 0; i < BOOT_PACKET_DATA_BYTES; ++i)
     {
-        Uint8 v = (base + i < BOOT_HEADER_BYTES) ? m_uBootHeader[base + i] : (Uint8)0;
+        Uint8 v = m_uBootHeader[base + i]; /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907 */
         packet[2U + i] = v;
         checksum = (Uint8)(checksum + v);
     }
@@ -208,7 +208,6 @@ void SNSuperGameBoy::BeginBootHandshake()
     g_uAuroraSgbFinalWaitTrace = 0;
     g_uAuroraSgbFirstRunTrace = 0;
     g_uAuroraSgbClockBridgeTrace = 0;
-    g_bAuroraSgbFinalWaitYielded = FALSE;
     g_bAuroraSgbRuntimeReleased = FALSE;
     g_bAuroraSgbPreTickProbeHeld = FALSE;
     g_bAuroraSgbPreTickUnsafeHold = FALSE;
@@ -328,6 +327,12 @@ void SNSuperGameBoy::AdvanceMasterClocks(Uint32 nClocks, Uint32 uSnesMasterHz)
         (void)m_GB.RunClocks(nGB);
 }
 
+void SNSuperGameBoy::FlushClocks()
+{
+    if (m_bActive)
+        m_GB.FlushClocks();
+} /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907 */
+
 /* AURORA_SGB_AUDIO_V0_5_20260904
  * Gambatte's GB PSG FIFO is sampled once per 32 logical GB clocks. Convert that
  * exact rational clock relationship to the SNES mixer's output domain with
@@ -344,6 +349,8 @@ void SNSuperGameBoy::MixAudio(Int16 *pLeft, Int16 *pRight, Int32 nSamples, Uint3
 
     if (!m_bActive || !pLeft || nSamples <= 0 || !uOutputHz || m_bBootHandshake)
         return;
+
+    m_GB.FlushClocks(); /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907 */
 
     sourceHz = m_GB.GetClockHz();
     if (!sourceHz)

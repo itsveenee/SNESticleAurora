@@ -33,8 +33,8 @@ public:
         Uint32 Model;
         Uint32 Reserved;       /* actual Gambatte state bytes */
         Int64 ClockCredit;     /* instruction-boundary overshoot */
-        Uint32 LCDClock;       /* 0..455 */
-        Int32 LCDLine;         /* 0..153 */
+        Uint32 PendingClocks;  /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907: deferred, not yet executed */
+        Int32 Reserved2;
         Uint8 Serialized[SERIALIZED_BYTES];
     };
 
@@ -57,6 +57,7 @@ public:
     void ClearSavedataDirty();
 
     Uint32 RunClocks(Uint32 nTargetClocks);
+    void FlushClocks(); /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907 */
 
     Uint32 DebugPreTickState() const;
     const char *DebugPreEventName() const;

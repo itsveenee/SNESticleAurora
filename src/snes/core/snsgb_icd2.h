@@ -27,7 +27,7 @@ public:
         Uint32 control, packetReady, readBank, readAddress, writeBank;
         Int32 vcounter;
         Uint32 hcounter;
-        Uint32 joypID, previousP15, pulseLock, strobeLock, packetLock;
+        Uint32 joypID, joyp15Lock, joyp14Lock, pulseLock, strobeLock, packetLock; /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907 */
         Uint32 packetOffset, bitData, bitOffset, resetRequested;
         Uint8 controller[4];
         Uint8 packet[PACKET_BYTES];
@@ -100,7 +100,7 @@ public:
     /* AURORA_SGB_GAMBATTE_BSNESPLUS_VIDEO_V1_2_4_20260907
      * Called with NEW LY after Gambatte advances its LY counter.
      * pFrame is the persistent 160x144 literal-shade framebuffer. */
-    void GambatteNewLy(Uint32 uNewLy, const Uint16 *pFrame);
+    void GambatteNewLy(Uint32 uNewLy, const Uint8 *pFrame); /* AURORA_SGB_GAMBATTE_SHADE8_JOYP_SYNC_PERF_V3_20260908 */
 
     /* Legacy helpers retained for old source/state compatibility. */
     void PushLCDScanline(Int32 nLine, const Uint8 *pShade2Bit);
@@ -125,7 +125,7 @@ public:
 
 private:
     static const Uint32 STATE_MAGIC = 0x32424753U; /* "SGB2" LE */
-    static const Uint32 STATE_VERSION = 5U; /* AURORA_SGB_BSNES_PACKET_FIFO_V1_2_6_20260907 */
+    static const Uint32 STATE_VERSION = 6U; /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907 */
     static const Uint32 SGB2_OSC_HZ = 20971520U;
 
     ModelE m_eModel;
@@ -139,7 +139,7 @@ private:
     Uint16 m_uHCounter;
 
     Uint8 m_uJoypID;
-    Bool m_bPreviousP15, m_bPulseLock, m_bStrobeLock, m_bPacketLock;
+    Bool m_bJoyp15Lock, m_bJoyp14Lock, m_bPulseLock, m_bStrobeLock, m_bPacketLock; /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907 */
     Uint8 m_uPacketOffset, m_uBitData, m_uBitOffset;
     Bool m_bResetRequested;
 

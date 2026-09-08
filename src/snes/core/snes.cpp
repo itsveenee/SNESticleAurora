@@ -3429,7 +3429,7 @@ void SnesSystem::DetachSuperGameBoyGame()
 extern "C" void AuroraSgbBootTrace(const char *pText);
 extern "C" Bool AuroraSgbDebugFBConsumed(void);
 
-void SnesSystem::SyncSuperGameBoy()
+void SnesSystem::SyncSuperGameBoy(Bool bForce)
 {
     static Uint8 s_uAuroraPostFBSyncTrace = 0;
     Bool bPostFB;
@@ -3448,44 +3448,41 @@ void SnesSystem::SyncSuperGameBoy()
     now = (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_TOTAL);
     delta = now - m_uSGBSyncClock;
 
-    if (!delta) {
-        if (bPostFB && !(s_uAuroraPostFBSyncTrace & 0x02U)) {
-            s_uAuroraPostFBSyncTrace |= 0x02U;
-            AuroraSgbBootTrace("SGB H78: SNES sync delta zero");
+    if (delta)
+    {
+        if (bPostFB && !(s_uAuroraPostFBSyncTrace & 0x04U)) {
+            s_uAuroraPostFBSyncTrace |= 0x04U;
+            AuroraSgbBootTrace("SGB H79: SNES sync delta nonzero");
         }
-        return;
+
+        hz = (m_pRom && m_pRom->m_eVideoType == SNROM_VIDEO_PAL)
+            ? 21281370U : 21477272U;
+        m_SGB.AdvanceMasterClocks(delta, hz);
+        m_uSGBSyncClock = now;
+    }
+    else if (bPostFB && !(s_uAuroraPostFBSyncTrace & 0x02U))
+    {
+        s_uAuroraPostFBSyncTrace |= 0x02U;
+        AuroraSgbBootTrace("SGB H78: SNES sync delta zero");
     }
 
-    if (bPostFB && !(s_uAuroraPostFBSyncTrace & 0x04U)) {
-        s_uAuroraPostFBSyncTrace |= 0x04U;
-        AuroraSgbBootTrace("SGB H79: SNES sync delta nonzero");
-    }
-
-    hz = (m_pRom && m_pRom->m_eVideoType == SNROM_VIDEO_PAL) ? 21281370U : 21477272U;
-    m_SGB.AdvanceMasterClocks(delta, hz);
-    m_uSGBSyncClock = now;
+    /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907
+     * Normal CPU slices batch GB time; externally visible SGB MMIO flushes
+     * exactly to the current SFC timestamp. */
+    if (bForce)
+        m_SGB.FlushClocks();
 }
 
-/* AURORA_SGB_CORRECTNESS_V1_20260907
- * Exactly one SGB catch-up per MMIO access. $7000-$700f is special: consume
- * the ICD2 packet byte first, then advance the Game Boy backend to the current S-CPU time.
- * All other SGB MMIO remains pre-synchronized. */
+/* AURORA_SGB_GAMBATTE_SHADE8_JOYP_SYNC_PERF_V3_20260908
+ * bsnes coprocessor contract: the GB/ICD2 is synchronized to the current
+ * S-CPU timestamp BEFORE every externally visible SGB read. No $7000
+ * consume-first exception remains. */
 Uint8 SNCPU_TRAPFUNC SnesSystem::ReadSGB(SNCpuT *pCpu, Uint32 uAddr)
 {
     SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
-    Uint32 d;
-
     if (!pSnes) return pCpu->uMDR;
 
-    d = uAddr & 0x40f80fU;
-    if (d >= 0x7000U && d <= 0x700fU)
-    {
-        Uint8 value = pSnes->m_SGB.Read(uAddr, pCpu->uMDR);
-        pSnes->SyncSuperGameBoy();
-        return value;
-    }
-
-    pSnes->SyncSuperGameBoy();
+    pSnes->SyncSuperGameBoy(TRUE);
     return pSnes->m_SGB.Read(uAddr, pCpu->uMDR);
 }
 
@@ -3496,7 +3493,7 @@ void SNCPU_TRAPFUNC SnesSystem::WriteSGB(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData
     if (!pSnes) return;
 
     /* Writes observe the GB/ICD2 at the current S-CPU timestamp, once. */
-    pSnes->SyncSuperGameBoy();
+    pSnes->SyncSuperGameBoy(TRUE); /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907 */
     pSnes->m_SGB.Write(uAddr, uData);
 }
 

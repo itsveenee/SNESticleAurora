@@ -341,7 +341,7 @@ private:
     static Uint8 SNCPU_TRAPFUNC ReadSGB(SNCpuT *pCpu, Uint32 uAddr);
     static void SNCPU_TRAPFUNC WriteSGB(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData);
     void MapSuperGameBoy();
-    void SyncSuperGameBoy();
+    void SyncSuperGameBoy(Bool bForce = FALSE); /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907 */
     /* AURORA_BSXSLOT_MEMORY_PACK_V1_20260906_SNES_H */
     static Uint8 SNCPU_TRAPFUNC ReadBSXSlot(SNCpuT *pCpu, Uint32 uAddr);
     static void SNCPU_TRAPFUNC WriteBSXSlot(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData);

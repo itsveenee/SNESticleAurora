@@ -101,11 +101,12 @@ FCEUMM_FDS_CORE_DEPS := $(FCEUMM_FDS_DIR)/src/fceu.c $(FCEUMM_FDS_DIR)/src/fds.c
 
 # AURORA_SGB_GBHOST_V0_3_CONFIG
 # AURORA_SGB_GAMBATTE_BACKEND_V1_1_20260907
-# Gambatte source remains clean/pinned. SGB-only hooks are applied to a
-# build-tree copy, matching Aurora's staged-backend approach.
+# AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907
+# SGB hooks live in the pinned Gambatte fork. The build-tree copy is only a
+# cleanliness boundary so object/archive products never dirty the submodule.
 GAMBATTE_DIR ?= $(CURDIR)/src/third_party/gambatte
 GAMBATTE_STAGE_DIR ?= $(CURDIR)/build/gambatte-src
-GAMBATTE_STAGE_STAMP := $(GAMBATTE_STAGE_DIR)/.aurora-gambatte-stage-v1_1
+GAMBATTE_STAGE_STAMP := $(GAMBATTE_STAGE_DIR)/.aurora-gambatte-stage-v3 # AURORA_SGB_GAMBATTE_SHADE8_JOYP_SYNC_PERF_V3_20260908
 GAMBATTE_LIB ?= $(GAMBATTE_STAGE_DIR)/gambatte_libretro_ps2.a
 GAMBATTE_PREPARE_TOOL := $(CURDIR)/tools/prepare_gambatte_sgb_sources.py
 GAMBATTE_PYTHON ?= python3

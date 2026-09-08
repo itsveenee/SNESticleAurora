@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Aurora SGB Gambatte staged-source preparer.
-# Copies the pinned submodule to build/ and patches only the build-tree copy.
+# AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907:
+# the pinned Gambatte fork itself is authoritative; staging only keeps build
+# products out of the submodule working tree.
 
 from pathlib import Path
 import argparse
@@ -9,8 +11,8 @@ import shutil
 import subprocess
 import sys
 
-STAGE_MARK = 'AURORA_SGB_GAMBATTE_STAGE_V1_2_4_20260907'
-STAMP_NAME = '.aurora-gambatte-stage-v1_1'
+STAGE_MARK = 'AURORA_SGB_GAMBATTE_STAGE_V3_SHADE8_20260908'
+STAMP_NAME = '.aurora-gambatte-stage-v3'
 
 
 def die(msg):
@@ -575,9 +577,11 @@ def prepare_stage(source, stage):
         ignore=shutil.ignore_patterns(
             ".git", "*.o", "*.a", "*.so", "*.dll", "*.dylib"))
 
-    patch_staged_gambatte(stage)
+    # AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907
+    # SGB extensions now live in itsveenee/gambatte-libretro itself.
+    # Do not mutate the copied source a second time.
     stamp.write_text(signature, encoding="utf-8")
-    print("[ Gambatte stage ] patched:", STAGE_MARK)
+    print("[ Gambatte stage ] direct fork staged:", STAGE_MARK)
 
 def main():
     ap = argparse.ArgumentParser()

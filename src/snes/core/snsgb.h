@@ -49,6 +49,7 @@ public:
     Uint8 Read(Uint32 uAddr, Uint8 uOpenBus);
     void Write(Uint32 uAddr, Uint8 uData);
     void AdvanceMasterClocks(Uint32 nClocks, Uint32 uSnesMasterHz);
+    void FlushClocks(); /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907 */
     /* Mix cartridge GB PSG into the SNES PCM domain before host resampling. */
     void MixAudio(Int16 *pLeft, Int16 *pRight, Int32 nSamples, Uint32 uOutputHz);
 
@@ -69,9 +70,9 @@ private:
     static const Uint32 STATE_MAGIC = 0x35424753U; /* SGB5 */
     /* AURORA_SGB_GAMBATTE_BACKEND_V1_1_20260907:
        backend/state payload changed; reject old Gambatte SGB states cleanly. */
-    static const Uint32 STATE_VERSION = 6U; /* AURORA_SGB_BSNES_PACKET_FIFO_V1_2_6_20260907 */
+    static const Uint32 STATE_VERSION = 7U; /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907 */
     enum {
-        BOOT_HEADER_BYTES = 0x4c, /* GB $0104-$014f */
+        BOOT_HEADER_BYTES = 84, /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907: 6 x 14 bytes, GB $0104-$0157 */
         BOOT_PACKET_COUNT = 6,
         BOOT_PACKET_DATA_BYTES = 14,
         BOOT_LCD_LINE_CLOCKS = 456,

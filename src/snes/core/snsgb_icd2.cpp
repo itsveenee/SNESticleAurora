@@ -34,8 +34,9 @@ void SNSGBICD2::Reset(ModelE eModel)
     m_nVCounter = 0;
     m_uHCounter = 0;
 
-    m_uJoypID = 3;
-    m_bPreviousP15 = FALSE;
+    m_uJoypID = 0;
+    m_bJoyp15Lock = FALSE;
+    m_bJoyp14Lock = FALSE; /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907 */
     m_bPulseLock = TRUE;
     m_bStrobeLock = FALSE;
     m_bPacketLock = FALSE;
@@ -254,13 +255,21 @@ Uint8 SNSGBICD2::JoypWrite(Bool p14, Bool p15)
     p14 = p14 ? TRUE : FALSE;
     p15 = p15 ? TRUE : FALSE;
 
-    if (p15 && !m_bPreviousP15) {
-        m_uJoypID++;
-        m_uJoypID &= ControllerMask();
+    /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907
+     * Later bsnes-plus joypad-ID lock sequence. */
+    if (p15 && p14) {
+        if (!m_bJoyp14Lock) {
+            m_bJoyp14Lock = TRUE;
+            m_uJoypID = (Uint8)((m_uJoypID + 1U) & ControllerMask());
+        }
     }
-    m_bPreviousP15 = p15;
-    /* Controller selection changes on the P15 edge before this transfer
-       input nibble is sampled. */
+
+    if (!p15) {
+        if (m_bJoyp15Lock)
+            m_bJoyp14Lock = m_bJoyp14Lock ? FALSE : TRUE;
+    }
+    m_bJoyp15Lock = p15;
+
     input = JoypInput(p14, p15);
 
     if (!p14 && !p15) {
@@ -329,22 +338,39 @@ void SNSGBICD2::SubmitPacket(const Uint8 *pPacket)
  * PPUWrite/PPUHReset/PPUVReset moved inline to snsgb_icd2.h. */
 
 /* AURORA_SGB_GAMBATTE_BSNESPLUS_VIDEO_V1_2_4_20260907 */
-void SNSGBICD2::GambatteNewLy(Uint32 uNewLy, const Uint16 *pFrame)
+/* AURORA_SGB_GAMBATTE_SHADE8_JOYP_SYNC_PERF_V3_20260908 */
+static inline void AuroraSgbPack8Shade(const Uint8 *s, Uint8 *p0, Uint8 *p1)
 {
-    Uint32 newRow, oldRow, y, x, tile;
+    /* Eight literal 0..3 shades -> Game Boy tile bitplanes. The old nested
+       x-loop tested two branches per pixel. This fixed expression is both
+       exact and much friendlier to the R5900 compiler. */
+    *p0 = (Uint8)(
+        ((s[0] & 1U) << 7) | ((s[1] & 1U) << 6) |
+        ((s[2] & 1U) << 5) | ((s[3] & 1U) << 4) |
+        ((s[4] & 1U) << 3) | ((s[5] & 1U) << 2) |
+        ((s[6] & 1U) << 1) |  (s[7] & 1U));
+    *p1 = (Uint8)(
+        (((s[0] >> 1) & 1U) << 7) | (((s[1] >> 1) & 1U) << 6) |
+        (((s[2] >> 1) & 1U) << 5) | (((s[3] >> 1) & 1U) << 4) |
+        (((s[4] >> 1) & 1U) << 3) | (((s[5] >> 1) & 1U) << 2) |
+        (((s[6] >> 1) & 1U) << 1) |  ((s[7] >> 1) & 1U));
+}
+
+void SNSGBICD2::GambatteNewLy(Uint32 uNewLy, const Uint8 *pFrame)
+{
+    Uint32 newRow, oldRow, y, tile;
     Uint8 *pDest;
 
     if (!pFrame || uNewLy >= LCD_TOTAL_LINES)
         return;
 
-    /* bsnes-plus only commits on visible tile-row transitions.
-       VBlank keeps vram_row at 17 until next frame enters LY 0. */
+    /* Same bsnes-plus phase as V1.2.4: row 17 is committed when the next
+       frame enters LY 0; VBlank itself leaves vram_row at 17. */
     if (uNewLy >= LCD_VISIBLE_LINES)
         return;
 
     newRow = uNewLy >> 3;
     oldRow = (Uint32)m_nVCounter;
-
     if (newRow == oldRow)
         return;
 
@@ -354,21 +380,11 @@ void SNSGBICD2::GambatteNewLy(Uint32 uNewLy, const Uint16 *pFrame)
     pDest = m_uOutput[m_uWriteBank & 3U];
     memset(pDest, 0x00, LCD_VISIBLE_BYTES);
 
-    /* V1.2.2 makes the framebuffer contain literal final DMG shades 0..3.
-       Pack the previous complete 8x160 block exactly as bsnes-plus does. */
     for (y = 0; y < 8U; ++y) {
-        Uint32 srcY = oldRow * 8U + y;
+        const Uint8 *src = pFrame + (oldRow * 8U + y) * LCD_WIDTH;
         for (tile = 0; tile < 20U; ++tile) {
-            Uint8 p0 = 0;
-            Uint8 p1 = 0;
-            for (x = 0; x < 8U; ++x) {
-                Uint8 c = (Uint8)(
-                    pFrame[srcY * LCD_WIDTH + tile * 8U + x] & 3U);
-                Uint8 bit = (Uint8)(0x80U >> x);
-                if (c & 1U) p0 |= bit;
-                if (c & 2U) p1 |= bit;
-            }
-
+            Uint8 p0, p1;
+            AuroraSgbPack8Shade(src + tile * 8U, &p0, &p1);
             pDest[tile * 16U + y * 2U + 0U] = p0;
             pDest[tile * 16U + y * 2U + 1U] = p1;
         }
@@ -431,16 +447,31 @@ Uint32 SNSGBICD2::GetClockDivider() const
 
 Uint32 SNSGBICD2::AdvanceMasterClocks(Uint32 clocks, Uint32 snesHz)
 {
-    Uint64 sourceHz, den, total, steps;
+    Uint64 total, den, steps;
+    Uint32 divider;
 
     if (m_eModel == MODEL_NONE || !IsRunning() || !clocks || !snesHz)
         return 0;
 
-    sourceHz = (m_eModel == MODEL_SGB2) ? (Uint64)SGB2_OSC_HZ : (Uint64)snesHz;
-    den = (Uint64)snesHz * (Uint64)GetClockDivider();
-    total = m_uClockAccumulator + (Uint64)clocks * sourceHz;
-    steps = total / den;
-    m_uClockAccumulator = total % den;
+    divider = GetClockDivider();
+
+    /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907
+     * SGB1 derives its GB clock from the same SNES master oscillator, so the
+     * frequency ratio cancels exactly. SGB2 keeps its independent oscillator. */
+    if (m_eModel == MODEL_SGB1)
+    {
+        total = m_uClockAccumulator + (Uint64)clocks;
+        steps = total / (Uint64)divider;
+        m_uClockAccumulator = total % (Uint64)divider;
+    }
+    else
+    {
+        den = (Uint64)snesHz * (Uint64)divider;
+        total = m_uClockAccumulator +
+                (Uint64)clocks * (Uint64)SGB2_OSC_HZ;
+        steps = total / den;
+        m_uClockAccumulator = total % den;
+    }
 
     return steps > 0xffffffffULL ? 0xffffffffU : (Uint32)steps;
 }
@@ -462,7 +493,8 @@ Bool SNSGBICD2::SaveState(StateT *s) const
     s->vcounter = m_nVCounter;
     s->hcounter = m_uHCounter;
     s->joypID = m_uJoypID;
-    s->previousP15 = m_bPreviousP15;
+    s->joyp15Lock = m_bJoyp15Lock;
+    s->joyp14Lock = m_bJoyp14Lock;
     s->pulseLock = m_bPulseLock;
     s->strobeLock = m_bStrobeLock;
     s->packetLock = m_bPacketLock;
@@ -501,7 +533,8 @@ Bool SNSGBICD2::RestoreState(const StateT *s)
     m_nVCounter = s->vcounter;
     m_uHCounter = (Uint16)s->hcounter;
     m_uJoypID = (Uint8)s->joypID;
-    m_bPreviousP15 = s->previousP15 ? TRUE : FALSE;
+    m_bJoyp15Lock = s->joyp15Lock ? TRUE : FALSE;
+    m_bJoyp14Lock = s->joyp14Lock ? TRUE : FALSE;
     m_bPulseLock = s->pulseLock ? TRUE : FALSE;
     m_bStrobeLock = s->strobeLock ? TRUE : FALSE;
     m_bPacketLock = s->packetLock ? TRUE : FALSE;
