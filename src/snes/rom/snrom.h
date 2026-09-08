@@ -71,6 +71,10 @@ enum SNRomMappingE
  * Standalone Satellaview slotted cartridges expose an 8M Memory Pack
  * in addition to ordinary battery RAM (when the board has it). */
 #define SNROM_FLAG_BSXSLOT 0x8000
+/* AURORA_V4_4_CUMULATIVE_20260908
+ * The BS-X interface/base cartridge has the physical BS Memory slot PLUS
+ * MCC/PSRAM/receiver hardware. Keep it distinct from ordinary BSC carts. */
+#define SNROM_FLAG_BSXBASE 0x10000
 /* AURORA_SA1_V1_REFERENCE_LOGIC_20260902: second native SNCpuT + SA-1 MMIO/MMC/DMA. */
 
 extern Uint32 g_FakeSRAMSize;

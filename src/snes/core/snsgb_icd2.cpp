@@ -378,8 +378,10 @@ void SNSGBICD2::GambatteNewLy(Uint32 uNewLy, const Uint8 *pFrame)
         oldRow = (LCD_VISIBLE_LINES >> 3) - 1U;
 
     pDest = m_uOutput[m_uWriteBank & 3U];
-    memset(pDest, 0x00, LCD_VISIBLE_BYTES);
 
+    /* AURORA_V4_4_CUMULATIVE_20260908
+     * The loop below writes 20 * 8 * 2 = all 320 visible bytes. Clearing the
+     * same row first is pure EE memory bandwidth on this LY hot path. */
     for (y = 0; y < 8U; ++y) {
         const Uint8 *src = pFrame + (oldRow * 8U + y) * LCD_WIDTH;
         for (tile = 0; tile < 20U; ++tile) {

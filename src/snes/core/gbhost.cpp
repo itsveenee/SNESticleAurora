@@ -33,9 +33,12 @@ static const Uint32 AUDIO_FRAMES = 4096U;
  * 24576 GB clocks normally produce 12288 raw stereo frames. The 16K scratch
  * leaves generous instruction/event headroom while cutting runForClocks()
  * call frequency by ~6x versus V2's 4096-clock batch. */
-static const Uint32 AUDIO_SCRATCH_FRAMES = 16384U;
-static const Uint32 AUDIO_DECIMATE = 64U; /* raw 1/2 clocks -> FIFO 1/128 */
-static const Uint32 RUN_BATCH_CLOCKS = 24576U;
+/* AURORA_V6_RUNTIME_EFFECT_ALL5_20260908
+ * Gambatte V6 now performs the exact 64:1 box decimation while converting
+ * PSG deltas to absolute samples.  Scratch still has to hold the RAW delta
+ * stream while the CPU runs, hence 32768 entries for a 49152-clock batch. */
+static const Uint32 AUDIO_SCRATCH_FRAMES = 32768U;
+static const Uint32 RUN_BATCH_CLOCKS = 49152U; /* 64:1 audio contract remains inside Gambatte */
 static const Uint32 SGB1_CLOCK_HZ = 4295454U;
 static const Uint32 SGB2_CLOCK_HZ = 4194304U;
 
@@ -105,6 +108,23 @@ struct GBHost::Impl
         memset(audio, 0, sizeof(audio));
     }
 };
+
+/* AURORA_V4_4_CUMULATIVE_20260908
+ * VIDEO_SGB_SHADE8 makes each framebuffer pixel the final literal DMG shade
+ * selected by BGP/OBP. GB::reset()/state restore can rebuild normal DMG
+ * palette state, so this is host policy and must be asserted explicitly. */
+static void AuroraGambatteApplySgbShadePalette(GBHost::Impl *p)
+{
+    static const Uint32 s_DmgShade[4] = { 0U, 1U, 2U, 3U };
+    Uint32 pal, shade;
+
+    if (!p)
+        return;
+
+    for (pal = 0; pal < 3U; ++pal)
+        for (shade = 0; shade < 4U; ++shade)
+            p->gb.setDmgPaletteColor(pal, shade, s_DmgShade[shade]);
+}
 
 /* AURORA_SGB_GAMBATTE_XPOS168_RASTER_V1_2_1_20260907
  * Aurora has one active SGB GBHost. Keep the staged callback ABI tiny and
@@ -203,87 +223,27 @@ static void AuroraGambattePushAudio(GBHost::Impl *p, Int16 left, Int16 right)
     ++p->audioCount;
 }
 
-static void AuroraGambatteConsumeAudio(GBHost::Impl *p, Uint32 nRawFrames)
+static void AuroraGambatteConsumeAudio(GBHost::Impl *p, Uint32 nFrames)
 {
-    /* AURORA_SGB_GAMBATTE_SHADE8_JOYP_SYNC_PERF_V3_20260908
-     * Exact same 64-sample box filter as before, but operate on complete
-     * groups. V2 updated member accumulators and tested the threshold for
-     * every ~2.1 MHz raw sample. */
+    /* AURORA_V6_RUNTIME_EFFECT_ALL5_20260908
+     * audioScratch already contains exact 64-raw-frame box averages emitted
+     * in-place by Gambatte::PSG::fillBufferSgb64().  The old host pass walked
+     * every ~2.1 MHz reconstructed sample a second time. */
     const gambatte::uint_least32_t *src = p->audioScratch;
-    Uint32 leftFrames = nRawFrames;
-    Uint32 count = p->audioDecimCount;
-    Int32 sumLeft = p->audioDecimLeft;
-    Int32 sumRight = p->audioDecimRight;
-    Uint32 i;
-
-    if (count && leftFrames)
-    {
-        Uint32 take = AUDIO_DECIMATE - count;
-        if (take > leftFrames) take = leftFrames;
-
-        for (i = 0; i < take; ++i)
-        {
-            Uint32 packed = (Uint32)*src++;
-            sumLeft += (Int32)(Int16)(packed & 0xffffU);
-            sumRight += (Int32)(Int16)((packed >> 16) & 0xffffU);
-        }
-
-        count += take;
-        leftFrames -= take;
-        if (count == AUDIO_DECIMATE)
-        {
-            AuroraGambattePushAudio(
-                p,
-                (Int16)(sumLeft / (Int32)AUDIO_DECIMATE),
-                (Int16)(sumRight / (Int32)AUDIO_DECIMATE));
-            count = 0;
-            sumLeft = 0;
-            sumRight = 0;
-        }
-    }
-
-    while (leftFrames >= AUDIO_DECIMATE)
-    {
-        Int32 blockLeft = 0;
-        Int32 blockRight = 0;
-
-        for (i = 0; i < AUDIO_DECIMATE; ++i)
-        {
-            Uint32 packed = (Uint32)src[i];
-            blockLeft += (Int32)(Int16)(packed & 0xffffU);
-            blockRight += (Int32)(Int16)((packed >> 16) & 0xffffU);
-        }
-
-        AuroraGambattePushAudio(
-            p,
-            (Int16)(blockLeft / (Int32)AUDIO_DECIMATE),
-            (Int16)(blockRight / (Int32)AUDIO_DECIMATE));
-        src += AUDIO_DECIMATE;
-        leftFrames -= AUDIO_DECIMATE;
-    }
-
-    while (leftFrames--)
+    while (nFrames--)
     {
         Uint32 packed = (Uint32)*src++;
-        sumLeft += (Int32)(Int16)(packed & 0xffffU);
-        sumRight += (Int32)(Int16)((packed >> 16) & 0xffffU);
-        ++count;
+        AuroraGambattePushAudio(
+            p,
+            (Int16)(packed & 0xffffU),
+            (Int16)((packed >> 16) & 0xffffU));
     }
-
-    p->audioDecimCount = count;
-    p->audioDecimLeft = sumLeft;
-    p->audioDecimRight = sumRight;
 }
+
 
 
 Bool GBHost::LoadROM(const Uint8 *pData, Uint32 nBytes, ModelE eModel)
 {
-    Int32 pal, shade;
-    /* AURORA_SGB_GAMBATTE_DIRECT_SHADE_V1_2_2_20260907
-     * These are intentionally not display colors. Gambatte applies BGP/OBP
-     * to select among them, yielding the exact final SGB shade 0..3. */
-    static const Uint32 s_DmgShade[4] = { 0U, 1U, 2U, 3U };
-
     if (!pData || nBytes < 0x150U)
         return FALSE;
 
@@ -314,11 +274,8 @@ Bool GBHost::LoadROM(const Uint8 *pData, Uint32 nBytes, ModelE eModel)
      * small RunClocks() grant. */
     m_p->gb.setSgbVideoBuffer(m_p->screen, SNSGBICD2::LCD_WIDTH);
 
-    /* Preserve DMG shade identity. SGB color attributes live on SNES side. */
-    for (pal = 0; pal < 3; ++pal)
-        for (shade = 0; shade < 4; ++shade)
-            m_p->gb.setDmgPaletteColor(
-                (unsigned)pal, (unsigned)shade, s_DmgShade[shade]);
+    /* Preserve literal DMG shade identity; SGB color attributes are SNES-side. */
+    AuroraGambatteApplySgbShadePalette(m_p);
 
     m_p->romBytes = nBytes;
     m_p->romCRC = AuroraGambatteCRC32(pData, nBytes);
@@ -367,8 +324,16 @@ void GBHost::Reset(ModelE eModel)
     m_p->model = (eModel == MODEL_SGB2) ? MODEL_SGB2 : MODEL_SGB1;
     m_p->gb.reset();
     m_p->gb.setSgbPostBootState(m_p->model == MODEL_SGB2);
+
+    /* AURORA_V4_4_CUMULATIVE_20260908
+     * full_init() behind GB::reset() restores ordinary DMG video state.
+     * Reassert every external SGB binding and the literal shade contract
+     * before the first post-reset pixel can reach ICD2. */
+    m_p->gb.setSgbJoypCallback(&GBHost::GambatteJoypCallback, m_p);
     m_p->gb.setScanlineCallback(&AuroraGambatteSgbNewLy);
     m_p->gb.setSgbVideoBuffer(m_p->screen, SNSGBICD2::LCD_WIDTH);
+    AuroraGambatteApplySgbShadePalette(m_p);
+    memset(m_p->screen, 0, sizeof(m_p->screen));
 
     m_p->clockCredit = 0;
     m_p->pendingClocks = 0; /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907 */
@@ -512,7 +477,8 @@ static Uint32 AuroraGambatteDrainPending(GBHost::Impl *p)
         unsigned samples = 0;
         unsigned long step;
 
-        step = p->gb.runForClocks(
+        /* AURORA_V6_RUNTIME_EFFECT_ALL5_20260908: one Gambatte pass now converts + box-decimates PSG. */
+        step = p->gb.runForClocksSgb64(
             p->screen, SNSGBICD2::LCD_WIDTH,
             p->audioScratch, AUDIO_SCRATCH_FRAMES,
             request, samples);
@@ -611,6 +577,8 @@ void GBHost::ClearAudio()
     if (!m_p)
         return;
 
+    /* AURORA_V6_RUNTIME_EFFECT_ALL5_20260908: transient 64:1 box phase moved into Gambatte PSG. */
+    m_p->gb.clearSgbAudioDecimator();
     m_p->audioRead = 0;
     m_p->audioWrite = 0;
     m_p->audioCount = 0;
@@ -680,8 +648,12 @@ Bool GBHost::RestoreState(const StateT *pState)
 
     m_p->model =
         pState->Model == MODEL_SGB2 ? MODEL_SGB2 : MODEL_SGB1;
+    /* AURORA_V4_4_CUMULATIVE_20260908
+     * Callbacks/pixel encoding are host policy, not savestate policy. */
+    m_p->gb.setSgbJoypCallback(&GBHost::GambatteJoypCallback, m_p);
     m_p->gb.setScanlineCallback(&AuroraGambatteSgbNewLy);
     m_p->gb.setSgbVideoBuffer(m_p->screen, SNSGBICD2::LCD_WIDTH);
+    AuroraGambatteApplySgbShadePalette(m_p);
     m_p->clockCredit = pState->ClockCredit;
     m_p->pendingClocks = pState->PendingClocks;
     m_p->lcdClock = 0;

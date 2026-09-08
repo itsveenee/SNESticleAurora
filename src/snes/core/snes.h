@@ -48,6 +48,9 @@ Uint32 SnesAudioGetRate(void);
  * Nintendo 8M Memory Pack Type 1: 8 Mbit / 1 MiB flash.  It is intentionally
  * separate from Game Pak SRAM so slotted cartridges can own both saves. */
 #define SNES_BSX_MEMORY_PACK_BYTES (1024 * 1024)
+/* AURORA_V4_4_CUMULATIVE_20260908
+ * BSC-1A5B9P-01 working/download PSRAM. */
+#define SNES_BSX_PSRAM_BYTES (512 * 1024)
 
 class SNBSXMemoryPack
 {
@@ -70,6 +73,10 @@ public:
     Bool Dirty() const { return m_bAttached && m_bDirty; }
     void ClearDirty() { m_bDirty = FALSE; }
 
+    /* AURORA_V4_4_CUMULATIVE_20260908: external MCC /WP pin. */
+    void SetWriteEnabled(Bool bEnabled) { m_bWriteEnabled = bEnabled; }
+    Bool IsWriteEnabled() const { return m_bWriteEnabled; }
+
     /* AURORA_BSXSLOT_MEMORY_PACK_V1_2_IO_WATCH_SGB_STATUS_20260906
      * Cheap counters only. Read()/Write() never log or touch storage. */
     void ResetIOStats();
@@ -85,6 +92,7 @@ private:
     Uint8 *m_pData;
     Bool m_bAttached;
     Bool m_bDirty;
+    Bool m_bWriteEnabled; /* AURORA_V4_4_CUMULATIVE_20260908 */
 
     /* AURORA_BSXSLOT_FLASH_PROTOCOL_V2_20260907
      * Sharp LH28F800SU-compatible 8-bit command state.
@@ -122,6 +130,63 @@ private:
     Uint32 m_uVendorReadCount;
 };
 
+/* AURORA_V4_4_CUMULATIVE_20260908
+ * BS-X interface/base hardware. Persistent Type-1 flash remains in
+ * SNBSXMemoryPack; PSRAM is deliberately volatile and separate from .mpk. */
+class SNBSXBase
+{
+public:
+    enum AccessE
+    {
+        ACCESS_NONE = 0,
+        ACCESS_ROM,
+        ACCESS_PSRAM,
+        ACCESS_EX,
+        ACCESS_PACK
+    };
+
+    SNBSXBase();
+    ~SNBSXBase();
+
+    Bool Attach(const Uint8 *pRom, Uint32 nRomBytes, SNBSXMemoryPack *pPack);
+    void Detach();
+    void Power();
+    Bool IsActive() const { return m_bActive; }
+
+    Bool ReadMCCRegister(Uint32 uAddr, Uint8 uOpenBus, Uint8 *pData) const;
+    Bool WriteMCCRegister(Uint32 uAddr, Uint8 uData, Bool *pCommitted);
+
+    AccessE ResolveMCU(Uint32 uAddr, Uint32 *pOffset) const;
+    Uint8 ReadMCU(Uint32 uAddr, Uint8 uOpenBus);
+    void WriteMCU(Uint32 uAddr, Uint8 uData);
+
+    Uint8 *GetPSRAM() { return m_bActive ? m_pPSRAM : NULL; }
+
+    Uint8 ReadReceiver(Uint16 uAddr, Uint8 uOpenBus);
+    void WriteReceiver(Uint16 uAddr, Uint8 uData);
+
+private:
+    const Uint8 *m_pRom;
+    Uint32 m_nRomBytes;
+    Uint8 *m_pPSRAM;
+    SNBSXMemoryPack *m_pPack;
+    Bool m_bActive;
+
+    Uint8 m_uIRQFlag;
+    Uint8 m_uIRQEnable;
+    Uint16 m_uRegs;
+    Uint16 m_uPendingRegs;
+
+    Uint8 m_Receiver[0x18];
+    Uint8 m_uRTCCounter;
+    Uint8 m_uRTCHour;
+    Uint8 m_uRTCMinute;
+    Uint8 m_uRTCSecond;
+
+    void Commit();
+    Uint32 MirrorRomOffset(Uint32 uPos) const;
+};
+
 class SnesSystem : public Emu::System
 {
 public:
@@ -136,6 +201,8 @@ public:
 
     /* AURORA_BSXSLOT_MEMORY_PACK_V1_20260906_SNES_H */
     Bool HasBSXMemoryPack() const { return m_BSXMemory.IsAttached(); }
+    /* AURORA_V6_RUNTIME_EFFECT_ALL5_20260908: frontend persistence may safely retry a failed initial attachment. */
+    Bool EnsureBSXMemoryPack();
     Int32 GetBSXMemoryPackBytes() const { return (Int32)m_BSXMemory.GetBytes(); }
     Uint8 *GetBSXMemoryPackData() { return m_BSXMemory.GetData(); }
     Bool LoadBSXMemoryPack(const Uint8 *pData, Uint32 nBytes)
@@ -283,6 +350,7 @@ private:
 	SNSA1       m_SA1;      /* AURORA_SA1_V1_REFERENCE_LOGIC_20260902 */
 	Bool        m_bSA1IRQ;
 	SNBSXMemoryPack m_BSXMemory; /* AURORA_BSXSLOT_MEMORY_PACK_V1_20260906_SNES_H */
+	SNBSXBase       m_BSXBase;   /* AURORA_V4_4_CUMULATIVE_20260908 */
 
 	/* AURORA_SWC_FLOPPY_V1_20260831 */
 	SNSuperWildCard m_SWC;
@@ -345,6 +413,8 @@ private:
     /* AURORA_BSXSLOT_MEMORY_PACK_V1_20260906_SNES_H */
     static Uint8 SNCPU_TRAPFUNC ReadBSXSlot(SNCpuT *pCpu, Uint32 uAddr);
     static void SNCPU_TRAPFUNC WriteBSXSlot(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData);
+    static Uint8 SNCPU_TRAPFUNC ReadBSXMCC(SNCpuT *pCpu, Uint32 uAddr); /* AURORA_V4_4_CUMULATIVE_20260908 */
+    static void SNCPU_TRAPFUNC WriteBSXMCC(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData);
 	static Uint8 SNCPU_TRAPFUNC ReadSA1BWRAM(SNCpuT *pCpu, Uint32 uAddr);
 	static void SNCPU_TRAPFUNC  WriteSA1BWRAM(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData);
 	static Uint8 SNCPU_TRAPFUNC ReadSA1ROM(SNCpuT *pCpu, Uint32 uAddr);
@@ -366,6 +436,7 @@ private:
 
 	void	MapBSCLoRom(void); /* AURORA_BSXSLOT_MEMORY_PACK_V1_20260906_SNES_H */
 	void	MapBSCHiRom(void);
+	void	MapBSXBase(void); /* AURORA_V4_4_CUMULATIVE_20260908 */
 	Bool    ResolveBSXSlotAddress(Uint32 uAddr, Uint32 *pOffset) const;
 
 	void	MapSuperWildCard(void); /* AURORA_SWC_FLOPPY_V1_20260831 */

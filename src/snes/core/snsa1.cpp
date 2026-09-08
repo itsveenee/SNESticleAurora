@@ -483,8 +483,9 @@ void SNSA1::MapSA1CPU()
             for (uAddr = 0; uAddr < 0x10000; uAddr += 0x2000)
             {
                 Uint32 bus = (uBank << 16) | uAddr;
-                Uint32 off = ((((Uint32)uBank & 3u) << 16) | uAddr)
-                           % m_nBWRAMBytes;
+                /* AURORA_V6_RUNTIME_EFFECT_ALL5_20260908: m_uBWRAMMask avoids R5900 div on normal power-of-two BW-RAM. */
+                Uint32 off = WrapBWRAMOffset(
+                    (((Uint32)uBank & 3u) << 16) | uAddr);
                 if (off + 0x2000u <= m_nBWRAMBytes)
                     SNCPUSetBank(&m_Cpu, bus, 0x2000,
                                  m_pBWRAM + off, FALSE);
@@ -515,12 +516,13 @@ void SNSA1::MapMainCPU(SNCpuT *pMainCpu)
         {
             Uint32 bus = (uBank << 16) | uAddr;
             Uint32 off = ((uBank & 3u) << 16) | uAddr;
+            Uint32 wrapped = WrapBWRAMOffset(off); /* AURORA_V6_RUNTIME_EFFECT_ALL5_20260908 */
             SNCPUSetTrap(pMainCpu, bus, 0x2000,
                          SnesSystem::ReadSA1BWRAM, SnesSystem::WriteSA1BWRAM);
             if (m_pBWRAM && m_nBWRAMBytes >= 0x2000 &&
-                (off % m_nBWRAMBytes) + 0x2000 <= m_nBWRAMBytes)
+                wrapped + 0x2000 <= m_nBWRAMBytes)
                 SNCPUSetBank(pMainCpu, bus, 0x2000,
-                             m_pBWRAM + (off % m_nBWRAMBytes), FALSE);
+                             m_pBWRAM + wrapped, FALSE);
             SNCPUSetMemSpeed(pMainCpu, bus, 0x2000, SNCPU_CYCLE_SLOW);
         }
     }
@@ -574,8 +576,10 @@ Uint32 SNSA1::SA1BWRAMOffset(Uint32 uAddr, Bool *pOK, Bool *pBitmap) const
             return base + local; /* pixel address relative to selected base */
         }
         if (pOK) *pOK = TRUE;
-        return ((Uint32)(m_Reg[0x25] & 0x1F) * 0x2000u + local) %
-               m_nBWRAMBytes;
+        /* AURORA_V4_4_CUMULATIVE_20260908
+         * This is a byte-granular trapped path. Use the already-maintained
+         * power-of-two mask when possible instead of an R5900 integer modulo. */
+        return WrapBWRAMOffset((Uint32)(m_Reg[0x25] & 0x1F) * 0x2000u + local);
     }
 
     if (bank >= 0x40 && bank <= 0x5F)

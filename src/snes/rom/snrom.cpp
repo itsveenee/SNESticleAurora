@@ -773,6 +773,16 @@ SNRomInfoT *SnesRom::GetCartInfo(Uint32 uOffset)
 }
 
 
+/* AURORA_V4_4_CUMULATIVE_20260908
+ * Exact internal-title identity for Nintendo's BS-X interface/base ROM.
+ * This is cartridge hardware identity, not a filename heuristic. */
+static Bool _SNRomIsBSXBase(const SNRomInfoT *pInfo)
+{
+    return (pInfo &&
+            !memcmp(pInfo->Title, "Satellaview BS-X     ", 21))
+        ? TRUE : FALSE;
+}
+
 /* AURORA_BSXSLOT_MEMORY_PACK_V1_20260906_SNROM_CPP
  * Detect the standalone Satellaview slot from the extended-header signature
  * used by reference emulators.  This identifies board hardware rather than
@@ -795,12 +805,6 @@ static Bool _SNRomHasBSXSlot(const Uint8 *pRom, Uint32 nRomBytes,
         return FALSE;
 
     if (p[-14] != 'Z' || p[-11] != 'J')
-        return FALSE;
-
-    /* The BS-X interface cartridge also has a physical slot, but its pack is
-     * routed by the separate BS-X MCC/PSRAM/receiver hardware.  Do not lie by
-     * treating that base unit as a BSC-LoROM game cartridge. */
-    if (!memcmp(pInfo->Title, "Satellaview BS-X     ", 21))
         return FALSE;
 
     uCode = p[-13];
@@ -1515,10 +1519,14 @@ if (m_pRomData && m_uRomBytes)
 
 	SetCartInfo(pCartInfo);
 
-	/* AURORA_BSXSLOT_MEMORY_PACK_V1_20260906_SNROM_CPP
-	 * BSC-LoROM/BSC-HiROM are real cartridge maps.  SA-1 slotted carts keep
-	 * the SA-1 mapper because Super MMC $2220-$2223 selects their Memory Pack. */
-	if (_SNRomHasBSXSlot(m_pRomData, m_uRomBytes, pCartInfo))
+	/* AURORA_V4_4_CUMULATIVE_20260908
+	 * The interface/base cartridge owns a slot but keeps its ordinary ROM
+	 * mapping beneath the dynamic MCC. Other slotted carts retain BSC mapping. */
+	if (_SNRomIsBSXBase(pCartInfo))
+	{
+		m_Flags |= SNROM_FLAG_BSXSLOT | SNROM_FLAG_BSXBASE;
+	}
+	else if (_SNRomHasBSXSlot(m_pRomData, m_uRomBytes, pCartInfo))
 	{
 		m_Flags |= SNROM_FLAG_BSXSLOT;
 		if (!(m_Flags & SNROM_FLAG_SA1))

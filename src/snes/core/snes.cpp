@@ -2,6 +2,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <time.h> /* AURORA_V4_4_CUMULATIVE_20260908 */
 #include "types.h"
 #include "snes.h"
 #include "rendersurface.h"
@@ -46,6 +47,7 @@ SNBSXMemoryPack::SNBSXMemoryPack()
     m_pData = NULL;
     m_bAttached = FALSE;
     m_bDirty = FALSE;
+    m_bWriteEnabled = FALSE; /* AURORA_V4_4_CUMULATIVE_20260908 */
     ResetProtocol();
     ResetIOStats(); /* AURORA_BSXSLOT_MEMORY_PACK_V1_2_IO_WATCH_SGB_STATUS_20260906 */
 }
@@ -70,6 +72,9 @@ Bool SNBSXMemoryPack::AttachBlank()
     memset(m_pData, 0xFF, SNES_BSX_MEMORY_PACK_BYTES);
     m_bAttached = TRUE;
     m_bDirty = FALSE;
+    /* Standalone BSC carts have no MCC /WP driver. BS-X base Power()
+     * overrides this immediately through Commit(). */
+    m_bWriteEnabled = TRUE; /* AURORA_V4_4_CUMULATIVE_20260908 */
     ResetProtocol();
     ResetIOStats();
     return TRUE;
@@ -79,6 +84,7 @@ void SNBSXMemoryPack::Detach()
 {
     m_bAttached = FALSE;
     m_bDirty = FALSE;
+    m_bWriteEnabled = FALSE; /* AURORA_V4_4_CUMULATIVE_20260908 */
     ResetProtocol();
 }
 
@@ -115,7 +121,7 @@ void SNBSXMemoryPack::ProgramFlashByte(Uint32 uAddr, Uint8 uData)
     Uint8 oldValue;
     Uint8 newValue;
 
-    if (!m_bAttached || !m_pData)
+    if (!m_bAttached || !m_pData || !m_bWriteEnabled)
         return;
 
     a = uAddr & (SNES_BSX_MEMORY_PACK_BYTES - 1);
@@ -138,7 +144,7 @@ void SNBSXMemoryPack::EraseFlashBlock(Uint32 uAddr)
     Uint32 i;
     Bool changed = FALSE;
 
-    if (!m_bAttached || !m_pData)
+    if (!m_bAttached || !m_pData || !m_bWriteEnabled)
         return;
 
     a = uAddr & (SNES_BSX_MEMORY_PACK_BYTES - 1);
@@ -166,7 +172,7 @@ void SNBSXMemoryPack::EraseFlashAll()
     Uint32 i;
     Bool changed = FALSE;
 
-    if (!m_bAttached || !m_pData)
+    if (!m_bAttached || !m_pData || !m_bWriteEnabled)
         return;
 
     for (i = 0; i < (Uint32)SNES_BSX_MEMORY_PACK_BYTES; ++i)
@@ -519,6 +525,522 @@ void SNBSXMemoryPack::Write(Uint32 uAddr, Uint8 uData)
     }
 }
 
+/* =========================================================================
+ * AURORA_V4_4_CUMULATIVE_20260908
+ * BS-X interface/base cartridge: MCC + 512 KiB PSRAM + offline receiver.
+ * MCC decode and receiver behavior track ares af4cbb04.
+ * ========================================================================= */
+
+SNBSXBase::SNBSXBase()
+{
+    m_pRom = NULL;
+    m_nRomBytes = 0;
+    m_pPSRAM = NULL;
+    m_pPack = NULL;
+    m_bActive = FALSE;
+    m_uIRQFlag = 0;
+    m_uIRQEnable = 0;
+    m_uRegs = 0;
+    m_uPendingRegs = 0;
+    memset(m_Receiver, 0, sizeof(m_Receiver));
+    m_uRTCCounter = 0;
+    m_uRTCHour = 0;
+    m_uRTCMinute = 0;
+    m_uRTCSecond = 0;
+}
+
+SNBSXBase::~SNBSXBase()
+{
+    if (m_pPSRAM)
+        free(m_pPSRAM);
+    m_pPSRAM = NULL;
+}
+
+Bool SNBSXBase::Attach(const Uint8 *pRom, Uint32 nRomBytes,
+                       SNBSXMemoryPack *pPack)
+{
+    if (!pRom || !nRomBytes || !pPack || !pPack->IsAttached())
+        return FALSE;
+
+    if (!m_pPSRAM)
+        m_pPSRAM = (Uint8 *)malloc(SNES_BSX_PSRAM_BYTES);
+    if (!m_pPSRAM)
+        return FALSE;
+
+    m_pRom = pRom;
+    m_nRomBytes = nRomBytes;
+    m_pPack = pPack;
+    m_bActive = TRUE;
+
+    /* Volatile download/work RAM. Never mix it into the persistent .mpk. */
+    memset(m_pPSRAM, 0x00, SNES_BSX_PSRAM_BYTES);
+    Power();
+    return TRUE;
+}
+
+void SNBSXBase::Detach()
+{
+    if (m_pPack)
+        m_pPack->SetWriteEnabled(TRUE);
+
+    m_bActive = FALSE;
+    m_pRom = NULL;
+    m_nRomBytes = 0;
+    m_pPack = NULL;
+    m_uIRQFlag = 0;
+    m_uIRQEnable = 0;
+    m_uRegs = 0;
+    m_uPendingRegs = 0;
+    memset(m_Receiver, 0, sizeof(m_Receiver));
+    m_uRTCCounter = 0;
+    m_uRTCHour = 0;
+    m_uRTCMinute = 0;
+    m_uRTCSecond = 0;
+}
+
+void SNBSXBase::Commit()
+{
+    m_uRegs = m_uPendingRegs;
+    if (m_pPack)
+        m_pPack->SetWriteEnabled(
+            (m_uRegs & (Uint16)(1u << 13)) ? TRUE : FALSE);
+}
+
+void SNBSXBase::Power()
+{
+    if (!m_bActive)
+        return;
+
+    m_uIRQFlag = 0;
+    m_uIRQEnable = 0;
+
+    /* ares MCC power defaults:
+     * mapping=1, PSRAM low=1/high=0/mapping=3,
+     * ROM low/high=1, EX low=1/high=0/mapping=1,
+     * internal/external BS Memory writes=0.
+     */
+    m_uPendingRegs =
+        (Uint16)((1u << 2) | (1u << 3) |
+                 (1u << 5) | (1u << 6) |
+                 (1u << 7) | (1u << 8) |
+                 (1u << 9) | (1u << 11));
+    Commit();
+
+    memset(m_Receiver, 0, sizeof(m_Receiver));
+    m_uRTCCounter = 0;
+    m_uRTCHour = 0;
+    m_uRTCMinute = 0;
+    m_uRTCSecond = 0;
+}
+
+Bool SNBSXBase::ReadMCCRegister(
+    Uint32 uAddr, Uint8 uOpenBus, Uint8 *pData) const
+{
+    Uint8 index;
+    Uint8 value = uOpenBus;
+
+    if (!m_bActive || !pData ||
+        (uAddr & 0xF0F000u) != 0x005000u)
+        return FALSE;
+
+    index = (Uint8)((uAddr >> 16) & 0x0Fu);
+
+    switch (index)
+    {
+        case 0:  value = m_uIRQFlag ? 0x80 : 0x00; break;
+        case 1:  value = m_uIRQEnable ? 0x80 : 0x00; break;
+        case 14: value = 0x00; break;
+        case 15: value = 0x00; break;
+        default:
+            if (index >= 2 && index <= 13)
+                value = (m_uRegs & (Uint16)(1u << index)) ? 0x80 : 0x00;
+            break;
+    }
+
+    *pData = value;
+    return TRUE;
+}
+
+Bool SNBSXBase::WriteMCCRegister(
+    Uint32 uAddr, Uint8 uData, Bool *pCommitted)
+{
+    Uint8 index;
+
+    if (pCommitted)
+        *pCommitted = FALSE;
+
+    if (!m_bActive ||
+        (uAddr & 0xF0F000u) != 0x005000u)
+        return FALSE;
+
+    index = (Uint8)((uAddr >> 16) & 0x0Fu);
+
+    if (index == 1)
+    {
+        m_uIRQEnable = (uData & 0x80) ? 1 : 0;
+    }
+    else if (index >= 2 && index <= 13)
+    {
+        Uint16 bit = (Uint16)(1u << index);
+        if (uData & 0x80)
+            m_uPendingRegs |= bit;
+        else
+            m_uPendingRegs &= (Uint16)~bit;
+    }
+    else if (index == 14 && (uData & 0x80))
+    {
+        Commit();
+        if (pCommitted)
+            *pCommitted = TRUE;
+    }
+
+    return TRUE;
+}
+
+Uint32 SNBSXBase::MirrorRomOffset(Uint32 uPos) const
+{
+    Uint32 mask;
+
+    if (!m_nRomBytes)
+        return 0;
+    if (uPos < m_nRomBytes)
+        return uPos;
+
+    mask = 0x80000000u;
+    while (!(uPos & mask))
+        mask >>= 1;
+
+    if (m_nRomBytes <= (uPos & mask))
+        return MirrorRomOffset(uPos - mask);
+
+    return mask +
+        ((m_nRomBytes - mask)
+            ? (uPos - mask) % (m_nRomBytes - mask)
+            : 0);
+}
+
+SNBSXBase::AccessE SNBSXBase::ResolveMCU(
+    Uint32 uAddr, Uint32 *pOffset) const
+{
+    Uint32 a = uAddr & 0xFFFFFFu;
+    Uint32 off = 0;
+    Uint8 mapping;
+    Uint8 psramMapping;
+    Uint8 exMapping;
+
+    if (pOffset) *pOffset = 0;
+    if (!m_bActive)
+        return ACCESS_NONE;
+
+    mapping = (m_uRegs & (1u << 2)) ? 1 : 0;
+    psramMapping = (Uint8)((m_uRegs >> 5) & 3u);
+    exMapping = (m_uRegs & (1u << 11)) ? 1 : 0;
+
+    /* ROM: highest MCC priority. */
+    if ((m_uRegs & (1u << 7)) &&
+        (a & 0xC08000u) == 0x008000u)
+    {
+        off = ((a & 0x3F0000u) >> 1) | (a & 0x7FFFu);
+        if (pOffset) *pOffset = off;
+        return ACCESS_ROM;
+    }
+    if ((m_uRegs & (1u << 8)) &&
+        (a & 0xC08000u) == 0x808000u)
+    {
+        off = ((a & 0x3F0000u) >> 1) | (a & 0x7FFFu);
+        if (pOffset) *pOffset = off;
+        return ACCESS_ROM;
+    }
+
+    /* PSRAM mapping=0. */
+    if ((m_uRegs & (1u << 3)) && mapping == 0)
+    {
+        if (((a & 0xF08000u) == 0x008000u && psramMapping == 0) ||
+            ((a & 0xF08000u) == 0x208000u && psramMapping == 1) ||
+            ((a & 0xF00000u) == 0x400000u && psramMapping == 2) ||
+            ((a & 0xF00000u) == 0x600000u && psramMapping == 3))
+        {
+            off = ((a & 0x0F0000u) >> 1) | (a & 0x7FFFu);
+            if (pOffset) *pOffset = off;
+            return ACCESS_PSRAM;
+        }
+        if ((a & 0xF08000u) == 0x700000u)
+        {
+            off = ((a & 0x0F0000u) >> 1) | (a & 0x7FFFu);
+            if (pOffset) *pOffset = off;
+            return ACCESS_PSRAM;
+        }
+    }
+
+    if ((m_uRegs & (1u << 4)) && mapping == 0)
+    {
+        if (((a & 0xF08000u) == 0x808000u && psramMapping == 0) ||
+            ((a & 0xF08000u) == 0xA08000u && psramMapping == 1) ||
+            ((a & 0xF00000u) == 0xC00000u && psramMapping == 2) ||
+            ((a & 0xF00000u) == 0xE00000u && psramMapping == 3))
+        {
+            off = ((a & 0x0F0000u) >> 1) | (a & 0x7FFFu);
+            if (pOffset) *pOffset = off;
+            return ACCESS_PSRAM;
+        }
+        if ((a & 0xF08000u) == 0xF00000u)
+        {
+            off = ((a & 0x0F0000u) >> 1) | (a & 0x7FFFu);
+            if (pOffset) *pOffset = off;
+            return ACCESS_PSRAM;
+        }
+    }
+
+    /* PSRAM mapping=1. */
+    if ((m_uRegs & (1u << 3)) && mapping == 1)
+    {
+        if (((a & 0xF88000u) == 0x008000u && psramMapping == 0) ||
+            ((a & 0xF88000u) == 0x108000u && psramMapping == 1) ||
+            ((a & 0xF88000u) == 0x208000u && psramMapping == 2) ||
+            ((a & 0xF88000u) == 0x308000u && psramMapping == 3) ||
+            ((a & 0xF80000u) == 0x400000u && psramMapping == 0) ||
+            ((a & 0xF80000u) == 0x500000u && psramMapping == 1) ||
+            ((a & 0xF80000u) == 0x600000u && psramMapping == 2) ||
+            ((a & 0xF80000u) == 0x700000u && psramMapping == 3))
+        {
+            off = a & 0x07FFFFu;
+            if (pOffset) *pOffset = off;
+            return ACCESS_PSRAM;
+        }
+        if ((a & 0xE0E000u) == 0x206000u)
+        {
+            off = ((a & 0x3F0000u) >> 3) | (a & 0x1FFFu);
+            if (pOffset) *pOffset = off;
+            return ACCESS_PSRAM;
+        }
+    }
+
+    if ((m_uRegs & (1u << 4)) && mapping == 1)
+    {
+        if (((a & 0xF88000u) == 0x808000u && psramMapping == 0) ||
+            ((a & 0xF88000u) == 0x908000u && psramMapping == 1) ||
+            ((a & 0xF88000u) == 0xA08000u && psramMapping == 2) ||
+            ((a & 0xF88000u) == 0xB08000u && psramMapping == 3) ||
+            ((a & 0xF80000u) == 0xC00000u && psramMapping == 0) ||
+            ((a & 0xF80000u) == 0xD00000u && psramMapping == 1) ||
+            ((a & 0xF80000u) == 0xE00000u && psramMapping == 2) ||
+            ((a & 0xF80000u) == 0xF00000u && psramMapping == 3))
+        {
+            off = a & 0x07FFFFu;
+            if (pOffset) *pOffset = off;
+            return ACCESS_PSRAM;
+        }
+        if ((a & 0xE0E000u) == 0xA06000u)
+        {
+            off = ((a & 0x3F0000u) >> 3) | (a & 0x1FFFu);
+            if (pOffset) *pOffset = off;
+            return ACCESS_PSRAM;
+        }
+    }
+
+    /* EX memory is physically absent but still blocks lower-priority BS Memory. */
+    if ((m_uRegs & (1u << 9)) && mapping == 0)
+    {
+        if (((a & 0xE08000u) == 0x008000u && exMapping == 0) ||
+            ((a & 0xE00000u) == 0x400000u && exMapping == 1))
+            return ACCESS_EX;
+    }
+    if ((m_uRegs & (1u << 9)) && mapping == 1)
+    {
+        if (((a & 0xF08000u) == 0x008000u && exMapping == 0) ||
+            ((a & 0xF08000u) == 0x208000u && exMapping == 1) ||
+            ((a & 0xF00000u) == 0x400000u && exMapping == 0) ||
+            ((a & 0xF00000u) == 0x600000u && exMapping == 1))
+            return ACCESS_EX;
+    }
+    if ((m_uRegs & (1u << 10)) && mapping == 0)
+    {
+        if (((a & 0xE08000u) == 0x808000u && exMapping == 0) ||
+            ((a & 0xE00000u) == 0xC00000u && exMapping == 1))
+            return ACCESS_EX;
+    }
+    if ((m_uRegs & (1u << 10)) && mapping == 1)
+    {
+        if (((a & 0xF08000u) == 0x808000u && exMapping == 0) ||
+            ((a & 0xF08000u) == 0xA08000u && exMapping == 1) ||
+            ((a & 0xF00000u) == 0xC00000u && exMapping == 0) ||
+            ((a & 0xF00000u) == 0xE00000u && exMapping == 1))
+            return ACCESS_EX;
+    }
+
+    /* BS Memory: last MCC priority. */
+    if (m_pPack && m_pPack->IsAttached())
+    {
+        if (mapping == 0)
+        {
+            if (((a & 0x408000u) == 0x008000u) ||
+                ((a & 0x400000u) == 0x400000u))
+            {
+                off = ((a & 0x3F0000u) >> 1) | (a & 0x7FFFu);
+                if (pOffset) *pOffset = off;
+                return ACCESS_PACK;
+            }
+        }
+        else
+        {
+            if (((a & 0x408000u) == 0x008000u) ||
+                ((a & 0x400000u) == 0x400000u))
+            {
+                off = a & 0x3FFFFFu;
+                if (pOffset) *pOffset = off;
+                return ACCESS_PACK;
+            }
+        }
+    }
+
+    return ACCESS_NONE;
+}
+
+Uint8 SNBSXBase::ReadMCU(Uint32 uAddr, Uint8 uOpenBus)
+{
+    Uint32 off = 0;
+    AccessE kind = ResolveMCU(uAddr, &off);
+
+    switch (kind)
+    {
+        case ACCESS_ROM:
+            if (m_pRom && m_nRomBytes)
+                return m_pRom[MirrorRomOffset(off)];
+            break;
+        case ACCESS_PSRAM:
+            if (m_pPSRAM)
+                return m_pPSRAM[off & (SNES_BSX_PSRAM_BYTES - 1)];
+            break;
+        case ACCESS_PACK:
+            if (m_pPack)
+                return m_pPack->Read(off);
+            break;
+        case ACCESS_EX:
+        case ACCESS_NONE:
+        default:
+            break;
+    }
+    return uOpenBus;
+}
+
+void SNBSXBase::WriteMCU(Uint32 uAddr, Uint8 uData)
+{
+    Uint32 off = 0;
+    AccessE kind = ResolveMCU(uAddr, &off);
+
+    if (kind == ACCESS_PSRAM && m_pPSRAM)
+    {
+        m_pPSRAM[off & (SNES_BSX_PSRAM_BYTES - 1)] = uData;
+        return;
+    }
+
+    if (kind == ACCESS_PACK && m_pPack)
+    {
+        /* MCC internal gate controls bus delivery; external gate is /WP. */
+        if (m_uRegs & (1u << 12))
+            m_pPack->Write(off, uData);
+    }
+}
+
+Uint8 SNBSXBase::ReadReceiver(Uint16 uAddr, Uint8 uOpenBus)
+{
+    Uint8 index;
+    if (!m_bActive || uAddr < 0x2188 || uAddr > 0x219F)
+        return uOpenBus;
+
+    index = (Uint8)(uAddr - 0x2188);
+    switch (uAddr)
+    {
+        case 0x2188: case 0x2189: case 0x218A:
+        case 0x218C: case 0x218E: case 0x218F:
+        case 0x2190: case 0x2194: case 0x2196:
+        case 0x2197: case 0x2199:
+            return m_Receiver[index];
+
+        case 0x2192:
+        {
+            Uint8 counter = m_uRTCCounter++;
+            if (m_uRTCCounter >= 18)
+                m_uRTCCounter = 0;
+
+            if (counter == 0)
+            {
+                time_t rawtime;
+                struct tm *t;
+                time(&rawtime);
+                t = localtime(&rawtime);
+                if (t)
+                {
+                    m_uRTCHour = (Uint8)t->tm_hour;
+                    m_uRTCMinute = (Uint8)t->tm_min;
+                    m_uRTCSecond = (Uint8)t->tm_sec;
+                }
+            }
+
+            switch (counter)
+            {
+                case 5:  return 0x01;
+                case 6:  return 0x01;
+                case 10: return m_uRTCSecond;
+                case 11: return m_uRTCMinute;
+                case 12: return m_uRTCHour;
+                default: return 0x00;
+            }
+        }
+
+        case 0x2193:
+            return (Uint8)(m_Receiver[index] & (Uint8)~0x0C);
+
+        default:
+            return uOpenBus;
+    }
+}
+
+void SNBSXBase::WriteReceiver(Uint16 uAddr, Uint8 uData)
+{
+    Uint8 index;
+    if (!m_bActive || uAddr < 0x2188 || uAddr > 0x219F)
+        return;
+
+    index = (Uint8)(uAddr - 0x2188);
+    switch (uAddr)
+    {
+        case 0x2188:
+        case 0x2189:
+        case 0x218A:
+        case 0x218B:
+        case 0x218C:
+        case 0x218E:
+            m_Receiver[index] = uData;
+            break;
+
+        case 0x218F:
+            /* Match current ares behavior, including the unusual use of
+             * the previous r218f latch value. */
+            m_Receiver[0x218E - 0x2188] >>= 1;
+            m_Receiver[0x218E - 0x2188] =
+                (Uint8)(m_Receiver[0x218F - 0x2188] -
+                        m_Receiver[0x218E - 0x2188]);
+            m_Receiver[0x218F - 0x2188] >>= 1;
+            break;
+
+        case 0x2191:
+            m_Receiver[index] = uData;
+            m_uRTCCounter = 0;
+            break;
+        case 0x2192:
+            m_Receiver[0x2190 - 0x2188] = 0x80;
+            break;
+        case 0x2193:
+        case 0x2194:
+        case 0x2197:
+        case 0x2199:
+            m_Receiver[index] = uData;
+            break;
+        default:
+            break;
+    }
+}
 
 
 #ifndef SNES_HK97_SPC_BOOT
@@ -915,6 +1437,15 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::Read2000(SNCpuT *pCpu, Uint32 uAddr)
 	pSnes->CatchUpRasterEventsForCpuMMIO(pCpu);
 	uAddr &= 0xFFFF;
 
+	/* AURORA_V4_4_CUMULATIVE_20260908 */
+	if (pSnes->m_BSXBase.IsActive() &&
+	    uAddr >= 0x2188 && uAddr <= 0x219F)
+	{
+		Uint8 v = pSnes->m_BSXBase.ReadReceiver((Uint16)uAddr, pCpu->uMDR);
+		pCpu->uMDR = v;
+		return v;
+	}
+
 	if (pSnes->m_SA1.IsActive())
 	{
 		if (uAddr >= 0x2200 && uAddr <= 0x23FF)
@@ -1123,6 +1654,15 @@ void SNCPU_TRAPFUNC SnesSystem::Write2000(SNCpuT *pCpu, Uint32 uAddr, Uint8 uDat
 	pSnes->CatchUpRasterEventsForCpuMMIO(pCpu);
 	uAddr &= 0xFFFF;
 
+	/* AURORA_V4_4_CUMULATIVE_20260908 */
+	if (pSnes->m_BSXBase.IsActive() &&
+	    uAddr >= 0x2188 && uAddr <= 0x219F)
+	{
+		pCpu->uMDR = uData;
+		pSnes->m_BSXBase.WriteReceiver((Uint16)uAddr, uData);
+		return;
+	}
+
 	if (pSnes->m_SA1.IsActive())
 	{
 		if (uAddr >= 0x2200 && uAddr <= 0x23FF)
@@ -1245,6 +1785,18 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::Read4000(SNCpuT *pCpu, Uint32 uAddr)
 	SnesIO *pIO = &pSnes->m_IO;
 
 	pSnes->CatchUpRasterEventsForCpuMMIO(pCpu);
+
+	/* AURORA_V4_4_CUMULATIVE_20260908 */
+	if (pSnes->m_BSXBase.IsActive())
+	{
+		Uint8 v;
+		if (pSnes->m_BSXBase.ReadMCCRegister(uAddr, pCpu->uMDR, &v))
+		{
+			pCpu->uMDR = v;
+			return v;
+		}
+	}
+
 	uAddr &= 0xFFFF;
 
 	if (uAddr >= 0x4300 && uAddr < 0x4380)
@@ -1380,6 +1932,26 @@ void SNCPU_TRAPFUNC SnesSystem::Write4000(SNCpuT *pCpu, Uint32 uAddr, Uint8 uDat
 	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
 
 	pSnes->CatchUpRasterEventsForCpuMMIO(pCpu);
+
+	/* AURORA_V4_4_CUMULATIVE_20260908
+	 * Shadow writes change the physical map only on bank-E commit. */
+	if (pSnes->m_BSXBase.IsActive())
+	{
+		Bool committed = FALSE;
+		if (pSnes->m_BSXBase.WriteMCCRegister(uAddr, uData, &committed))
+		{
+			pCpu->uMDR = uData;
+			if (committed)
+			{
+				pSnes->MapBSXBase();
+				/* Same reason as the existing SWC mode-switch abort: the MIPS
+				 * executor may hold a stale direct fetch pointer. */
+				SNCPUAbort(pCpu);
+			}
+			return;
+		}
+	}
+
 	uAddr &= 0xFFFF;
 
 	if (uAddr >= 0x4300 && uAddr < 0x4380)
@@ -1835,6 +2407,10 @@ void SnesSystem::Reset()
 	{
 		MapSuperWildCard();
 	}
+	else if (m_BSXBase.IsActive())
+	{
+		MapBSXBase(); /* AURORA_V4_4_CUMULATIVE_20260908 */
+	}
 	else
 	{
 		SetSlowRom();
@@ -1962,6 +2538,8 @@ void SnesSystem::SoftReset()
     /* AURORA_V7_FRONT_COPIER_MEDIA_CART_RESET_20260831: soft reset preserves active copier System Mode too. */
     if (m_bSuperWildCard)
         MapSuperWildCard();
+    else if (m_BSXBase.IsActive())
+        MapBSXBase(); /* AURORA_V4_4_CUMULATIVE_20260908 */
     else
         SetSlowRom();
 
@@ -2007,6 +2585,37 @@ m_uLine = 0;
 }
 
 
+/* AURORA_V6_RUNTIME_EFFECT_ALL5_20260908
+ * Normally SetSnesRom() attaches the pack before mapping. Persistence runs
+ * later, after Reset(), so it is also a safe place to retry a failed 1 MiB
+ * allocation or BS-X base PSRAM/MCC attachment without inventing a second
+ * Memory Pack object. */
+Bool SnesSystem::EnsureBSXMemoryPack()
+{
+    if (!m_pRom ||
+        !(m_pRom->m_Flags & (SNROM_FLAG_BSXSLOT | SNROM_FLAG_BSXBASE)))
+        return FALSE;
+
+    if (!m_BSXMemory.IsAttached() && !m_BSXMemory.AttachBlank())
+    {
+        printf("[BSX] V6 could not allocate 8M Memory Pack\n");
+        return FALSE;
+    }
+
+    if ((m_pRom->m_Flags & SNROM_FLAG_BSXBASE) && !m_BSXBase.IsActive())
+    {
+        if (!m_BSXBase.Attach(
+                m_pRom->GetData(), m_pRom->GetBytes(), &m_BSXMemory))
+        {
+            printf("[BSX] V6 could not allocate/re-attach 512K base PSRAM\n");
+            return FALSE;
+        }
+        MapBSXBase();
+    }
+
+    return TRUE;
+}
+
 void SnesSystem::SetRom(class Emu::Rom *pRom)
 {
 	SetSnesRom((SnesRom *)pRom);
@@ -2022,6 +2631,7 @@ void SnesSystem::SetSnesRom(SnesRom *pRom)
 	}
 	m_SA1.Detach(); /* AURORA_SA1_V1_REFERENCE_LOGIC_20260902 */
 	m_bSA1IRQ = FALSE;
+	m_BSXBase.Detach(); /* AURORA_V4_4_CUMULATIVE_20260908 */
 	m_SGB.Detach();
 	m_uSGBSyncClock = (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_TOTAL);
 	if (m_pRom)
@@ -2048,6 +2658,16 @@ void SnesSystem::SetSnesRom(SnesRom *pRom)
 	else
 	{
 		m_BSXMemory.Detach();
+	}
+
+	/* AURORA_V4_4_CUMULATIVE_20260908
+	 * Attach after the existing exact 1 MiB Memory Pack allocation and before
+	 * MapMem() builds the first MCC bus image. Attach() is the power-on event. */
+	if (m_pRom && (m_pRom->m_Flags & SNROM_FLAG_BSXBASE))
+	{
+		if (!m_BSXBase.Attach(
+		        m_pRom->GetData(), m_pRom->GetBytes(), &m_BSXMemory))
+			printf("[BSX] could not allocate 512K base PSRAM\n");
 	}
 
 	if (m_pRom)

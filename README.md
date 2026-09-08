@@ -87,7 +87,9 @@ CD firmware and images **(experimental)**
 **FIXED:**
 
 * PC Engine video modes (Ninja Spirits, Aoi Blink, Toumaden, more)
-* Pilotwings (SNES) mode 7 rendering, also fixes other games that rely on it
+* Pilotwings (SNES) and Secret of Mana (SNES) mode 7 rendering, also fixes other games that rely on it
+* Secret of Mana (SNES) mode 5 rendering, also fixes other games that rely on it
+* Accele Brid (SNES) freeze fix
 * Speedy Gonzales in Los Gatos Banditos (SNES) performance *(with special safe frameskip)*
 * Top Gear (SNES) performance *(with special safe frameskip)*
 * Many other graphical glitches and inaccuracies on many NES, SNES, PCE and SEGA games

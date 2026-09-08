@@ -767,6 +767,104 @@ void SNCPU_TRAPFUNC SnesSystem::WriteBSXSlot(SNCpuT *pCpu, Uint32 uAddr, Uint8 u
         pSnes->m_BSXMemory.Write(off, uData);
 }
 
+/* AURORA_V4_4_CUMULATIVE_20260908
+ * Potential cartridge-side pages owned by the MCC. System WRAM/PPU pages are
+ * intentionally excluded.
+ */
+static Bool _SnesBSXBaseMCUPage(Uint8 bank, Uint16 addr)
+{
+    if ((bank <= 0x3F || (bank >= 0x80 && bank <= 0xBF)) &&
+        addr >= 0x8000)
+        return TRUE;
+
+    if ((bank >= 0x40 && bank <= 0x7D) || bank >= 0xC0)
+        return TRUE;
+
+    if (((bank >= 0x20 && bank <= 0x3F) ||
+         (bank >= 0xA0 && bank <= 0xBF)) &&
+        addr >= 0x6000 && addr <= 0x7FFF)
+        return TRUE;
+
+    return FALSE;
+}
+
+void SnesSystem::MapBSXBase(void)
+{
+    SNCpuT *pCpu = &m_Cpu;
+    Uint8 *pRom = m_pRom ? m_pRom->GetData() : NULL;
+    Uint32 nRomBytes = m_pRom ? m_pRom->GetBytes() : 0;
+    Uint8 *pPSRAM = m_BSXBase.GetPSRAM();
+    Uint32 bank;
+    Uint32 page;
+
+    if (!m_BSXBase.IsActive() || !pRom || !nRomBytes || !pPSRAM)
+        return;
+
+    for (bank = 0; bank < 0x100u; ++bank)
+    {
+        for (page = 0; page < 0x10000u; page += SNCPU_BANK_SIZE)
+        {
+            Uint32 bus;
+            Uint32 off = 0;
+            SNBSXBase::AccessE kind;
+
+            if (!_SnesBSXBaseMCUPage((Uint8)bank, (Uint16)page))
+                continue;
+
+            bus = (bank << 16) | page;
+
+            /* SNCPUSetTrap clears pMem, so order is intentional:
+             * trap baseline FIRST, then optional direct bank.
+             * SNCPUSetBank preserves the trap callbacks.
+             */
+            SNCPUSetTrap(pCpu, bus, SNCPU_BANK_SIZE, ReadBSXMCC, WriteBSXMCC);
+            SNCPUSetMemSpeed(pCpu, bus, SNCPU_BANK_SIZE, SNCPU_CYCLE_SLOW);
+
+            kind = m_BSXBase.ResolveMCU(bus, &off);
+            if (kind == SNBSXBase::ACCESS_ROM)
+            {
+                Uint32 romOff = _SnesMirrorRomOffset(nRomBytes, off);
+                SNCPUSetBank(pCpu, bus, SNCPU_BANK_SIZE,
+                             pRom + romOff, FALSE);
+            }
+            else if (kind == SNBSXBase::ACCESS_PSRAM)
+            {
+                SNCPUSetBank(
+                    pCpu, bus, SNCPU_BANK_SIZE,
+                    pPSRAM + (off & (SNES_BSX_PSRAM_BYTES - 1)), TRUE);
+            }
+            /* PACK stays trapped so the Type-1 command protocol is visible.
+             * EX/NONE stay trapped and return S-CPU MDR/open bus.
+             */
+        }
+    }
+
+    SNCPUMirror24BitBus(pCpu);
+}
+
+Uint8 SNCPU_TRAPFUNC SnesSystem::ReadBSXMCC(SNCpuT *pCpu, Uint32 uAddr)
+{
+    SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
+    Uint8 value = pCpu->uMDR;
+
+    if (pSnes && pSnes->m_BSXBase.IsActive())
+        value = pSnes->m_BSXBase.ReadMCU(uAddr, value);
+
+    pCpu->uMDR = value;
+    return value;
+}
+
+void SNCPU_TRAPFUNC SnesSystem::WriteBSXMCC(
+    SNCpuT *pCpu, Uint32 uAddr, Uint8 uData)
+{
+    SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
+    pCpu->uMDR = uData;
+
+    if (pSnes && pSnes->m_BSXBase.IsActive())
+        pSnes->m_BSXBase.WriteMCU(uAddr, uData);
+}
+
+
 /* AURORA_SA1_V1_REFERENCE_LOGIC_20260902 */
 Uint8 SNCPU_TRAPFUNC SnesSystem::ReadSA1BWRAM(SNCpuT *pCpu, Uint32 uAddr)
 {
@@ -1390,6 +1488,12 @@ void SnesSystem::MapMem(SNRomMappingE eRomMapping, Uint32 uFlags)
 			MapMemExLoRom();
 			break;
 	}
+
+	/* AURORA_V4_4_CUMULATIVE_20260908
+	 * Generic mapping installs WRAM/PPU first; MCC then owns only the physical
+	 * cartridge-side pages and may rebuild them on later bank-E commits. */
+	if (uFlags & SNROM_FLAG_BSXBASE)
+		MapBSXBase();
 
 	/* AURORA_TOP_GEAR_FASTROM_V1
 	 * The published FastROM patch for Top Gear gains speed by making ROM

@@ -1034,6 +1034,81 @@ static Bool _MainLoopLoadBSXMemoryPackFrom(MainLoopSramDeviceE eDevice)
  * When ordinary .srm selected a concrete device, the .mpk stays on that same
  * device. AUTO without ordinary SRAM may create on USB, then fall back to MC.
  */
+/* AURORA_V6_RUNTIME_EFFECT_ALL5_20260908
+ * Wrong-size .mpk files are a known legacy/failure state. Preserve the old
+ * bytes under the first free .bad/.badN name, then allow creation of the exact
+ * 1 MiB physical image. We do NOT quarantine an exact-size file merely because
+ * an fopen/read failed: that may be a transient storage problem. */
+static Bool _MainLoopQuarantineBadBSXMemoryPack(const Char *pPath)
+{
+    Char Backup[1024];
+    struct stat Status;
+    struct stat SourceStatus;
+    unsigned i;
+
+    if (!pPath || !*pPath || stat(pPath, &SourceStatus) != 0 ||
+        S_ISDIR(SourceStatus.st_mode))
+        return FALSE;
+
+    for (i = 0; i < 100U; ++i)
+    {
+        int n = i == 0
+            ? snprintf(Backup, sizeof(Backup), "%s.bad", pPath)
+            : snprintf(Backup, sizeof(Backup), "%s.bad%u", pPath, i);
+        if (n <= 0 || n >= (int)sizeof(Backup))
+            return FALSE;
+
+        if (stat(Backup, &Status) != 0)
+        {
+            /* Same-filesystem rename is the cheap path. Some PS2 storage
+             * backends are stricter, so fall back to a small streaming copy
+             * and remove the original only after an exact-size backup exists. */
+            if (rename(pPath, Backup) != 0)
+            {
+                FILE *src = fopen(pPath, "rb");
+                FILE *dst = src ? fopen(Backup, "wb") : NULL;
+                Uint8 Buffer[4096];
+                Bool ok = (src && dst) ? TRUE : FALSE;
+
+                while (ok)
+                {
+                    size_t got = fread(Buffer, 1, sizeof(Buffer), src);
+                    if (got && fwrite(Buffer, 1, got, dst) != got)
+                    {
+                        ok = FALSE;
+                        break;
+                    }
+                    if (got < sizeof(Buffer))
+                    {
+                        if (ferror(src)) ok = FALSE;
+                        break;
+                    }
+                }
+
+                if (dst)
+                {
+                    if (fflush(dst) != 0 || fclose(dst) != 0) ok = FALSE;
+                    dst = NULL;
+                }
+                if (src && fclose(src) != 0) ok = FALSE;
+
+                if (!ok || stat(Backup, &Status) != 0 ||
+                    S_ISDIR(Status.st_mode) ||
+                    Status.st_size != SourceStatus.st_size ||
+                    remove(pPath) != 0)
+                {
+                    remove(Backup);
+                    return FALSE;
+                }
+            }
+
+            ConPrint("BS-X invalid Memory Pack preserved as: %s\n", Backup);
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 static Bool _MainLoopCreateBSXMemoryPackOn(MainLoopSramDeviceE eDevice)
 {
     const Char *pRoot = _MainLoopSramRoot(eDevice);
@@ -1060,13 +1135,27 @@ static Bool _MainLoopCreateBSXMemoryPackOn(MainLoopSramDeviceE eDevice)
 
     _MainLoopBSXMemoryPackBuildPath(Path, sizeof(Path), pRoot);
 
-    /* The load path already rejected this file. If something exists at the
-     * target name, preserve it instead of truncating it with fopen("wb"). */
+    /* AURORA_V6_RUNTIME_EFFECT_ALL5_20260908
+     * Exact-size-but-unreadable targets remain untouched (possible transient
+     * I/O). A wrong-size legacy image is unambiguously not a physical 8M pack:
+     * preserve it under .bad/.badN and replace the active name. */
     if (stat(Path, &Status) == 0)
     {
-        ConPrint("WARNING: BS-X Memory Pack exists but is not a valid/loadable 1 MiB image: %s\n",
-                 Path);
-        return FALSE;
+        if (S_ISDIR(Status.st_mode) ||
+            (Uint32)Status.st_size == (Uint32)nBytes)
+        {
+            ConPrint("WARNING: BS-X Memory Pack exists but is not loadable: %s\n",
+                     Path);
+            return FALSE;
+        }
+
+        ConPrint("WARNING: BS-X Memory Pack has wrong size (%ld, expected %d): %s\n",
+                 (long)Status.st_size, (int)nBytes, Path);
+        if (!_MainLoopQuarantineBadBSXMemoryPack(Path))
+        {
+            ConPrint("BS-X Memory Pack quarantine FAILED: %s\n", Path);
+            return FALSE;
+        }
     }
 
     if (!_MainLoopSramWriteFile(Path, pData, (Uint32)nBytes))
@@ -1102,8 +1191,18 @@ static void _MainLoopLoadBSXMemoryPack(MainLoopSramDeviceE ePreferredDevice)
     Bool bCreated = FALSE;
     MainLoopSramDeviceE eBackingDevice = MAINLOOP_SRAMDEVICE_AUTO;
 
-    if (_pSystem != _pSnes || !_pSnes || !_pSnes->HasBSXMemoryPack())
+    if (_pSystem != _pSnes || !_pSnes)
         return;
+
+    /* AURORA_V6_RUNTIME_EFFECT_ALL5_20260908
+     * Re-assert the physical pack/base hardware at the persistence boundary.
+     * This turns a failed first allocation into a retry instead of silently
+     * skipping the entire .mpk lifecycle. */
+    if (!_pSnes->EnsureBSXMemoryPack())
+    {
+        ConPrint("WARNING: BS-X Memory Pack is expected but could not be attached\n");
+        return;
+    }
 
     /* First choice: keep .mpk coherent with an ordinary .srm backing if
      * _MainLoopLoadSRAM() already resolved one concrete device. */
