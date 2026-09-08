@@ -51,7 +51,9 @@ SNSuperGameBoy::SNSuperGameBoy()
 
 SNSuperGameBoy::~SNSuperGameBoy() { Detach(); }
 
-Bool SNSuperGameBoy::AttachGame(const Uint8 *pData, Uint32 nBytes, ModelE eModel)
+Bool SNSuperGameBoy::AttachGame(
+    const Uint8 *pData, Uint32 nBytes, ModelE eModel,
+    const Uint8 *pBootRom, Uint32 nBootRomBytes) /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908 */
 {
     AuroraSgbBootTrace("SGB 4A: detach old");
     Detach();
@@ -83,8 +85,10 @@ Bool SNSuperGameBoy::AttachGame(const Uint8 *pData, Uint32 nBytes, ModelE eModel
     }
 
     AuroraSgbBootTrace("SGB 4D: GBHost load ROM");
-    if (!m_GB.LoadROM(pData, nBytes,
-            m_eModel == MODEL_SGB2 ? GBHost::MODEL_SGB2 : GBHost::MODEL_SGB1))
+    if (!m_GB.LoadROM(
+            pData, nBytes,
+            m_eModel == MODEL_SGB2 ? GBHost::MODEL_SGB2 : GBHost::MODEL_SGB1,
+            pBootRom, nBootRomBytes))
     {
         m_GB.Shutdown();
         return FALSE;
@@ -194,16 +198,11 @@ Int16 SNSuperGameBoy::Saturate16(Int32 value)
 
 void SNSuperGameBoy::BeginBootHandshake()
 {
-    /* AURORA_SGB_GAMBATTE_HLE_BOOT_V1_20260907
-     * AURORA_SGB_BSNES_PACKET_FIFO_V1_2_6_20260907
-     *
-     * Match bsnes/libsupergameboy: queue F1/F3/F5/F7/F9/FB immediately
-     * when /RESET rises. No boot-ROM bytes are embedded. */
-    m_uBootPacketIndex = 0;
-    m_uBootWaitClocks = 0;
-    m_uBootLine = 0;
-    m_uBootLineClocks = 0;
-    m_bBootHandshake = TRUE;
+    /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908
+     * Real SGB/SGB2 SM83 boot ROM is mandatory. Legacy packet-HLE helpers
+     * remain compiled for historical diagnostics, but this entry point never
+     * queues F1/F3/F5/F7/F9/FB itself. The boot ROM drives FF00/ICD2. */
+    ResetBootHandshake();
 
     g_uAuroraSgbFinalWaitTrace = 0;
     g_uAuroraSgbFirstRunTrace = 0;
@@ -213,13 +212,13 @@ void SNSuperGameBoy::BeginBootHandshake()
     g_bAuroraSgbPreTickUnsafeHold = FALSE;
 
     ResetAudioPipeline();
-    AuroraSgbBootTrace("SGB H12: bsnes FIFO handshake begin");
+    if (!m_GB.HasRealBootROM())
+    {
+        AuroraSgbBootTrace("SGB H12: ERROR real SM83 bootstrap missing");
+        return;
+    }
 
-    while (m_uBootPacketIndex < BOOT_PACKET_COUNT)
-        SubmitBootPacket();
-
-    m_bBootHandshake = FALSE;
-    AuroraSgbBootTrace("SGB H70: six bootstrap packets queued");
+    AuroraSgbBootTrace("SGB H12: real SM83 bootstrap owns handshake");
 }
 
 void SNSuperGameBoy::AdvanceBootLCD(Uint32 nGBClocks)
@@ -296,7 +295,10 @@ void SNSuperGameBoy::Write(Uint32 uAddr, Uint8 uData)
         m_GB.Reset(m_eModel == MODEL_SGB2 ? GBHost::MODEL_SGB2 : GBHost::MODEL_SGB1);
         AuroraSgbBootTrace("SGB H44: GB reset returned");
         BeginBootHandshake();
-        AuroraSgbBootTrace("SGB H45: handshake armed");
+        AuroraSgbBootTrace(
+            m_GB.HasRealBootROM()
+                ? "SGB H45: real boot ROM running"
+                : "SGB H45: HLE handshake armed"); /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908 */
     }
 }
 
@@ -543,6 +545,7 @@ Bool SNSuperGameBoy::RestoreState(const void *pData, Uint32 nBytes)
     memcpy(&h, p, sizeof(h)); p += sizeof(h);
     if (h.Magic != STATE_MAGIC || h.Version != STATE_VERSION ||
         (h.Model != MODEL_SGB1 && h.Model != MODEL_SGB2) ||
+        h.Model != (Uint32)m_eModel || /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908: never cross-restore SGB1/SGB2 */
         h.GameBytes != m_uGameBytes || h.GameCRC != m_uGameCRC ||
         h.ICDBytes != sizeof(icd) || h.GBBytes != sizeof(gb) ||
         h.SaveBytes > MAX_SAVEDATA_BYTES ||

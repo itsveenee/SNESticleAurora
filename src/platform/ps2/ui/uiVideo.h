@@ -21,5 +21,6 @@ public:
    to populate g_GskVideoMode / g_GskDispOffX / g_GskDispOffY. */
 void VideoSettingsLoad(void);
 void VideoSettingsSave(void);
+Int32 VideoGetSgbBiosModel(void); /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908 */
 
 #endif

@@ -31,6 +31,7 @@ static char s_SmdExternalCartPath[1024] = {0}; /* AURORA_SUPER_MAGIC_DRIVE_V1_20
 #include "pce/beetle/pce_bridge.h"
 #include "mainloop_state.h"
 #include "mainloop_ui.h"
+#include "uiVideo.h" /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908: SGB BIOS selector */
 #include "mainloop_bgm.h" /* AURORA_V4_16_SAFE_GAME_SWITCH_FLUSH_20260830 */
 #include "snes.h"
 #include "rendersurface.h"
@@ -3090,191 +3091,290 @@ static void _MainLoopSgbCompact(const Char *pIn, Char *pOut, Int32 nOut)
 /* AURORA_SGB_FIRMWARE_TRACE_V0_6_2_20260904 */
 static void _MainLoopSgbBootTrace(const Char *pText);
 
-static Bool _MainLoopTrySgbFirmware(const Char *pPath, Bool *pbSgb2)
+/* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908
+ * Strict SGB firmware identity.
+ *
+ * Only basename families sgb.* and sgb2.* are eligible. Descriptive No-Intro
+ * names are intentionally ignored. CRC32 is calculated by this frontend so
+ * firmware validation does not depend on miniz's CRC ABI. */
+static Uint32 _MainLoopSgbCRC32Update(
+    Uint32 crc, const Uint8 *pData, Uint32 nBytes)
+{
+    Uint32 bit;
+    while (nBytes--)
+    {
+        crc ^= *pData++;
+        for (bit = 0; bit < 8U; ++bit)
+            crc = (crc >> 1) ^
+                (0xEDB88320U & (0U - (crc & 1U)));
+    }
+    return crc;
+}
+
+static Bool _MainLoopSgbFileCRC32(
+    const Char *pPath, Uint32 *pCRC, Uint32 *pBytes)
+{
+    FILE *fp;
+    Uint8 buf[4096];
+    Uint32 crc = 0xFFFFFFFFU;
+    Uint32 total = 0;
+    size_t got;
+
+    if (!pPath || !pCRC || !pBytes)
+        return FALSE;
+    fp = fopen(pPath, "rb");
+    if (!fp)
+        return FALSE;
+
+    while ((got = fread(buf, 1, sizeof(buf), fp)) != 0)
+    {
+        if (total > 0x80000U ||
+            got > (size_t)(0x80000U - total))
+        {
+            fclose(fp);
+            return FALSE;
+        }
+        crc = _MainLoopSgbCRC32Update(
+            crc, buf, (Uint32)got);
+        total += (Uint32)got;
+    }
+    if (ferror(fp))
+    {
+        fclose(fp);
+        return FALSE;
+    }
+    fclose(fp);
+
+    *pCRC = crc ^ 0xFFFFFFFFU;
+    *pBytes = total;
+    return TRUE;
+}
+
+static Bool _MainLoopSgbProgramCRCAllowed(
+    Bool bSgb2, Uint32 crc, Uint32 bytes)
+{
+    if (bSgb2)
+        return (bytes == 0x80000U &&
+                crc == 0xCB176E45U) ? TRUE : FALSE;
+
+    if (bytes != 0x40000U)
+        return FALSE;
+
+    return (crc == 0x2E35EDBBU || /* SGB 1.0 */
+            crc == 0x27A03C98U || /* SGB Rev 1 */
+            crc == 0x8A4A174FU)   /* SGB Rev 2 */
+        ? TRUE : FALSE;
+}
+
+static Bool _MainLoopSgbBootCRCAllowed(
+    Uint32 crc, Uint32 bytes)
+{
+    return (bytes == 0x100U &&
+            (crc == 0xEC8A83B9U ||
+             crc == 0x53D0DD63U)) ? TRUE : FALSE;
+}
+
+static Bool _MainLoopSgbStemMatch(
+    const Char *pName, const Char *pStem)
+{
+    size_t n;
+    if (!pName || !pStem)
+        return FALSE;
+    n = strlen(pStem);
+    return !strncasecmp(pName, pStem, n) &&
+           pName[n] == '.' && pName[n + 1] != '\0'
+        ? TRUE : FALSE;
+}
+
+/* Return 1 = exactly one valid file in this SYSTEM directory,
+ * 0 = none, -1 = ambiguous (two or more valid files for the same stem).
+ * An invalid matching filename is ignored after a diagnostic CRC print. */
+static Int32 _MainLoopScanSgbStemDirectory(
+    const Char *pDirectory, const Char *pStem, Int32 kind,
+    Char *pChosen, Uint32 nChosen)
+{
+    DIR *d;
+    struct dirent *de;
+    Int32 matches = 0;
+    Char first[1024];
+
+    if (!pDirectory || !*pDirectory || !pStem || !*pStem ||
+        !pChosen || !nChosen)
+        return 0;
+
+    first[0] = 0;
+    d = opendir(pDirectory);
+    if (!d)
+        return 0;
+
+    while ((de = readdir(d)) != NULL)
+    {
+        Char path[1024];
+        Uint32 crc, bytes;
+        Bool valid;
+
+        if (!_MainLoopSgbStemMatch(de->d_name, pStem))
+            continue;
+        if (snprintf(path, sizeof(path), "%s/%s",
+                     pDirectory, de->d_name) >= (int)sizeof(path))
+            continue;
+        if (!_MainLoopSgbFileCRC32(path, &crc, &bytes))
+            continue;
+
+        if (kind == 1)
+            valid = _MainLoopSgbProgramCRCAllowed(FALSE, crc, bytes);
+        else if (kind == 2)
+            valid = _MainLoopSgbProgramCRCAllowed(TRUE, crc, bytes);
+        else
+            valid = _MainLoopSgbBootCRCAllowed(crc, bytes);
+
+        if (!valid)
+        {
+            ConPrint("Rejected %s: CRC32 %08X, %u bytes\n",
+                     path, (unsigned)crc, (unsigned)bytes);
+            continue;
+        }
+
+        ++matches;
+        if (matches == 1)
+        {
+            snprintf(first, sizeof(first), "%s", path);
+            ConPrint("Accepted %s.*: %s (CRC32 %08X)\n",
+                     pStem, path, (unsigned)crc);
+        }
+        else
+        {
+            ConPrint("Ambiguous %s.* in %s: more than one valid image\n",
+                     pStem, pDirectory);
+        }
+    }
+
+    closedir(d);
+    if (matches == 1)
+    {
+        snprintf(pChosen, nChosen, "%s", first);
+        return 1;
+    }
+    return matches > 1 ? -1 : 0;
+}
+
+static Bool _MainLoopFindStrictSgbStem(
+    const Char *pStem, Int32 kind,
+    Char *pChosen, Uint32 nChosen)
+{
+    static const Char *const preferred[] = {
+        "mass0:/SNESticle/SYSTEM",
+        "mass1:/SNESticle/SYSTEM",
+        "mass:/SNESticle/SYSTEM",
+        NULL
+    };
+    static const Char *const fallback[] = {
+        "mc0:/SNESticle/SYSTEM",
+        "mc1:/SNESticle/SYSTEM",
+        "mmce0:/SNESticle/SYSTEM",
+        "mmce1:/SNESticle/SYSTEM",
+        NULL
+    };
+    const Char *pActiveRoot;
+    Char active[1024];
+    Int32 i, result;
+
+    if (!pChosen || !nChosen)
+        return FALSE;
+    pChosen[0] = 0;
+
+    for (i = 0; preferred[i]; ++i)
+    {
+        result = _MainLoopScanSgbStemDirectory(
+            preferred[i], pStem, kind, pChosen, nChosen);
+        if (result > 0) return TRUE;
+        if (result < 0) return FALSE;
+    }
+
+    pActiveRoot = MainLoopSramGetBrowseRoot();
+    if (pActiveRoot && *pActiveRoot &&
+        snprintf(active, sizeof(active), "%s/SYSTEM",
+                 pActiveRoot) < (int)sizeof(active))
+    {
+        result = _MainLoopScanSgbStemDirectory(
+            active, pStem, kind, pChosen, nChosen);
+        if (result > 0) return TRUE;
+        if (result < 0) return FALSE;
+    }
+
+    for (i = 0; fallback[i]; ++i)
+    {
+        result = _MainLoopScanSgbStemDirectory(
+            fallback[i], pStem, kind, pChosen, nChosen);
+        if (result > 0) return TRUE;
+        if (result < 0) return FALSE;
+    }
+
+    return FALSE;
+}
+
+static Bool _MainLoopLoadRequiredSgbFirmware(
+    const Char *pPath, Bool bSgb2)
 {
     CFileIO f;
     Emu::Rom::LoadErrorE e;
-    Char compact[128];
-    if (!pPath || !*pPath || !pbSgb2) return FALSE;
+    Uint32 crc, bytes;
 
-    _MainLoopSgbBootTrace("SGB 1C: opening firmware");
+    if (!pPath || !*pPath || !_pSnesRom ||
+        !_MainLoopSgbFileCRC32(pPath, &crc, &bytes) ||
+        !_MainLoopSgbProgramCRCAllowed(bSgb2, crc, bytes))
+        return FALSE;
+
     if (!f.Open(pPath, "rb"))
         return FALSE;
 
-    _MainLoopSgbBootTrace("SGB 1D: firmware opened");
     _pSnesRom->Unload();
-
-    _MainLoopSgbBootTrace("SGB 1E: parsing firmware");
     e = _pSnesRom->LoadRom(&f);
-
-    _MainLoopSgbBootTrace("SGB 1F: parse returned");
     f.Close();
-    if (e != Emu::Rom::LoadErrorE::LOADERROR_NONE ||
-        !(_pSnesRom->m_Flags & SNROM_FLAG_GAMEBOY))
+    if (e != Emu::Rom::LoadErrorE::LOADERROR_NONE)
     {
         _pSnesRom->Unload();
         SnesRomResetRuntimeCompatForExternalDevice();
         return FALSE;
     }
-    _MainLoopSgbCompact(_pSnesRom->GetRomTitle(), compact, sizeof(compact));
-    *pbSgb2 = strstr(compact, "SUPERGAMEBOY2") ? TRUE : FALSE;
-    if (!*pbSgb2)
-    {
-        _MainLoopSgbCompact(pPath, compact, sizeof(compact));
-        if (strstr(compact, "SGB2") || strstr(compact, "SUPERGAMEBOY2")) *pbSgb2 = TRUE;
-    }
+
+    /* CRC + strict sgb./sgb2. stem establishes physical SGB identity.
+     * Preserve the existing SGB shell path even if a ROM header does not
+     * advertise the legacy E3 type exactly as Aurora expects. */
+    _pSnesRom->m_Flags |= SNROM_FLAG_GAMEBOY;
+    ConPrint("SGB program selected: %s\n",
+             bSgb2 ? "SGB2" : "SGB1");
     return TRUE;
 }
 
-static Bool _MainLoopFindAndLoadSgbFirmware(Bool *pbSgb2, Char *pChosen, Int32 nChosen)
+static Bool _MainLoopFindAndLoadSgbFirmware(
+    Bool *pbSgb2, Char *pChosen, Int32 nChosen)
 {
-    /* AURORA_SGB_FIRMWARE_FASTPATH_V0_6_5_20260905
-     * AURORA_SGB_FORCE_GENERIC_FIRMWARE_V0_6_15_3_20260905
-     *
-     * "sgb.*" is an explicit USER OVERRIDE, not an SGB1 label.
-     * If a valid generic sgb.* exists it MUST win over:
-     *   - the last-success cache,
-     *   - sgb2.*,
-     *   - descriptive aliases,
-     *   - generic SYSTEM directory fallback.
-     *
-     * The actual SGB1/SGB2 model is still detected by
-     * _MainLoopTrySgbFirmware() from the loaded ROM contents/title.
-     * Therefore an SGB2 BIOS deliberately renamed to sgb.sfc is still
-     * executed as SGB2; the generic filename only forces selection.
-     */
-    static Char s_LastFirmware[1024] = {0};
-
-    static const Char *forcedNames[] = {
-        "sgb.sfc", "sgb.smc", "sgb.fig", "sgb.rom",
-        "SGB.SFC", "SGB.SMC", "SGB.FIG", "SGB.ROM",
-        NULL
-    };
-
-    static const Char *normalNames[] = {
-        "sgb2.sfc", "sgb2.smc", "sgb2.fig", "sgb2.rom",
-        "Super Game Boy 2 (Japan).sfc",
-        "Super Game Boy 2 (Japan).smc",
-        "Super Game Boy 2 (Japan).fig",
-        "Super Game Boy 2 (Japan).rom",
-        "Super Game Boy (World).sfc",
-        "Super Game Boy (World).smc",
-        "Super Game Boy (World).fig",
-        "Super Game Boy (World).rom",
-        NULL
-    };
-
-    Char dir[512], path[1024];
-    Int32 i;
+    Char sgb1[1024], sgb2[1024];
+    Bool wantSgb2;
+    const Char *selected;
 
     if (!pbSgb2 || !pChosen || nChosen <= 0)
         return FALSE;
-
     pChosen[0] = 0;
 
-    /* 1) HARD OVERRIDE: sgb.*.
-       This probe happens on EVERY .gb/.gbc launch, before cache reuse. */
-    for (i = 0; forcedNames[i]; ++i)
-    {
-        if (!MainLoopFindSystemFileDirectory(
-                dir, sizeof(dir), forcedNames[i]))
-            continue;
-
-        if (snprintf(path, sizeof(path), "%s/%s",
-                     dir, forcedNames[i]) >= (int)sizeof(path))
-            continue;
-
-        _MainLoopSgbBootTrace("SGB 1R: forced sgb.* candidate");
-
-        if (_MainLoopTrySgbFirmware(path, pbSgb2))
-        {
-            snprintf(s_LastFirmware, sizeof(s_LastFirmware), "%s", path);
-            snprintf(pChosen, nChosen, "%s", path);
-
-            ConPrint("SGB firmware override selected: %s (%s)\n",
-                     path, *pbSgb2 ? "SGB2" : "SGB1");
-            _MainLoopSgbBootTrace(
-                *pbSgb2
-                    ? "SGB 1S: forced sgb.* selected as SGB2"
-                    : "SGB 1S: forced sgb.* selected as SGB1");
-            return TRUE;
-        }
-    }
-
-    /* 2) Cache only after proving no valid sgb.* override exists. */
-    if (s_LastFirmware[0])
-    {
-        _MainLoopSgbBootTrace("SGB 1Q: cached firmware");
-        if (_MainLoopTrySgbFirmware(s_LastFirmware, pbSgb2))
-        {
-            snprintf(pChosen, nChosen, "%s", s_LastFirmware);
-            return TRUE;
-        }
-        s_LastFirmware[0] = 0;
-    }
-
-    /* 3) Normal explicit firmware names. */
-    for (i = 0; normalNames[i]; ++i)
-    {
-        if (!MainLoopFindSystemFileDirectory(
-                dir, sizeof(dir), normalNames[i]))
-            continue;
-
-        if (snprintf(path, sizeof(path), "%s/%s",
-                     dir, normalNames[i]) >= (int)sizeof(path))
-            continue;
-
-        if (_MainLoopTrySgbFirmware(path, pbSgb2))
-        {
-            snprintf(s_LastFirmware, sizeof(s_LastFirmware), "%s", path);
-            snprintf(pChosen, nChosen, "%s", path);
-            return TRUE;
-        }
-    }
-
-    /* 4) Last-resort SYSTEM scan.
-       Require a valid SGB SNES ROM; forced sgb.* was already tried above. */
-    _MainLoopSgbBootTrace("SGB 1G: fallback SYSTEM");
-
-    if (!MainLoopEnsureSystemDirectory(dir, sizeof(dir)))
+    /* Both accessory program ROMs are mandatory. */
+    if (!_MainLoopFindStrictSgbStem(
+            "sgb", 1, sgb1, sizeof(sgb1)) ||
+        !_MainLoopFindStrictSgbStem(
+            "sgb2", 2, sgb2, sizeof(sgb2)))
         return FALSE;
 
-    _MainLoopSgbBootTrace("SGB 1H: SYSTEM path OK");
-    _MainLoopSgbBootTrace("SGB 1I: opening SYSTEM");
+    wantSgb2 = VideoGetSgbBiosModel() ? TRUE : FALSE;
+    selected = wantSgb2 ? sgb2 : sgb1;
 
-    DIR *d = opendir(dir);
-    if (!d)
+    if (!_MainLoopLoadRequiredSgbFirmware(
+            selected, wantSgb2))
         return FALSE;
 
-    _MainLoopSgbBootTrace("SGB 1J: SYSTEM opened");
-
-    struct dirent *de;
-    while ((de = readdir(d)) != NULL)
-    {
-        const Char *dot = strrchr(de->d_name, '.');
-
-        if (!dot ||
-            (strcasecmp(dot, ".sfc") &&
-             strcasecmp(dot, ".smc") &&
-             strcasecmp(dot, ".fig") &&
-             strcasecmp(dot, ".rom")))
-            continue;
-
-        if (snprintf(path, sizeof(path), "%s/%s",
-                     dir, de->d_name) >= (int)sizeof(path))
-            continue;
-
-        if (_MainLoopTrySgbFirmware(path, pbSgb2))
-        {
-            snprintf(s_LastFirmware, sizeof(s_LastFirmware), "%s", path);
-            snprintf(pChosen, nChosen, "%s", path);
-            closedir(d);
-            return TRUE;
-        }
-    }
-
-    closedir(d);
-    return FALSE;
+    *pbSgb2 = wantSgb2;
+    snprintf(pChosen, nChosen, "%s", selected);
+    return TRUE;
 }
 
 /* AURORA_SGB_BOOT_TRACE_V0_6_1_20260904
@@ -3299,26 +3399,95 @@ extern "C" void AuroraSgbBootTrace(const char *pText)
     _MainLoopSgbBootTrace((const Char *)pText);
 }
 
+/* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908
+ * Mandatory sgb_bios.*. SGB1 and SGB2 SM83 boot ROMs are bit-identical except
+ * byte $00FD (01 for SGB1, FF for SGB2). Accept either authentic dump by CRC,
+ * then normalize that one byte in RAM to the configured model. */
+static Bool _MainLoopLoadGbBios(
+    Uint8 *pOut, Uint32 nOutBytes, Bool bSgb2,
+    Char *pChosen, Uint32 nChosenBytes)
+{
+    Char path[1024];
+    FILE *fp;
+    Uint32 inputCRC, inputBytes;
+    Uint32 normalizedCRC, expectedCRC;
+    size_t got;
+
+    if (!pOut || nOutBytes < 0x100U)
+        return FALSE;
+    if (pChosen && nChosenBytes)
+        pChosen[0] = 0;
+
+    if (!_MainLoopFindStrictSgbStem(
+            "sgb_bios", 3, path, sizeof(path)))
+        return FALSE;
+
+    if (!_MainLoopSgbFileCRC32(
+            path, &inputCRC, &inputBytes) ||
+        !_MainLoopSgbBootCRCAllowed(inputCRC, inputBytes))
+        return FALSE;
+
+    fp = fopen(path, "rb");
+    if (!fp)
+        return FALSE;
+    got = fread(pOut, 1, 0x100U, fp);
+    fclose(fp);
+    if (got != 0x100U)
+        return FALSE;
+
+    pOut[0xFD] = bSgb2 ? 0xFFU : 0x01U;
+
+    expectedCRC = bSgb2 ? 0x53D0DD63U : 0xEC8A83B9U;
+    normalizedCRC =
+        _MainLoopSgbCRC32Update(
+            0xFFFFFFFFU, pOut, 0x100U) ^ 0xFFFFFFFFU;
+    if (normalizedCRC != expectedCRC)
+        return FALSE;
+
+    if (pChosen && nChosenBytes)
+        snprintf(pChosen, nChosenBytes, "%s", path);
+
+    ConPrint("SGB SM83 BIOS: %s input=%08X active=%08X (%s)\n",
+             path, (unsigned)inputCRC, (unsigned)normalizedCRC,
+             bSgb2 ? "SGB2" : "SGB1");
+    return TRUE;
+}
+
 static Bool _MainLoopBootSuperGameBoy(const Uint8 *pGbData, Uint32 nGbBytes,
                                       const Char *pOriginalPath,
                                       Uint32 uGbCRC, Bool bLoadSRAM)
 {
     Bool bSgb2 = FALSE;
     Char firmware[1024];
+    Uint8 gbBios[0x100];
+    Char gbBiosPath[1024];
     if (!pGbData || nGbBytes < 0x150U || !_pSnes || !_pSnesRom) return FALSE;
     _MainLoopSgbBootTrace("SGB 1/6: firmware search");
     if (!_MainLoopFindAndLoadSgbFirmware(&bSgb2, firmware, sizeof(firmware)))
     {
-        MainLoopModalPrintf(60 * 6,
-            "Super Game Boy BIOS missing. Put sgb2.sfc or sgb.sfc in SNESticle/SYSTEM.");
+        MainLoopModalPrintf(60 * 7,
+            "SGB requires valid sgb.* AND sgb2.* in SNESticle/SYSTEM.");
         return FALSE;
     }
 
     _MainLoopSgbBootTrace("SGB 2/6: firmware OK");
+    gbBiosPath[0] = 0;
+    if (!_MainLoopLoadGbBios(
+            gbBios, sizeof(gbBios), bSgb2,
+            gbBiosPath, sizeof(gbBiosPath)))
+    {
+        _pSnesRom->Unload();
+        MainLoopModalPrintf(60 * 7,
+            "SGB requires a valid sgb_bios.* 256-byte SGB boot ROM in SYSTEM.");
+        return FALSE;
+    }
+    _MainLoopSgbBootTrace("SGB 2B: real SM83 BIOS ready");
     _MainLoopSgbBootTrace("SGB 3/6: SNES shell");
     _pSnes->SetSnesRom(_pSnesRom);
     _MainLoopSgbBootTrace("SGB 4/6: GB core attach");
-    if (!_pSnes->AttachSuperGameBoyGame(pGbData, nGbBytes, bSgb2))
+    if (!_pSnes->AttachSuperGameBoyGame(
+            pGbData, nGbBytes, bSgb2,
+            gbBios, sizeof(gbBios)))
     {
         _pSnes->SetSnesRom(NULL);
         _pSnesRom->Unload();
@@ -3335,7 +3504,9 @@ static Bool _MainLoopBootSuperGameBoy(const Uint8 *pGbData, Uint32 nGbBytes,
     /* State identity is resolved lazily from the active GB payload via
        GetSuperGameBoyGameCRC/GetSuperGameBoyGameBytes, never from firmware. */
     (void)uGbCRC;
-    ConPrint("SGB Loaded: %s via %s (%s)\n", _RomName, firmware, bSgb2 ? "SGB2" : "SGB1");
+    ConPrint("SGB Loaded: %s via %s + %s (%s)\n",
+             _RomName, firmware, gbBiosPath,
+             bSgb2 ? "SGB2" : "SGB1"); /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908 */
     _MainLoopSetSampleRate(_pSnes->GetSampleRate());
     if (bLoadSRAM) _MainLoopLoadSRAM();
     if (_fbTexture[0])

@@ -602,6 +602,19 @@ static void _SnesMapBSCROMPage(SNCpuT *pCpu, Uint8 *pRom, Uint32 nRomBytes,
     SNCPUSetBank(pCpu, uBus, SNCPU_BANK_SIZE, pRom + uOffset, FALSE);
 }
 
+/* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908
+ * Derby Stallion 96 and Sound Novel Tsukuru use the newer-observed BSC-LoROM
+ * slot decode: C0-DF with A15 ignored (32 KiB per bank). Keep every other
+ * BSC-LoROM board on Aurora's existing C0-EF / 64 KiB decode. */
+static Bool _SnesBSCUses32KPackDecode(const SnesRom *pRom)
+{
+    const char *pTitle = pRom ? pRom->GetRomTitle() : NULL;
+    return pTitle &&
+        (!strcmp(pTitle, "DERBY STALLION 96") ||
+         !strcmp(pTitle, "SOUND NOVEL-TCOOL"))
+        ? TRUE : FALSE;
+}
+
 void SnesSystem::MapBSCLoRom(void)
 {
     SNCpuT *pCpu = &m_Cpu;
@@ -616,6 +629,8 @@ void SnesSystem::MapBSCLoRom(void)
         {0xA0, 0xBF, 0x100000u},
     };
     Uint32 r, bank, a;
+    Uint32 slotEnd = _SnesBSCUses32KPackDecode(m_pRom)
+        ? 0xDFU : 0xEFU; /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908 */
 
     MapMem(_SnesMemMap_BSCLoRom_Sys);
 
@@ -633,8 +648,8 @@ void SnesSystem::MapBSCLoRom(void)
         }
     }
 
-    /* BSC-LoROM slot: C0-EF:0000-FFFF. */
-    for (bank = 0xC0; bank <= 0xEF; ++bank)
+    /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908: ordinary BSC C0-EF; Derby/Sound Novel C0-DF. */
+    for (bank = 0xC0; bank <= slotEnd; ++bank)
     {
         for (a = 0; a < 0x10000; a += SNCPU_BANK_SIZE)
         {
@@ -720,9 +735,19 @@ Bool SnesSystem::ResolveBSXSlotAddress(Uint32 uAddr, Uint32 *pOffset) const
 
     if (m_pRom->m_eMapping == SNROM_MAPPING_BSCLOROM)
     {
-        if (bank < 0xC0 || bank > 0xEF)
-            return FALSE;
-        off = ((Uint32)(bank - 0xC0) << 16) | addr;
+        if (_SnesBSCUses32KPackDecode(m_pRom))
+        {
+            if (bank < 0xC0 || bank > 0xDF)
+                return FALSE;
+            off = ((Uint32)(bank - 0xC0) << 15) |
+                  (Uint32)(addr & 0x7FFFu);
+        }
+        else
+        {
+            if (bank < 0xC0 || bank > 0xEF)
+                return FALSE;
+            off = ((Uint32)(bank - 0xC0) << 16) | addr;
+        }
         *pOffset = off & (SNES_BSX_MEMORY_PACK_BYTES - 1);
         return TRUE;
     }

@@ -30,7 +30,7 @@ typedef char AuroraSgbVideoPixelMustBe32Bit[
 extern "C" void AuroraSgbBootTrace(const char *pText);
 
 static const Uint32 GBHOST_STATE_MAGIC = 0x424D4147U; /* "GAMB" LE */
-static const Uint32 GBHOST_STATE_VERSION = 5U; /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907 */
+static const Uint32 GBHOST_STATE_VERSION = 6U; /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908: real-boot state ABI */
 static const Uint32 AUDIO_FRAMES = 4096U;
 /* AURORA_SGB_GAMBATTE_SHADE8_JOYP_SYNC_PERF_V3_20260908
  * 24576 GB clocks normally produce 12288 raw stereo frames. The 16K scratch
@@ -70,6 +70,8 @@ struct GBHost::Impl
     Uint32 romCRC;
     Int64 clockCredit;
     Uint32 pendingClocks; /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907 */
+    Uint8 bootRom[0x100];
+    Bool realBootRom; /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908 */
 
     JoypHookT joypHook;
     PixelHookT pixelHook;
@@ -96,6 +98,7 @@ struct GBHost::Impl
     Impl()
         : initialized(TRUE), loaded(FALSE), model(MODEL_SGB1),
           romBytes(0), romCRC(0), clockCredit(0), pendingClocks(0),
+          realBootRom(FALSE), /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908 */
           joypHook(NULL), pixelHook(NULL),
           hresetHook(NULL), vresetHook(NULL), hookContext(NULL),
           icd2FastPath(NULL),
@@ -109,6 +112,7 @@ struct GBHost::Impl
              ++i)
             screen[i] = (gambatte::video_pixel_t)0U;
         memset(audio, 0, sizeof(audio));
+        memset(bootRom, 0, sizeof(bootRom)); /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908 */
     }
 };
 
@@ -135,6 +139,22 @@ static void AuroraGambatteApplySgbShadePalette(GBHost::Impl *p)
  * Aurora has one active SGB GBHost. Keep the staged callback ABI tiny and
  * avoid reintroducing a generic libretro frontend. */
 static GBHost::Impl *g_AuroraGambatteRasterHost = NULL;
+
+/* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908
+ * Gambatte's BootloaderGetter receives its internal Bootloader pointer, not
+ * caller userdata. Aurora has one active SGB, so bind that one host here. */
+static GBHost::Impl *g_AuroraGambatteBootHost = NULL;
+
+static bool AuroraGambatteSgbBootloaderGetter(
+    void *ignored, bool isgbc, uint8_t *data, uint32_t bytes)
+{
+    GBHost::Impl *p = g_AuroraGambatteBootHost;
+    (void)ignored;
+    if (!p || !p->realBootRom || isgbc || !data || bytes < 0x100U)
+        return false;
+    memcpy(data, p->bootRom, 0x100U);
+    return true;
+}
 
 extern "C" void AuroraGambatteSgbNewLy(unsigned line)
 {
@@ -177,6 +197,8 @@ void GBHost::Shutdown()
 
     if (g_AuroraGambatteRasterHost == m_p)
         g_AuroraGambatteRasterHost = NULL;
+    if (g_AuroraGambatteBootHost == m_p)
+        g_AuroraGambatteBootHost = NULL; /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908 */
 
     delete m_p;
     m_p = NULL;
@@ -191,6 +213,11 @@ Bool GBHost::IsLoaded() const
 {
     return m_p && m_p->loaded ? TRUE : FALSE;
 }
+
+Bool GBHost::HasRealBootROM() const
+{
+    return (m_p && m_p->loaded && m_p->realBootRom) ? TRUE : FALSE;
+} /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908 */
 
 unsigned char GBHost::GambatteJoypCallback(
     void *pOpaque, unsigned char p14p15, bool bWrite)
@@ -247,7 +274,9 @@ static void AuroraGambatteConsumeAudio(GBHost::Impl *p, Uint32 nFrames)
 
 
 
-Bool GBHost::LoadROM(const Uint8 *pData, Uint32 nBytes, ModelE eModel)
+Bool GBHost::LoadROM(
+    const Uint8 *pData, Uint32 nBytes, ModelE eModel,
+    const Uint8 *pBootRom, Uint32 nBootRomBytes)
 {
     if (!pData || nBytes < 0x150U)
         return FALSE;
@@ -256,23 +285,27 @@ Bool GBHost::LoadROM(const Uint8 *pData, Uint32 nBytes, ModelE eModel)
         return FALSE;
 
     m_p->model = (eModel == MODEL_SGB2) ? MODEL_SGB2 : MODEL_SGB1;
+    if (!pBootRom || nBootRomBytes != 0x100U)
+        return FALSE; /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908: sgb_bios.* is mandatory; never enter HLE. */
+    m_p->realBootRom = TRUE;
+    memcpy(m_p->bootRom, pBootRom, 0x100U);
+    g_AuroraGambatteBootHost = m_p;
+    m_p->gb.setBootloaderGetter(&AuroraGambatteSgbBootloaderGetter);
 
-    /* Aurora HLE supplies the SGB header handshake; Gambatte starts post-boot. */
-    m_p->gb.setBootloaderGetter(NULL);
+    /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908: SM83 boot ROM owns FF00/header protocol; HLE is unreachable. */
     m_p->gb.setSgbJoypCallback(&GBHost::GambatteJoypCallback, m_p);
-    m_p->gb.setScanlineCallback(&AuroraGambatteSgbNewLy); /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907 */
+    m_p->gb.setScanlineCallback(&AuroraGambatteSgbNewLy);
 
     if (m_p->gb.load(
             pData, (unsigned)nBytes, gambatte::GB::FORCE_DMG) != 0)
     {
+        if (g_AuroraGambatteBootHost == m_p) g_AuroraGambatteBootHost = NULL;
+        m_p->realBootRom = FALSE;
+        memset(m_p->bootRom, 0, sizeof(m_p->bootRom));
         m_p->loaded = FALSE;
         return FALSE;
     }
 
-    /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907
-     * HLE of the SGB bootstrap must leave the same accumulator value as the
-     * real SGB1/SGB2 bootstrap before cartridge execution begins. */
-    m_p->gb.setSgbPostBootState(m_p->model == MODEL_SGB2);
 
     /* AURORA_SGB_GAMBATTE_VIDEO_PERF_FIX_V1_1_3_20260907
      * Attach once after load/full_init. Never reset the active fbline_ on every
@@ -310,7 +343,11 @@ void GBHost::UnloadROM()
 
     if (g_AuroraGambatteRasterHost == m_p)
         g_AuroraGambatteRasterHost = NULL;
+    if (g_AuroraGambatteBootHost == m_p)
+        g_AuroraGambatteBootHost = NULL; /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908 */
 
+    m_p->realBootRom = FALSE;
+    memset(m_p->bootRom, 0, sizeof(m_p->bootRom));
     m_p->loaded = FALSE;
     m_p->romBytes = 0;
     m_p->romCRC = 0;
@@ -327,8 +364,11 @@ void GBHost::Reset(ModelE eModel)
         return;
 
     m_p->model = (eModel == MODEL_SGB2) ? MODEL_SGB2 : MODEL_SGB1;
+
+    /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908: mandatory sgb_bios.*; reset always executes the real boot ROM. */
+    g_AuroraGambatteBootHost = m_p;
+    m_p->gb.setBootloaderGetter(&AuroraGambatteSgbBootloaderGetter);
     m_p->gb.reset();
-    m_p->gb.setSgbPostBootState(m_p->model == MODEL_SGB2);
 
     /* AURORA_SGB_CLASSIC_RGB32_V1_20260908
      * full_init() behind GB::reset() restores ordinary DMG video state.
@@ -631,7 +671,7 @@ Bool GBHost::SaveState(StateT *pState) const
     pState->Reserved = (Uint32)n;
     pState->ClockCredit = m_p->clockCredit;
     pState->PendingClocks = m_p->pendingClocks;
-    pState->Reserved2 = 0; /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907 */
+    pState->Reserved2 = m_p->realBootRom ? 1 : 0; /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908 */
     m_p->gb.saveState(pState->Serialized);
     return TRUE;
 }
@@ -645,6 +685,10 @@ Bool GBHost::RestoreState(const StateT *pState)
         pState->Version != GBHOST_STATE_VERSION ||
         pState->Reserved == 0 ||
         pState->Reserved > SERIALIZED_BYTES)
+        return FALSE;
+
+    /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908: do not restore a real-boot state under HLE or vice versa. */
+    if (pState->Reserved2 != 1U || !m_p->realBootRom)
         return FALSE;
 
     if (!m_p->gb.loadState(
@@ -664,6 +708,8 @@ Bool GBHost::RestoreState(const StateT *pState)
     m_p->lcdClock = 0;
     m_p->lcdLine = 0;
     g_AuroraGambatteRasterHost = m_p;
+    g_AuroraGambatteBootHost = m_p;
+    m_p->gb.setBootloaderGetter(&AuroraGambatteSgbBootloaderGetter); /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908 */
     ClearAudio();
     m_p->gb.clearSavedataDirty();
     return TRUE;

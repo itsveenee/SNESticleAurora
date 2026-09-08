@@ -233,7 +233,9 @@ public:
     void    PowerCycleFrontCopier();
     /* Legacy predicate intentionally means active classic Front copier. */
     /* AURORA_SGB_RUNTIME_V0_4_20260904 */
-    Bool AttachSuperGameBoyGame(const Uint8 *pData, Uint32 nBytes, Bool bSgb2);
+    Bool AttachSuperGameBoyGame(
+        const Uint8 *pData, Uint32 nBytes, Bool bSgb2,
+        const Uint8 *pBootRom, Uint32 nBootRomBytes); /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908 */
     void DetachSuperGameBoyGame();
     Bool IsSuperGameBoy() const { return m_SGB.IsActive(); }
     Uint32 GetSuperGameBoyGameBytes() const { return m_SGB.GetGameBytes(); }

@@ -40,7 +40,8 @@ public:
     SNSuperGameBoy();
     ~SNSuperGameBoy();
 
-    Bool AttachGame(const Uint8 *pData, Uint32 nBytes, ModelE eModel);
+    Bool AttachGame(const Uint8 *pData, Uint32 nBytes, ModelE eModel,
+                    const Uint8 *pBootRom, Uint32 nBootRomBytes); /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908 */
     void Detach();
     void Reset();
     Bool IsActive() const { return m_bActive; }
@@ -70,7 +71,7 @@ private:
     static const Uint32 STATE_MAGIC = 0x35424753U; /* SGB5 */
     /* AURORA_SGB_GAMBATTE_BACKEND_V1_1_20260907:
        backend/state payload changed; reject old Gambatte SGB states cleanly. */
-    static const Uint32 STATE_VERSION = 7U; /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907 */
+    static const Uint32 STATE_VERSION = 8U; /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908: real SM83 bootstrap state ABI */
     enum {
         BOOT_HEADER_BYTES = 84, /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907: 6 x 14 bytes, GB $0104-$0157 */
         BOOT_PACKET_COUNT = 6,

@@ -4028,11 +4028,15 @@ m_PPU.SetRegionPAL(bPAL);
 }
 
 
-Bool SnesSystem::AttachSuperGameBoyGame(const Uint8 *pData, Uint32 nBytes, Bool bSgb2)
+Bool SnesSystem::AttachSuperGameBoyGame(
+    const Uint8 *pData, Uint32 nBytes, Bool bSgb2,
+    const Uint8 *pBootRom, Uint32 nBootRomBytes) /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908 */
 {
     if (!m_pRom || !(m_pRom->m_Flags & SNROM_FLAG_GAMEBOY)) return FALSE;
-    if (!m_SGB.AttachGame(pData, nBytes,
-            bSgb2 ? SNSuperGameBoy::MODEL_SGB2 : SNSuperGameBoy::MODEL_SGB1))
+    if (!m_SGB.AttachGame(
+            pData, nBytes,
+            bSgb2 ? SNSuperGameBoy::MODEL_SGB2 : SNSuperGameBoy::MODEL_SGB1,
+            pBootRom, nBootRomBytes))
         return FALSE;
     m_uSGBSyncClock = (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_TOTAL);
     MapSuperGameBoy();

@@ -11,7 +11,7 @@ import shutil
 import subprocess
 import sys
 
-STAGE_MARK = 'AURORA_SGB_GAMBATTE_STAGE_V4_CLASSIC_RGB32_20260908'
+STAGE_MARK = 'AURORA_SGB_GAMBATTE_STAGE_V7_FINAL_REALBOOT_SCALAR_20260908'  # AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908
 STAMP_NAME = '.aurora-gambatte-stage-v3'
 
 
@@ -596,10 +596,42 @@ def prepare_stage(source, stage):
         "Makefile.libretro classic RGB32 SGB framebuffer")
     write(p, s)
 
-    # All source-level SGB extensions remain authoritative in the pinned fork.
-    # Only the staged framebuffer ABI selection above is intentionally local.
+    # AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908
+    # Historical Gambatte/bsnes DMG tile gather, staged only for PS2.
+    p = stage / "libgambatte/src/video/ppu.cpp"
+    s = read(p)
+    old = """\t\t\t\t/* DMG fast path: a precomputed expansion of
+\t\t\t\t * bgPalette[0..3] (slot 0 of bgPaletteExpanded)
+\t\t\t\t * turns the 8-dependent-load gather (gcc 13 -O3
+\t\t\t\t * refuses to vectorise -- SSE2 has no u32 gather,
+\t\t\t\t * so the missed log shows
+\t\t\t\t * \"no vectype for stmt: _ = bgPalette[_];\" at every
+\t\t\t\t * call site) into two 16-byte memcpys.  The
+\t\t\t\t * expansion is rebuilt by LCD on every BG palette
+\t\t\t\t * write via refreshBgPaletteExpansion(0). */
+\t\t\t\t{
+\t\t\t\t\tunsigned const lo = ntileword & 0xFF;
+\t\t\t\t\tunsigned const hi = ntileword >> 8;
+\t\t\t\t\tstd::memcpy(&dst[0], p.bgPaletteExpanded[0][lo], 4 * sizeof(video_pixel_t));
+\t\t\t\t\tstd::memcpy(&dst[4], p.bgPaletteExpanded[0][hi], 4 * sizeof(video_pixel_t));
+\t\t\t\t}
+"""
+    new = """\t\t\t\t/* AURORA_SGB_CLASSIC_SCALAR_PPU_V7_FINAL_20260908 */
+\t\t\t\tdst[0] = p.bgPalette[ ntileword & 0x0003       ];
+\t\t\t\tdst[1] = p.bgPalette[(ntileword & 0x000C) >>  2];
+\t\t\t\tdst[2] = p.bgPalette[(ntileword & 0x0030) >>  4];
+\t\t\t\tdst[3] = p.bgPalette[(ntileword & 0x00C0) >>  6];
+\t\t\t\tdst[4] = p.bgPalette[(ntileword & 0x0300) >>  8];
+\t\t\t\tdst[5] = p.bgPalette[(ntileword & 0x0C00) >> 10];
+\t\t\t\tdst[6] = p.bgPalette[(ntileword & 0x3000) >> 12];
+\t\t\t\tdst[7] = p.bgPalette[ ntileword           >> 14];
+"""
+    s = replace_once(s, old, new, "ppu.cpp historical scalar DMG gather")
+    write(p, s)
+
+    # RGB32 + scalar gather are staging policy; pinned submodule stays pristine.
     stamp.write_text(signature, encoding="utf-8")
-    print("[ Gambatte stage ] classic RGB32 fork staged:", STAGE_MARK)
+    print("[ Gambatte stage ] real-boot/classic scalar fork staged:", STAGE_MARK)
 
 def main():
     ap = argparse.ArgumentParser()

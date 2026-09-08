@@ -48,7 +48,7 @@ Bool MainLoopReinitVideoMode(Int32 mode);
 /* ------------------------------------------------------------------ */
 
 #define VIDEOCFG_MAGIC   0x53564944u   /* 'SVID' */
-#define VIDEOCFG_VERSION 45 /* AURORA_CONFIG_STRICT_SGB_INVERT_CLOCK_V1_20260905: exact version + sgbinvert */
+#define VIDEOCFG_VERSION 46 /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908: append SGB1/SGB2 BIOS selector */
 /* AURORA_CFG_MODE7_FULL_ONCE_V1_6_20260905: 44 -> 45; same-layout migration, Mode7 Full once. */
 /* AURORA_CD_MUSIC_REDBOOK_V3_20260830: v43 appends shared SCD/PCE CD Red Book toggle; old configs default On. */
 /* AURORA_PCE_SCALING_LIGHTGUN_TOGGLE_V2_20260830: v42 appends Light Gun; old configs default On. */
@@ -127,8 +127,10 @@ typedef struct
 	Int32  lightgun;       /* v42: CRC-known NES/Famicom gun; 1=On */
 	Int32  cdmusic;        /* v43: SCD/PCE CD Red Book CDDA; 1=On */
 	Int32  sgbinvert;     /* AURORA_CONFIG_STRICT_SGB_INVERT_CLOCK_V1_20260905: 0=Off, 1=On; effect SGB-only */
+	Int32  sgbbios;       /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908: 0=SGB1, 1=SGB2 */
 } VideoCfgT;
-#define VIDEOCFG_V43_BYTES (sizeof(VideoCfgT) - sizeof(Int32))
+#define VIDEOCFG_V45_BYTES (sizeof(VideoCfgT) - sizeof(Int32))
+#define VIDEOCFG_V43_BYTES (VIDEOCFG_V45_BYTES - sizeof(Int32))
 #define VIDEOCFG_V42_BYTES (VIDEOCFG_V43_BYTES - sizeof(Int32))
 #define VIDEOCFG_V38_BYTES (VIDEOCFG_V42_BYTES - 3 * sizeof(Int32))
 #define VIDEOCFG_V37_BYTES (VIDEOCFG_V38_BYTES - sizeof(Int32))
@@ -361,6 +363,12 @@ static void _VideoCfgPath(char *pOut)
 }
 
 static Bool g_FamicloneAudio = FALSE;
+static Int32 g_SgbBiosModel = 0; /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908: default SGB1 */
+
+Int32 VideoGetSgbBiosModel(void)
+{
+	return g_SgbBiosModel ? 1 : 0;
+}
 
 /* AURORA_CD_MUSIC_REDBOOK_V3_20260830
  * Shared by Sega CD and PCE CD; Red Book/CDDA only. */
@@ -458,6 +466,7 @@ void VideoSettingsSave(void)
 	cfg.lightgun = QuicknesBridge_GetLightGunEnabled() ? 1 : 0;
 	cfg.cdmusic = g_CdMusicEnabled ? 1 : 0; /* AURORA_CD_MUSIC_REDBOOK_V3_20260830 */
 	cfg.sgbinvert = MainLoopSgbInvertGetEnabled() ? 1 : 0; /* AURORA_CONFIG_STRICT_SGB_INVERT_CLOCK_V1_20260905 */
+	cfg.sgbbios = g_SgbBiosModel ? 1 : 0; /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908 */
 	_VideoCfgPath(path);
 	BgmIOBegin();
 	MemCardWriteFile(path, (Uint8 *)&cfg, sizeof(cfg));
@@ -477,6 +486,7 @@ void VideoSettingsLoad(void)
 	/* AURORA_FAMICOM_MIC_CFG41_20260828: conservative Aurora default. */
 	MainLoopSafeFrameskipSetLevel(1);
 	MainLoopSgbInvertSetEnabled(FALSE); /* AURORA_CFG_LOADER_REBUILD_V1_13_20260905 */
+	g_SgbBiosModel = 0; /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908: SGB1 default */
 	PicoDriveBridge_SetRenderingMode(0); /* AURORA_CFG_LOADER_REBUILD_V1_13_20260905: MD FAST default */
 	PicoDriveBridge_SetGgZoom(false);
 	memset(&cfg, 0, sizeof(cfg));
@@ -505,10 +515,10 @@ void VideoSettingsLoad(void)
 		{
 			loaded = MemCardReadFile(path, (Uint8 *)&cfg, sizeof(cfg));
 		}
-		else if (header.version == 44)
+		else if (header.version == 45 || header.version == 44)
 		{
-			/* AURORA_CFG_LOADER_REBUILD_V1_13_20260905: v44/v45 same layout. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, sizeof(cfg));
+			/* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908: v44/v45 are the exact prefix before sgbbios. */
+			loaded = MemCardReadFile(path, (Uint8 *)&cfg, VIDEOCFG_V45_BYTES);
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
 		else if (header.version == 43)
@@ -846,6 +856,8 @@ if (loaded && header.version != VIDEOCFG_VERSION)
 		if (header.version >= 44 && header.version <= VIDEOCFG_VERSION &&
 		    (cfg.sgbinvert == 0 || cfg.sgbinvert == 1))
 			MainLoopSgbInvertSetEnabled(cfg.sgbinvert ? TRUE : FALSE); /* AURORA_CFG_LOADER_REBUILD_V1_13_20260905 */
+		if (cfg.sgbbios == 0 || cfg.sgbbios == 1)
+			g_SgbBiosModel = cfg.sgbbios; /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908 */
 		if (cfg.smsfm == 0 || cfg.smsfm == 1)
 			PicoDriveBridge_SetSmsFm(cfg.smsfm != 0);
 		if (cfg.bgmvol >= 0 && cfg.bgmvol <= 400) BgmSetVolume(cfg.bgmvol);
@@ -1301,10 +1313,9 @@ _VideoRow(vy, 19, m_iSelect, "Exit to OSD", ""); vy += 12;
 			_VideoHackAccurateStatus(SNPPU_HACK_WINDOWS_OFF)); vy += 12;
 		_VideoRow(vy, 27, m_iSelect, "Mode 7 Quality",
 			_VideoHackMode7Status()); vy += 12;
-		_VideoRow(vy, 28, m_iSelect, "Sprite Limiter",
-			_VideoHackSpriteLimiterStatus()); vy += 12;
-		_VideoRow(vy, 29, m_iSelect, "Limiter Mode",
-			_VideoHackSpriteLimiterModeStatus()); vy += 12;
+		/* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908: limiter rows 28/29 hidden; implementation/persistence retained. */
+		_VideoRow(vy, 30, m_iSelect, "SGB Bios",
+			g_SgbBiosModel ? "SGB2" : "SGB1"); vy += 12;
 	}
 	else if (iPage == 2)
 	{
@@ -1368,7 +1379,7 @@ void CVideoScreen::Input(Uint32 buttons, Uint32 trigger)
 	{
 		if (m_iSelect < 10)        m_iSelect = 50;
 		else if (m_iSelect < 20)   m_iSelect = 0;
-		else if (m_iSelect <= 29)  m_iSelect = 10;
+		else if (m_iSelect <= 30)  m_iSelect = 10;
 		else if (m_iSelect < 40)   m_iSelect = 40;
 		else if (m_iSelect < 50)   m_iSelect = 20;
 		else                       m_iSelect = 31;
@@ -1378,7 +1389,7 @@ void CVideoScreen::Input(Uint32 buttons, Uint32 trigger)
 		int lo, hi;
 		if (m_iSelect < 10)       { lo = 0;  hi = 8;  }
 		else if (m_iSelect < 20)  { lo = 10; hi = 19; }
-		else if (m_iSelect <= 29) { lo = 20; hi = 29; }
+		else if (m_iSelect <= 30) { lo = 20; hi = 30; }
 		else if (m_iSelect < 40)  { lo = 31; hi = 37; }
 		else if (m_iSelect < 50)  { lo = 40; hi = 45; }
 		else                      { lo = 50; hi = 58; } /* AURORA_CD_MUSIC_REDBOOK_V3_20260830 */
@@ -1389,6 +1400,7 @@ void CVideoScreen::Input(Uint32 buttons, Uint32 trigger)
 			/* Keep retired index 36 unreachable without renumbering 37. */
 			if (m_iSelect == 36) m_iSelect = 35;
 			if (m_iSelect == 15) m_iSelect = 14; /* AURORA_SWC_FLOPPY_V5_20260831 */
+			if (m_iSelect == 29 || m_iSelect == 28) m_iSelect = 27; /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908 */
 		}
 		if (trigger & PAD_DOWN)
 		{
@@ -1396,6 +1408,7 @@ void CVideoScreen::Input(Uint32 buttons, Uint32 trigger)
 			if (m_iSelect > hi) m_iSelect = lo;
 			if (m_iSelect == 36) m_iSelect = 37;
 			if (m_iSelect == 15) m_iSelect = 16; /* AURORA_SWC_FLOPPY_V5_20260831 */
+			if (m_iSelect == 28 || m_iSelect == 29) m_iSelect = 30; /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908 */
 		}
 	}
 
@@ -1635,6 +1648,9 @@ case 17: /* Famiclone Audio */
 				if (mode >= SNPPU_OBJ_LIMIT_MODE_NUM) mode = 0;
 				SNPPURenderSetObjLimitMode((Uint8)mode);
 			}
+			break;
+		case 30:
+			g_SgbBiosModel = g_SgbBiosModel ? 0 : 1; /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908 */
 			break;
 		case 31:
 			_VideoApplyCompatFlags(

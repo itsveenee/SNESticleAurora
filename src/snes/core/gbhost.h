@@ -45,8 +45,11 @@ public:
     void Shutdown();
     Bool IsInitialized() const;
     Bool IsLoaded() const;
+    Bool HasRealBootROM() const; /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908 */
 
-    Bool LoadROM(const Uint8 *pData, Uint32 nBytes, ModelE eModel);
+    Bool LoadROM(const Uint8 *pData, Uint32 nBytes, ModelE eModel,
+                 const Uint8 *pBootRom, Uint32 nBootRomBytes);
+    /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908 */
     void UnloadROM();
     void Reset(ModelE eModel);
 
