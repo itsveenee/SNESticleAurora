@@ -167,9 +167,13 @@ void SNSuperGameBoy::SubmitBootPacket()
     }
     m_ICD2.SubmitPacket(packet);
     ++m_uBootPacketIndex;
-    m_uBootWaitClocks = BOOT_WAIT_CLOCKS;
-    if (m_uBootPacketIndex == BOOT_PACKET_COUNT)
-        AuroraSgbBootTrace("SGB H66: final wait armed");
+
+    /* AURORA_SGB_BSNES_BOOT_CADENCE_V1_2_5_20260907
+     * bsnes/libsupergameboy exposes the six internal-bootstrap packets
+     * without an artificial four-frame gap. Aurora currently has one ICD2
+     * packet slot, so AdvanceBootHandshake() refills it immediately after
+     * the SNES BIOS consumes the current packet. */
+    m_uBootWaitClocks = 0;
 }
 
 void SNSuperGameBoy::ResetAudioPipeline()
@@ -190,11 +194,33 @@ Int16 SNSuperGameBoy::Saturate16(Int32 value)
 
 void SNSuperGameBoy::BeginBootHandshake()
 {
-    /* AURORA_SGB_SAMEBOY_REAL_BOOT_V1_20260906
-     * SameBoy NO_SFC executes the open SGB bootstrap. JOYP writes feed
-     * SNSGBICD2 directly; never fabricate F1/F3/F5/F7/F9/FB in parallel. */
-    ResetBootHandshake();
+    /* AURORA_SGB_GAMBATTE_HLE_BOOT_V1_20260907
+     * AURORA_SGB_BSNES_PACKET_FIFO_V1_2_6_20260907
+     *
+     * Match bsnes/libsupergameboy: queue F1/F3/F5/F7/F9/FB immediately
+     * when /RESET rises. No boot-ROM bytes are embedded. */
+    m_uBootPacketIndex = 0;
+    m_uBootWaitClocks = 0;
+    m_uBootLine = 0;
+    m_uBootLineClocks = 0;
+    m_bBootHandshake = TRUE;
+
+    g_uAuroraSgbFinalWaitTrace = 0;
+    g_uAuroraSgbFirstRunTrace = 0;
+    g_uAuroraSgbClockBridgeTrace = 0;
+    g_bAuroraSgbFinalWaitYielded = FALSE;
+    g_bAuroraSgbRuntimeReleased = FALSE;
+    g_bAuroraSgbPreTickProbeHeld = FALSE;
+    g_bAuroraSgbPreTickUnsafeHold = FALSE;
+
     ResetAudioPipeline();
+    AuroraSgbBootTrace("SGB H12: bsnes FIFO handshake begin");
+
+    while (m_uBootPacketIndex < BOOT_PACKET_COUNT)
+        SubmitBootPacket();
+
+    m_bBootHandshake = FALSE;
+    AuroraSgbBootTrace("SGB H70: six bootstrap packets queued");
 }
 
 void SNSuperGameBoy::AdvanceBootLCD(Uint32 nGBClocks)
@@ -212,40 +238,8 @@ void SNSuperGameBoy::AdvanceBootLCD(Uint32 nGBClocks)
 
 Uint32 SNSuperGameBoy::AdvanceBootHandshake(Uint32 nGBClocks)
 {
-    while (m_bBootHandshake && nGBClocks)
-    {
-        Uint32 step = nGBClocks < m_uBootWaitClocks ? nGBClocks : m_uBootWaitClocks;
-
-        /* AURORA_SGB_PLAYABLE_MVP_V1_20260906: no artificial pre-runtime yield. */
-
-        if (m_uBootPacketIndex == BOOT_PACKET_COUNT && !g_uAuroraSgbFinalWaitTrace)
-        {
-            g_uAuroraSgbFinalWaitTrace = 1;
-            AuroraSgbBootTrace("SGB H67: final wait got clocks");
-        }
-
-        AdvanceBootLCD(step);
-
-        if (m_uBootPacketIndex == BOOT_PACKET_COUNT && g_uAuroraSgbFinalWaitTrace == 1)
-        {
-            g_uAuroraSgbFinalWaitTrace = 2;
-            AuroraSgbBootTrace("SGB H68: final LCD advance returned");
-        }
-
-        m_uBootWaitClocks -= step;
-        nGBClocks -= step;
-        if (!m_uBootWaitClocks)
-        {
-            if (m_uBootPacketIndex < BOOT_PACKET_COUNT)
-                SubmitBootPacket();
-            else
-            {
-                AuroraSgbBootTrace("SGB H69: final wait expired");
-                m_bBootHandshake = FALSE;
-                AuroraSgbBootTrace("SGB H70: handshake done");
-            }
-        }
-    }
+    /* AURORA_SGB_BSNES_PACKET_FIFO_V1_2_6_20260907
+     * Bootstrap packets are already queued; do not stall Gambatte. */
     return nGBClocks;
 }
 
@@ -302,7 +296,7 @@ void SNSuperGameBoy::Write(Uint32 uAddr, Uint8 uData)
 
         m_GB.Reset(m_eModel == MODEL_SGB2 ? GBHost::MODEL_SGB2 : GBHost::MODEL_SGB1);
         AuroraSgbBootTrace("SGB H44: GB reset returned");
-        ResetBootHandshake();
+        BeginBootHandshake();
         AuroraSgbBootTrace("SGB H45: handshake armed");
     }
 }
@@ -335,7 +329,7 @@ void SNSuperGameBoy::AdvanceMasterClocks(Uint32 nClocks, Uint32 uSnesMasterHz)
 }
 
 /* AURORA_SGB_AUDIO_V0_5_20260904
- * SameBoy's GB PSG FIFO is sampled once per 32 logical GB clocks. Convert that
+ * Gambatte's GB PSG FIFO is sampled once per 32 logical GB clocks. Convert that
  * exact rational clock relationship to the SNES mixer's output domain with
  * a box-decimation accumulator. This is intentionally cartridge-local: the
  * normal SNES/NES/Sega/PCE host mixer never sees an SGB-specific mode.
@@ -356,18 +350,15 @@ void SNSuperGameBoy::MixAudio(Int16 *pLeft, Int16 *pRight, Int32 nSamples, Uint3
         return;
 
     /*
-     * AURORA_SGB_SAMEBOY_RUNTIME_CURE_V1_20260906
+     * AURORA_SGB_GAMBATTE_RUNTIME_CURE_V1_20260906
      *
-     * SameBoy is configured exactly like bsnes:
-     *     GB_set_sample_rate_by_clocks(..., 256)
-     *
-     * SameBoy execution accounting uses 8 MHz ticks, while
-     * GB_get_clock_rate() is the ~4 MHz hardware clock. Therefore one callback
-     * sample is produced every 128 hardware clocks, about 33.5 kHz on SGB1.
+     * AURORA_SGB_GAMBATTE_BACKEND_V1_1_20260907
+     * GBHost box-decimates Gambatte's native 1-sample/2-clock stream by 64,
+     * preserving Aurora's existing one-FIFO-frame/128-GB-clocks contract.
      *
      * The old Aurora mixer was downsample-only and assumed 32 clocks/sample.
      * A PS2/SNES output domain such as 48 kHz therefore could not be represented
-     * correctly. Use a rational zero-order hold resampler instead. SameBoy has
+     * correctly. Use a rational zero-order hold resampler instead. Gambatte has
      * already band-limited the source; this stage only changes sample cadence.
      */
     denominator = (Uint64)uOutputHz * (Uint64)AUDIO_SOURCE_CLOCKS_PER_SAMPLE;

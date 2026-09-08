@@ -53,22 +53,8 @@ Aurora also contains or integrates InfoNES, miniz, libxmp-lite, PS2SDK-related l
 
 `assets/font/m5x7.ttf` is the **m5x7** font by **Daniel Linssen**, released under **CC0 1.0 Universal**. Attribution is not required by CC0, but is appreciated by the author.
 
-<!-- AURORA_SAMEBOY_LICENSE_V1_20260906 -->
-### SameBoy (Game Boy core for Super Game Boy)
+<!-- AURORA_GAMBATTE_LICENSE_V1_20260907 -->
+### Gambatte (Game Boy core for Super Game Boy)
 
-SameBoy is developed by **Lior Halphon and contributors**.
+Gambatte is authored by **Sinamas** and contributors and is distributed under the **GNU GPL version 2**. Aurora integrates the pinned `itsveenee/gambatte-libretro` submodule at `src/third_party/gambatte` for the Game Boy CPU/PPU/APU/MBC side of the Super Game Boy bridge. Aurora continues to emulate the SNES and ICD2 side. A license mirror is included at `LICENSES/Gambatte-GPL-2.0.txt`.
 
-Aurora integrates the pinned [`itsveenee/SameBoy`](https://github.com/itsveenee/SameBoy)
-Git submodule at `src/third_party/sameboy` as the Game Boy CPU/PPU/APU/MBC
-backend for the Super Game Boy ICD2 bridge. Aurora uses SameBoy's dedicated
-`GB_MODEL_SGB_NO_SFC` / `GB_MODEL_SGB2_NO_SFC` integration mode so the SNES
-and ICD2 remain emulated by Aurora while SameBoy supplies the Game Boy side.
-
-SameBoy is distributed under the Expat License. The integrated `Core/` and
-`BootROMs/` paths are outside SameBoy's `iOS` and `HexFiend` exceptions and
-are covered by that Expat grant. Preserve the original source-file notices and
-`src/third_party/sameboy/LICENSE`; a verbatim mirror is included at
-`LICENSES/SameBoy-Expat.txt`.
-
-Aurora uses the open SameBoy SGB bootstrap for the SGB/SGB2 startup path.
-Nintendo boot ROM firmware is not embedded by this integration.

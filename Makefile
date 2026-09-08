@@ -100,15 +100,15 @@ FCEUMM_FDS_CORE_DEPS := $(FCEUMM_FDS_DIR)/src/fceu.c $(FCEUMM_FDS_DIR)/src/fds.c
 # AURORA_V8_4_1_LEGACY_SNES_CORE_REMOVED_20260903
 
 # AURORA_SGB_GBHOST_V0_3_CONFIG
-# AURORA_SGB_SAMEBOY_BACKEND_V1_20260906
-SAMEBOY_DIR ?= $(CURDIR)/src/third_party/sameboy
-SAMEBOY_BUILD_DIR ?= $(CURDIR)/build/sameboy
-SAMEBOY_STAGE_DIR ?= $(CURDIR)/build/sameboy-src
-SAMEBOY_STAGE_STAMP := $(SAMEBOY_STAGE_DIR)/.aurora-sameboy-stage-v1
-SAMEBOY_LIB ?= $(SAMEBOY_BUILD_DIR)/libsameboy_gb_ps2.a
-SAMEBOY_PS2_MAKEFILE := $(CURDIR)/tools/Makefile.sameboy-gb-ps2
-SAMEBOY_PREPARE_TOOL := $(CURDIR)/tools/prepare_sameboy_sgb_sources.py
-SAMEBOY_PYTHON ?= python3
+# AURORA_SGB_GAMBATTE_BACKEND_V1_1_20260907
+# Gambatte source remains clean/pinned. SGB-only hooks are applied to a
+# build-tree copy, matching Aurora's staged-backend approach.
+GAMBATTE_DIR ?= $(CURDIR)/src/third_party/gambatte
+GAMBATTE_STAGE_DIR ?= $(CURDIR)/build/gambatte-src
+GAMBATTE_STAGE_STAMP := $(GAMBATTE_STAGE_DIR)/.aurora-gambatte-stage-v1_1
+GAMBATTE_LIB ?= $(GAMBATTE_STAGE_DIR)/gambatte_libretro_ps2.a
+GAMBATTE_PREPARE_TOOL := $(CURDIR)/tools/prepare_gambatte_sgb_sources.py
+GAMBATTE_PYTHON ?= python3
 
 # AURORA_PD_TRYAGAIN_V1_PS2_BUILD_PARITY
 # PicoDrive's standalone PS2 configure path explicitly uses -G0. Keep
@@ -485,8 +485,7 @@ INCS := \
 	-I$(SRC_DIR)/sega/picodrive \
 	-I$(SRC_DIR)/pce/system \
 	-I$(SRC_DIR)/pce/beetle \
-	-I$(SAMEBOY_DIR)/Core \
-	-I$(SAMEBOY_DIR)/Core
+	-I$(GAMBATTE_STAGE_DIR)/libgambatte/include
 
 LIBDIRS := \
 	-L$(PS2SDK)/ee/lib \
@@ -1106,28 +1105,50 @@ fceumm-fds-clean:
 # AURORA_FCEUMM_FDS_V0_6_RULES_END
 
 # AURORA_SGB_GBHOST_V0_3_RULES
-# AURORA_SGB_SAMEBOY_ROOT_RULES_V1_20260906
 #
-# The nested SameBoy make owns build/sameboy-src and its stage stamp.
-# The parent must not describe the retired mGBA hook files here.
-# GBHost includes the pinned SameBoy public Core headers directly.
+# AURORA_SGB_GAMBATTE_BACKEND_V1_1_20260907
+# The patched Gambatte public header exists only after staging.
 $(OBJ_DIR)/snes/core/gbhost.o: \
-	$(SAMEBOY_DIR)/Core/gb.h \
-	$(SAMEBOY_DIR)/Core/apu.h \
-	$(SAMEBOY_DIR)/Core/joypad.h \
-	$(SAMEBOY_DIR)/Core/save_state.h \
-	$(CURDIR)/src/snes/core/sameboy_sgb_boot.h
+	$(GAMBATTE_STAGE_STAMP)
 
-.PHONY: FORCE_SAMEBOY_GB_INCREMENTAL
-FORCE_SAMEBOY_GB_INCREMENTAL:
 
-$(SAMEBOY_LIB): FORCE_SAMEBOY_GB_INCREMENTAL $(SAMEBOY_PS2_MAKEFILE) $(SAMEBOY_PREPARE_TOOL)
-	@printf '[ SameBoy GBHost ] checking staged PS2 core\n'
-	+@PATH="$(PS2DEV)/ee/bin:$(PS2DEV)/bin:$(PS2SDK)/bin:$$PATH" $(MAKE) --no-print-directory -f "$(SAMEBOY_PS2_MAKEFILE)" ROOT="$(CURDIR)" SAMEBOY_DIR="$(SAMEBOY_DIR)" BUILD_DIR="$(SAMEBOY_BUILD_DIR)" STAGE_DIR="$(SAMEBOY_STAGE_DIR)" CC="$(EE_CC)" AR="$(EE_AR)" all
+# AURORA_SGB_GAMBATTE_BACKEND_V1_1_20260907
+.PHONY: FORCE_GAMBATTE_STAGE
+FORCE_GAMBATTE_STAGE:
+
+$(GAMBATTE_STAGE_STAMP): FORCE_GAMBATTE_STAGE $(GAMBATTE_PREPARE_TOOL)
+	@printf '[ Gambatte GBHost ] checking staged SGB source\n'
+	+@$(GAMBATTE_PYTHON) "$(GAMBATTE_PREPARE_TOOL)" --prepare --source "$(GAMBATTE_DIR)" --stage "$(GAMBATTE_STAGE_DIR)"
+
+# AURORA_SGB_GAMBATTE_LINKFIX_V1_1_1_20260907
+# AURORA_SGB_GAMBATTE_RUMBLE_LINKFIX_V1_1_2_20260907
+# AURORA_SGB_GAMBATTE_VIDEO_PERF_FIX_V1_1_3_20260907
+# AURORA_SGB_GAMBATTE_REAL_RASTER_V1_2_20260907
+# AURORA_SGB_GAMBATTE_XPOS168_RASTER_V1_2_1_20260907
+# AURORA_SGB_GAMBATTE_DIRECT_SHADE_V1_2_2_20260907
+# AURORA_SGB_ICD2_RING_PHASE_V1_2_3_20260907
+# AURORA_SGB_GAMBATTE_BSNESPLUS_VIDEO_V1_2_4_20260907
+# AURORA_SGB_BSNES_BOOT_CADENCE_V1_2_5_20260907
+# AURORA_SGB_BSNES_PACKET_FIFO_V1_2_6_20260907
+# bsnes-style 64-packet FIFO: $6002 dequeues into $7000; bootstrap
+# F1/F3/F5/F7/F9/FB are queued immediately on /RESET.
+# SGB HLE packets refill immediately after BIOS consumption;
+# no synthetic four-frame boot wait or fake LCD advancement.
+# bsnes-plus contract: commit completed 8-line block at NEW LY boundary,
+# four 320-byte ring slots, $6000=vram_row|write_buf, $7800 modulo 320.
+# Gambatte DMG framebuffer carries literal mapped shade values 0..3.
+# Visible rows now leave Gambatte at PPU xpos168(), exactly after composition.
+# VBlank LY still advances at LY_COUNT. Batch remains 456 clocks.
+# Boot/HLE/JOYP/audio/clock conversion remain unchanged.
+# Staged Makefile.common excludes ../libretro/libretro.cpp;
+# staged cartridge.cpp provides the MBC5 rumble no-op.
+$(GAMBATTE_LIB): $(GAMBATTE_STAGE_STAMP)
+	@printf '[ Gambatte GBHost ] checking incremental PS2 core-only archive\n'
+	+@PATH="$(PS2DEV)/ee/bin:$(PS2DEV)/bin:$(PS2SDK)/bin:$$PATH" $(MAKE) --no-print-directory -C "$(GAMBATTE_STAGE_DIR)" -f Makefile.libretro platform=ps2 all
 
 # AURORA_FCEUMM_FDS_V0_5_RUNTIME_LINK
-$(TARGET): $(OBJS) $(PICODRIVE_LIB) $(QUICKNES_LIB) $(PCE_LIB) $(FCEUMM_FDS_LIB) $(SAMEBOY_LIB) | $(OBJ_DIR)
-	$(call RUN_LINK,$@,$(EE_CXX) $(LTO_LINK_FLAGS) -Xlinker --gc-sections -Xlinker -Map -Xlinker "$(OBJ_DIR)/SNESticle.map" -o "$@" $(OBJS) "$(PICODRIVE_LIB)" "$(QUICKNES_LIB)" "$(PCE_LIB)" "$(FCEUMM_FDS_LIB)" "$(SAMEBOY_LIB)" $(LIBDIRS) $(LIBS))
+$(TARGET): $(OBJS) $(PICODRIVE_LIB) $(QUICKNES_LIB) $(PCE_LIB) $(FCEUMM_FDS_LIB) $(GAMBATTE_LIB) | $(OBJ_DIR)
+	$(call RUN_LINK,$@,$(EE_CXX) $(LTO_LINK_FLAGS) -Xlinker --gc-sections -Xlinker -Map -Xlinker "$(OBJ_DIR)/SNESticle.map" -o "$@" $(OBJS) "$(PICODRIVE_LIB)" "$(QUICKNES_LIB)" "$(PCE_LIB)" "$(FCEUMM_FDS_LIB)" "$(GAMBATTE_LIB)" $(LIBDIRS) $(LIBS))
 
 $(TARGET_STRIPPED): $(TARGET)
 	@cp -f "$(TARGET)" "$@"

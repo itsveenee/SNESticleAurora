@@ -76,19 +76,7 @@ The experimental PC Engine / TurboGrafx-16 HuCard and PC Engine CD integration u
 
 PC Engine CD is exposed through path-only `.cue` loading and a user-provided `syscard3.pce`. See `LICENSES/Beetle-PCE-Fast-GPL-2.0.txt`.
 
-### SameBoy
+### Gambatte
 
-The experimental Game Boy backend uses the pinned SameBoy submodule at
-`src/third_party/sameboy`.
+The embedded Game Boy backend used by Super Game Boy support is **Gambatte**, authored by **Sinamas** and contributors. Aurora provides the SNES/ICD2 bridge and SGB-specific integration.
 
-- **SameBoy:** Lior Halphon and contributors
-- **Aurora GBHost / ICD2 / PS2 integration:** Vinícius Nunes (`@itsveenee`)
-- **License:** Expat License
-
-Aurora also uses SameBoy's open SGB bootstrap source lineage for its embedded
-startup image. See `THIRD_PARTY.md`, `src/third_party/sameboy/LICENSE`, and
-`LICENSES/SameBoy-Expat.txt`.
-
-## Third-party components
-
-SNESticle Aurora also contains or integrates InfoNES, FCEUmm, miniz, libxmp-lite, PS2SDK-related code and other inherited components. Their original copyright, authorship, license and source-file notices remain authoritative and must be preserved. See `LICENSE`, `THIRD_PARTY.md`, and each component's bundled notices.

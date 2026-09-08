@@ -2,15 +2,15 @@
 #define _AURORA_GBHOST_H
 
 #include "types.h"
+#include <stdint.h> /* AURORA_SGB_GAMBATTE_LINKFIX_V1_1_1_20260907 */
 
 class SNSGBICD2;
 
-/* AURORA_SGB_SAMEBOY_BACKEND_V1_20260906
+/* AURORA_SGB_GAMBATTE_BACKEND_V1_1_20260907
  * Neutral Game Boy host used by SNSuperGameBoy.
  *
- * Backend: SameBoy in GB_MODEL_SGB_NO_SFC / GB_MODEL_SGB2_NO_SFC mode.
- * SameBoy emulates GB CPU/PPU/APU/MBC and executes the open SGB bootstrap;
- * Aurora remains responsible for the SNES and ICD2 side.
+ * Backend: staged libgambatte, forced to DMG mode and clocked by Aurora's
+ * existing ICD2 grant. Aurora remains responsible for the SNES + ICD2 side.
  */
 class GBHost
 {
@@ -22,13 +22,19 @@ public:
     typedef void (*PixelHookT)(void *pContext, Uint8 uColor);
     typedef void (*ResetHookT)(void *pContext);
 
+    /* Public declaration only so translation-unit helpers can name it.
+       The actual instance pointer remains private. */
+    struct Impl;
+
     struct StateT
     {
         Uint32 Magic;
         Uint32 Version;
         Uint32 Model;
-        Uint32 Reserved; /* actual SameBoy state bytes */
-        Int64 ClockCredit; /* SameBoy 8 MHz tick credit */
+        Uint32 Reserved;       /* actual Gambatte state bytes */
+        Int64 ClockCredit;     /* instruction-boundary overshoot */
+        Uint32 LCDClock;       /* 0..455 */
+        Int32 LCDLine;         /* 0..153 */
         Uint8 Serialized[SERIALIZED_BYTES];
     };
 
@@ -52,7 +58,6 @@ public:
 
     Uint32 RunClocks(Uint32 nTargetClocks);
 
-    /* Source compatibility with retired mGBA scheduler probes. */
     Uint32 DebugPreTickState() const;
     const char *DebugPreEventName() const;
     Int32 DebugPreEventDelta() const;
@@ -70,26 +75,15 @@ public:
                   ResetHookT pHReset, ResetHookT pVReset,
                   void *pContext);
 
-    /* AURORA_SGB_HOTPATH_V2_20260907
-     * Optional SGB-only raster fast path. Generic callbacks remain the
-     * fallback so GBHost stays reusable outside SNSuperGameBoy. */
     void SetICD2FastPath(SNSGBICD2 *pICD2);
 
     Bool SaveState(StateT *pState) const;
     Bool RestoreState(const StateT *pState);
 
-    /* C callback shims. Public only because SameBoy callbacks are C ABI. */
-    static void BootRomThunk(void *pOpaque, Int32 eBootType);
-    static void JoypThunk(void *pOpaque, Uint8 value);
-    static void PixelThunk(void *pOpaque, Uint8 pixel);
-    /* AURORA_SGB_SCANLINE_BATCH_V4_20260907 */
-    static void LineThunk(void *pOpaque, const Uint32 *pPixels, Int32 nLine);
-    static void HResetThunk(void *pOpaque);
-    static void VResetThunk(void *pOpaque);
-    static void SampleThunk(void *pOpaque, Int16 left, Int16 right);
+    static unsigned char GambatteJoypCallback(
+        void *pOpaque, unsigned char p14p15, bool bWrite);
 
 private:
-    struct Impl;
     Impl *m_p;
 };
 

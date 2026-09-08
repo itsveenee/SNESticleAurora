@@ -558,7 +558,7 @@ static Bool _MainLoopSramWriteFile(const Char *pPath, Uint8 *pData, Uint32 nByte
 
 /* AURORA_SGB_GB_SAVEDATA_V0_3_20260904
  * Variable-size Game Boy savedata storage. Separate from the exact-size
- * SRAM reader used by existing systems. The byte stream is mGBA's complete
+ * SRAM reader used by existing systems. The byte stream is the Game Boy backend's complete
  * VFile (SRAM plus RTC/mapper footer), never a raw SRAM slice.
  */
 #define MAINLOOP_GB_SAVEDATA_MAX (1024U * 1024U)

@@ -67,7 +67,9 @@ public:
 
 private:
     static const Uint32 STATE_MAGIC = 0x35424753U; /* SGB5 */
-    static const Uint32 STATE_VERSION = 4U;
+    /* AURORA_SGB_GAMBATTE_BACKEND_V1_1_20260907:
+       backend/state payload changed; reject old Gambatte SGB states cleanly. */
+    static const Uint32 STATE_VERSION = 6U; /* AURORA_SGB_BSNES_PACKET_FIFO_V1_2_6_20260907 */
     enum {
         BOOT_HEADER_BYTES = 0x4c, /* GB $0104-$014f */
         BOOT_PACKET_COUNT = 6,

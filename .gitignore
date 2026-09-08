@@ -33,4 +33,4 @@ src/platform/ps2/iop/aurora_ps2mouse/obj/
 !tools/namespace_fceumm_fds_archive.py
 !tools/prepare_fceumm_fds_sources.py
 
-!tools/prepare_sameboy_sgb_sources.py
+!tools/prepare_gambatte_sgb_sources.py

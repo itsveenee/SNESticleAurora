@@ -3779,7 +3779,7 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
          * User-facing reassurance must be presented BEFORE synchronous SGB
          * firmware discovery/core attach/reset begins. This call site is the
          * top-level browser/file-loader path, so rendering here is safe
-         * (unlike the deep mGBA/ICD2 debug callbacks).
+         * (unlike the old deep GB/ICD2 debug callbacks).
          *
          * Render twice so both GS buffers contain the message before we enter
          * _MainLoopBootSuperGameBoy(). It is intentionally ordinary transient

@@ -46,7 +46,10 @@ void SNSGBICD2::Reset(ModelE eModel)
 
     memset(m_uController, 0xff, sizeof(m_uController));
     memset(m_uPacket, 0, sizeof(m_uPacket));
-    memset(m_uOutput, 0xff, sizeof(m_uOutput));
+    memset(m_uJoypPacket, 0, sizeof(m_uJoypPacket));
+    m_uPacketQueueCount = 0;
+    memset(m_uPacketQueue, 0, sizeof(m_uPacketQueue));
+    memset(m_uOutput, 0x00, sizeof(m_uOutput)); /* bsnes-plus SGB ring power state */
     m_uClockAccumulator = 0;
 }
 
@@ -77,15 +80,31 @@ void SNSGBICD2::Write(Uint32 uAddr, Uint8 uData)
 Uint8 SNSGBICD2::ReadDecoded(Uint32 d)
 {
     if (d == 0x6000U) {
-        /* ICD LY port exposes the real line rounded down to its 8-line
-           tile row, including VBlank 144..153, ORed with writeBank. */
-        Uint8 ly8 = (Uint8)((Uint8)m_nVCounter & (Uint8)~7U);
-        return (Uint8)(ly8 | (m_uWriteBank & 3U));
+        /* AURORA_SGB_GAMBATTE_BSNESPLUS_VIDEO_V1_2_4_20260907
+         * Match bsnes-plus SuperGameBoy wrapper:
+         * high bits = current 8-line vram_row;
+         * low 2 bits = next ring slot being written. */
+        return (Uint8)(((Uint8)m_nVCounter << 3) |
+                       (m_uWriteBank & 3U));
     }
 
     if (d == 0x6002U) {
-        /* Reading $6002 has no side effect; reading $7000 clears ready. */
-        return m_bPacketReady ? 1 : 0;
+        /* AURORA_SGB_BSNES_PACKET_FIFO_V1_2_6_20260907
+         * Match bsnes/libsupergameboy: polling $6002 dequeues the next
+         * complete packet into the 16-byte $7000 register window. */
+        if (m_uPacketQueueCount)
+        {
+            Uint32 i;
+            memcpy(m_uPacket, m_uPacketQueue[0], PACKET_BYTES);
+            --m_uPacketQueueCount;
+            for (i = 0; i < m_uPacketQueueCount; ++i)
+                memcpy(m_uPacketQueue[i], m_uPacketQueue[i + 1], PACKET_BYTES);
+            memset(m_uPacketQueue[m_uPacketQueueCount], 0, PACKET_BYTES);
+            m_bPacketReady = m_uPacketQueueCount ? TRUE : FALSE;
+            return 1;
+        }
+        m_bPacketReady = FALSE;
+        return 0;
     }
 
     if (d == 0x600fU) return m_uIcdRevision;
@@ -111,14 +130,18 @@ Uint8 SNSGBICD2::ReadDecoded(Uint32 d)
                     break;
                 default: break;
             }
-            m_bPacketReady = FALSE;
+            /* V1.2.6: FIFO advancement happens only at $6002. */
         }
         return m_uPacket[i];
     }
 
     if (d >= 0x7800U && d <= 0x780fU) {
-        Uint8 v = m_uOutput[m_uReadBank & 3U][m_uReadAddress & 0x1ffU];
-        m_uReadAddress = (Uint16)((m_uReadAddress + 1U) & 0x1ffU);
+        /* AURORA_SGB_GAMBATTE_BSNESPLUS_VIDEO_V1_2_4_20260907
+         * 20 tiles * 16 bytes = exactly 320 bytes per tile row. */
+        Uint8 v = m_uOutput[m_uReadBank & 3U][m_uReadAddress];
+        ++m_uReadAddress;
+        if (m_uReadAddress >= LCD_VISIBLE_BYTES)
+            m_uReadAddress = 0;
         return v;
     }
 
@@ -271,7 +294,8 @@ Uint8 SNSGBICD2::JoypWrite(Bool p14, Bool p15)
 
     if (m_bPacketLock) {
         if (!p14 && p15) {
-            m_bPacketReady = TRUE;
+            SubmitPacket(m_uJoypPacket);
+            memset(m_uJoypPacket, 0, sizeof(m_uJoypPacket));
             m_bPacketLock = FALSE;
             m_bPulseLock = TRUE;
         }
@@ -282,7 +306,7 @@ Uint8 SNSGBICD2::JoypWrite(Bool p14, Bool p15)
     m_uBitOffset = (Uint8)((m_uBitOffset + 1U) & 7U);
     if (m_uBitOffset) return input;
 
-    m_uPacket[m_uPacketOffset & 15U] = m_uBitData;
+    m_uJoypPacket[m_uPacketOffset & 15U] = m_uBitData;
     m_uPacketOffset = (Uint8)((m_uPacketOffset + 1U) & 15U);
     if (!m_uPacketOffset) m_bPacketLock = TRUE;
     return input;
@@ -291,12 +315,69 @@ Uint8 SNSGBICD2::JoypWrite(Bool p14, Bool p15)
 void SNSGBICD2::SubmitPacket(const Uint8 *pPacket)
 {
     if (!pPacket) return;
-    memcpy(m_uPacket, pPacket, PACKET_BYTES);
+
+    /* AURORA_SGB_BSNES_PACKET_FIFO_V1_2_6_20260907 */
+    if (m_uPacketQueueCount >= PACKET_QUEUE_CAPACITY)
+        return;
+
+    memcpy(m_uPacketQueue[m_uPacketQueueCount], pPacket, PACKET_BYTES);
+    ++m_uPacketQueueCount;
     m_bPacketReady = TRUE;
 }
 
 /* AURORA_SGB_HOTPATH_V2_20260907
  * PPUWrite/PPUHReset/PPUVReset moved inline to snsgb_icd2.h. */
+
+/* AURORA_SGB_GAMBATTE_BSNESPLUS_VIDEO_V1_2_4_20260907 */
+void SNSGBICD2::GambatteNewLy(Uint32 uNewLy, const Uint16 *pFrame)
+{
+    Uint32 newRow, oldRow, y, x, tile;
+    Uint8 *pDest;
+
+    if (!pFrame || uNewLy >= LCD_TOTAL_LINES)
+        return;
+
+    /* bsnes-plus only commits on visible tile-row transitions.
+       VBlank keeps vram_row at 17 until next frame enters LY 0. */
+    if (uNewLy >= LCD_VISIBLE_LINES)
+        return;
+
+    newRow = uNewLy >> 3;
+    oldRow = (Uint32)m_nVCounter;
+
+    if (newRow == oldRow)
+        return;
+
+    if (oldRow >= (LCD_VISIBLE_LINES >> 3))
+        oldRow = (LCD_VISIBLE_LINES >> 3) - 1U;
+
+    pDest = m_uOutput[m_uWriteBank & 3U];
+    memset(pDest, 0x00, LCD_VISIBLE_BYTES);
+
+    /* V1.2.2 makes the framebuffer contain literal final DMG shades 0..3.
+       Pack the previous complete 8x160 block exactly as bsnes-plus does. */
+    for (y = 0; y < 8U; ++y) {
+        Uint32 srcY = oldRow * 8U + y;
+        for (tile = 0; tile < 20U; ++tile) {
+            Uint8 p0 = 0;
+            Uint8 p1 = 0;
+            for (x = 0; x < 8U; ++x) {
+                Uint8 c = (Uint8)(
+                    pFrame[srcY * LCD_WIDTH + tile * 8U + x] & 3U);
+                Uint8 bit = (Uint8)(0x80U >> x);
+                if (c & 1U) p0 |= bit;
+                if (c & 2U) p1 |= bit;
+            }
+
+            pDest[tile * 16U + y * 2U + 0U] = p0;
+            pDest[tile * 16U + y * 2U + 1U] = p1;
+        }
+    }
+
+    m_nVCounter = (Int32)newRow;
+    m_uWriteBank = (Uint8)((m_uWriteBank + 1U) & 3U);
+    m_uHCounter = 0;
+}
 
 void SNSGBICD2::PushLCDScanline(Int32 nLine, const Uint8 *pShade2Bit)
 {
@@ -306,6 +387,12 @@ void SNSGBICD2::PushLCDScanline(Int32 nLine, const Uint8 *pShade2Bit)
     if (!pShade2Bit || nLine < 0 || nLine >= LCD_VISIBLE_LINES)
         return;
 
+
+    /* AURORA_SGB_ICD2_RING_PHASE_V1_2_3_20260907
+     * The ICD2 advances to the next write-row at the START of each
+     * visible 8-line character row, including LY=0. */
+    if ((nLine & 7) == 0)
+        m_uWriteBank = (Uint8)((m_uWriteBank + 1U) & 3U);
 
     m_nVCounter = nLine;
     rowBase = (Uint32)(nLine & 7) * 2U;
@@ -329,15 +416,9 @@ void SNSGBICD2::EndLCDLine(Int32 nLine)
 
     m_nVCounter = nLine;
 
-    /* AURORA_SGB_ICD2_HRESET_BANK_V1_20260906
-     * The ICD2 write-row advances only after eight VISIBLE GB LCD scanlines
-     * have actually filled one 2bpp character row. VBlank lines 144..153 do
-     * not push pixels into the four-row ring and therefore must not rotate it.
-     * The row counter itself still advances through VBlank and resets on
-     * VSync below; $6000 may consequently report >= $88, which the SGB
-     * firmware intentionally rejects while waiting for visible data. */
-    if (((nLine + 1) & 7) == 0)
-        m_uWriteBank = (Uint8)((m_uWriteBank + 1U) & 3U);
+    /* AURORA_SGB_ICD2_RING_PHASE_V1_2_3_20260907
+     * Ring rotation now happens before PushLCDScanline() writes LY
+     * 0,8,16,... . HBlank/VBlank only advances the line counter here. */
 
     m_nVCounter = (nLine == LCD_TOTAL_LINES - 1) ? 0 : nLine + 1;
 }
@@ -391,6 +472,9 @@ Bool SNSGBICD2::SaveState(StateT *s) const
     s->resetRequested = m_bResetRequested;
     memcpy(s->controller, m_uController, sizeof(m_uController));
     memcpy(s->packet, m_uPacket, sizeof(m_uPacket));
+    memcpy(s->joypPacket, m_uJoypPacket, sizeof(m_uJoypPacket));
+    s->packetQueueCount = m_uPacketQueueCount;
+    memcpy(s->packetQueue, m_uPacketQueue, sizeof(m_uPacketQueue));
     memcpy(s->output, m_uOutput, sizeof(m_uOutput));
     s->clockAccumulator = m_uClockAccumulator;
     return TRUE;
@@ -402,6 +486,7 @@ Bool SNSGBICD2::RestoreState(const StateT *s)
         s->model > (Uint32)MODEL_SGB2 ||
         s->readBank >= LCD_BANKS || s->writeBank >= LCD_BANKS ||
         s->readAddress >= LCD_BANK_BYTES || s->joypID >= 4 ||
+        s->packetQueueCount > PACKET_QUEUE_CAPACITY ||
         s->packetOffset >= PACKET_BYTES || s->bitOffset >= 8 ||
         s->vcounter < 0 || s->vcounter > 255 || s->hcounter > 0xffffU)
         return FALSE;
@@ -426,6 +511,9 @@ Bool SNSGBICD2::RestoreState(const StateT *s)
     m_bResetRequested = s->resetRequested ? TRUE : FALSE;
     memcpy(m_uController, s->controller, sizeof(m_uController));
     memcpy(m_uPacket, s->packet, sizeof(m_uPacket));
+    memcpy(m_uJoypPacket, s->joypPacket, sizeof(m_uJoypPacket));
+    m_uPacketQueueCount = (Uint8)s->packetQueueCount;
+    memcpy(m_uPacketQueue, s->packetQueue, sizeof(m_uPacketQueue));
     memcpy(m_uOutput, s->output, sizeof(m_uOutput));
     m_uClockAccumulator = s->clockAccumulator;
     return TRUE;

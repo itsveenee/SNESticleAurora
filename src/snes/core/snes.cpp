@@ -3468,7 +3468,7 @@ void SnesSystem::SyncSuperGameBoy()
 
 /* AURORA_SGB_CORRECTNESS_V1_20260907
  * Exactly one SGB catch-up per MMIO access. $7000-$700f is special: consume
- * the ICD2 packet byte first, then advance SameBoy to the current S-CPU time.
+ * the ICD2 packet byte first, then advance the Game Boy backend to the current S-CPU time.
  * All other SGB MMIO remains pre-synchronized. */
 Uint8 SNCPU_TRAPFUNC SnesSystem::ReadSGB(SNCpuT *pCpu, Uint32 uAddr)
 {

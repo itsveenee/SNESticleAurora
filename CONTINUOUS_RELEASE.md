@@ -1,4 +1,4 @@
-Automatically built from the latest commit on main. Includes the recursive QuickNES, PicoDrive, Beetle PCE Fast, FCEUmm/FDS and SameBoy work-in-progress cores. The checked-out source tree, manifest, checksums and third-party notices are attached. Review QuickNES-GPL-2.0.txt, PicoDrive-COPYING.txt, Beetle-PCE-Fast-GPL-2.0.txt, FCEUmm-GPL-2.0.txt and SameBoy-Expat.txt. PicoDrive retains its own additional/separate terms.
+Automatically built from the latest commit on main. Includes the recursive QuickNES, PicoDrive, Beetle PCE Fast, FCEUmm/FDS and Gambatte work-in-progress cores. The checked-out source tree, manifest, checksums and third-party notices are attached. Review QuickNES-GPL-2.0.txt, PicoDrive-COPYING.txt, Beetle-PCE-Fast-GPL-2.0.txt, FCEUmm-GPL-2.0.txt and Gambatte-GPL-2.0.txt. PicoDrive retains its own additional/separate terms.
 
 Contact me on **Discord:** @itsveenee
 

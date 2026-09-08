@@ -11,7 +11,7 @@ Mega Drive, Master System, Game Gear, 32X and Sega CD emulation through **PicoDr
 
 PC Engine / TurboGrafx-16 emulation through **Beetle PC Engine Fast** is based on the libretro port/fork of **Mednafen PCE Fast**, maintained by libretro and Mednafen contributors. Aurora uses `itsveenee/beetle-pce-fast-libretro` with PS2-specific integration and optimization. HuCard (`.pce`, including ZIP/GZ paths) and experimental PC Engine CD `.cue` loading are exposed; CD firmware is user-supplied in `SNESticle/SYSTEM`. See [THIRD_PARTY.md](THIRD_PARTY.md) and `LICENSES/Beetle-PCE-Fast-GPL-2.0.txt`.
 
-Super Game Boy emulation uses [**SameBoy**](https://github.com/itsveenee/SameBoy) by **Lior Halphon** as the embedded Game Boy backend, through SameBoy's dedicated external-SFC (`SGB_NO_SFC`) interface. Aurora continues to emulate the SNES and ICD2 side. The integration is experimental. See [THIRD_PARTY.md](THIRD_PARTY.md) and `LICENSES/SameBoy-Expat.txt`. Super Game Boy support is currently **in development**. Aurora uses the pinned `itsveenee/SameBoy` submodule for the Game Boy CPU/PPU/APU/MBC side of the `GBHost` + ICD2 bridge. SameBoy is by **Lior Halphon and contributors** and is distributed under the **Expat License**. See [THIRD_PARTY.md](THIRD_PARTY.md) and `LICENSES/SameBoy-Expat.txt`.
+Super Game Boy emulation uses **Gambatte** as the embedded Game Boy CPU/PPU/APU/MBC backend while Aurora emulates the SNES and ICD2 side. The integration is experimental. See [THIRD_PARTY.md](THIRD_PARTY.md) and `LICENSES/Gambatte-GPL-2.0.txt`.
 
 SNESticle Aurora code covered by the GPL remains under GNU GPLv2; separately licensed third-party components remain under their own terms. **Code license and project branding are separate.** The applicable software licenses grant rights in the code; they **do not grant permission to use the SNESticle Aurora name** or the project-specific **Aurora** identity/branding for an unofficial fork, modified build, redistributed binary, or derivative project. Unless separately authorized by **@itsveenee**, use a distinct project/product name and distinct branding. Factual attribution such as “based on SNESticle Aurora” remains welcome. See [BRANDING.md](BRANDING.md).
 
@@ -47,7 +47,7 @@ Emulation:
 * Changed SRAM and RAM initialization for both NES and SNES. This will fix all the very few games that rely on specific initial values to work properly.
 * Mega Drive / Genesis + Sega Master System / Mark III + Game Gear + 32X + Sega CD emulation with PicoDrive
 * PC Engine / TurboGrafx-16 HuCard and PC Engine CD emulation with Beetle PCE Fast
-* Super Game Boy emulation with SameBoy (experimental)
+* Super Game Boy emulation with Gambatte (experimental)
 * Fixes and improvements for the 240p display modes, improved screen positioning and overscan settings for each system and graphical resolution/modes.
 * Dedicated turbo buttons for NES, PCE, GG and SMS games
 * Turbo button toggle (hold R2+ANY BUTTON) for SNES and MD games

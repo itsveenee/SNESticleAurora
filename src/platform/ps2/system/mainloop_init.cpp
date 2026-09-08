@@ -433,7 +433,7 @@ Bool MainLoopInit()
 	ScrPrintf("FCEUmm FDS: FCE Ultra / libretro"); /* AURORA_BOOTLOG_FCEUMM_NOWIP_V1_20260905 */
 	ScrPrintf("PicoDrive: notaz / irixxxx / contributors");
 	ScrPrintf("Beetle PCE Fast: Mednafen / libretro contributors");
-	ScrPrintf("SameBoy: Lior Halphon / contributors");
+	ScrPrintf("Gambatte: Sinamas / contributors");
 	ScrPrintf("Licenses/notices: repository LICENSES/");
 	ScrPrintf("Copyright (c) 1997-2004 Icer Addis");
 

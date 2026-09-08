@@ -31,7 +31,7 @@ Bool _MainLoopCheckSRAM();
 Bool _MainLoopForceCheckSRAM();
 
 /* AURORA_SGB_GB_SAVEDATA_V0_3_20260904
- * Full variable-size mGBA savedata VFile. Returned load buffer is malloc'd. */
+ * Full variable-size Game Boy savedata buffer. Returned load buffer is malloc'd. */
 Bool MainLoopLoadGBSavedata(Uint8 **ppData, Uint32 *pBytes);
 Bool MainLoopSaveGBSavedata(const Uint8 *pData, Uint32 nBytes);
 void MainLoopFreeGBSavedata(Uint8 *pData);

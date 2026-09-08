@@ -13,6 +13,7 @@ public:
 
     enum {
         PACKET_BYTES = 16,
+        PACKET_QUEUE_CAPACITY = 64,
         LCD_BANKS = 4,
         LCD_BANK_BYTES = 512,
         LCD_VISIBLE_BYTES = 320,
@@ -30,6 +31,9 @@ public:
         Uint32 packetOffset, bitData, bitOffset, resetRequested;
         Uint8 controller[4];
         Uint8 packet[PACKET_BYTES];
+        Uint8 joypPacket[PACKET_BYTES];
+        Uint32 packetQueueCount;
+        Uint8 packetQueue[PACKET_QUEUE_CAPACITY][PACKET_BYTES];
         Uint8 output[LCD_BANKS][LCD_BANK_BYTES];
         Uint64 clockAccumulator;
     };
@@ -51,7 +55,7 @@ public:
     void SubmitPacket(const Uint8 *pPacket);
 
     /* AURORA_SGB_HOTPATH_V2_20260907
-     * Native SameBoy NO_SFC ICD raster contract. Kept byte-for-byte equivalent
+     * Native Gambatte NO_SFC ICD raster contract. Kept byte-for-byte equivalent
      * to the former out-of-line implementation, but inline for the PS2 hot path. */
     void PPUWrite(Uint8 uColor)
     {
@@ -59,6 +63,12 @@ public:
         Uint8 y;
         Uint32 off;
         Uint8 *pBank;
+
+        /* AURORA_SGB_ICD2_RING_PHASE_V1_2_3_20260907
+         * Legacy pixel path: advance ring before pixel 0 of LY 0,8,16,... */
+        if (x == 0 && m_nVCounter < LCD_VISIBLE_LINES &&
+            ((m_nVCounter & 7) == 0))
+            m_uWriteBank = (Uint8)((m_uWriteBank + 1U) & 3U);
 
         if (x >= LCD_WIDTH)
             return;
@@ -75,10 +85,10 @@ public:
 
     void PPUHReset()
     {
+        /* AURORA_SGB_ICD2_RING_PHASE_V1_2_3_20260907
+         * Write-row rotation occurs before the first pixel of each tile row. */
         m_uHCounter = 0;
         ++m_nVCounter;
-        if ((m_nVCounter & 7) == 0)
-            m_uWriteBank = (Uint8)((m_uWriteBank + 1U) & 3U);
     }
 
     void PPUVReset()
@@ -87,12 +97,20 @@ public:
         m_nVCounter = 0;
     }
 
+    /* AURORA_SGB_GAMBATTE_BSNESPLUS_VIDEO_V1_2_4_20260907
+     * Called with NEW LY after Gambatte advances its LY counter.
+     * pFrame is the persistent 160x144 literal-shade framebuffer. */
+    void GambatteNewLy(Uint32 uNewLy, const Uint16 *pFrame);
+
     /* Legacy helpers retained for old source/state compatibility. */
     void PushLCDScanline(Int32 nLine, const Uint8 *pShade2Bit);
     void EndLCDLine(Int32 nLine);
 
     Uint8 GetControllerByte(Int32 iController) const;
     Uint8 GetControllerCount() const;
+    /* AURORA_SGB_BSNES_PACKET_FIFO_V1_2_6_20260907
+     * Pending means there is at least one complete packet in the FIFO. */
+    Bool PacketReady() const { return m_uPacketQueueCount ? TRUE : FALSE; }
     Uint8 GetControl() const { return m_uControl; }
     Uint8 GetICDRevision() const { return m_uIcdRevision; }
     void SetICDRevision(Uint8 uRevision) { m_uIcdRevision = uRevision; }
@@ -107,7 +125,7 @@ public:
 
 private:
     static const Uint32 STATE_MAGIC = 0x32424753U; /* "SGB2" LE */
-    static const Uint32 STATE_VERSION = 3U;
+    static const Uint32 STATE_VERSION = 5U; /* AURORA_SGB_BSNES_PACKET_FIFO_V1_2_6_20260907 */
     static const Uint32 SGB2_OSC_HZ = 20971520U;
 
     ModelE m_eModel;
@@ -127,6 +145,9 @@ private:
 
     Uint8 m_uController[4];
     Uint8 m_uPacket[PACKET_BYTES];
+    Uint8 m_uJoypPacket[PACKET_BYTES];
+    Uint8 m_uPacketQueueCount;
+    Uint8 m_uPacketQueue[PACKET_QUEUE_CAPACITY][PACKET_BYTES];
     Uint8 m_uOutput[LCD_BANKS][LCD_BANK_BYTES];
     Uint64 m_uClockAccumulator;
 

@@ -15,7 +15,7 @@
 	url = https://github.com/itsveenee/Fceumm-PS2.git
 	branch = master
 
-[submodule "src/third_party/sameboy"]
-	path = src/third_party/sameboy
-	url = https://github.com/itsveenee/SameBoy.git
+[submodule "src/third_party/gambatte"]
+	path = src/third_party/gambatte
+	url = https://github.com/itsveenee/gambatte-libretro.git
 	branch = master

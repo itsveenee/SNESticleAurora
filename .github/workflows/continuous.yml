@@ -39,25 +39,7 @@ jobs:
           test -f tools/prepare_fceumm_fds_sources.py
           test -f tools/namespace_fceumm_fds_archive.py
 
-          # AURORA_CONTINUOUS_SAMEBOY_V1_20260906
-          test -f src/third_party/sameboy/Core/gb.c
-          test -f src/third_party/sameboy/Core/sgb.c
-          test -f src/third_party/sameboy/BootROMs/sgb_boot.asm
-          test -f src/third_party/sameboy/LICENSE
-          test -f src/snes/core/sameboy_sgb_boot.h
-          test -f tools/Makefile.sameboy-gb-ps2
-          test -f tools/prepare_sameboy_sgb_sources.py
-          test -f tools/sameboy_ps2_compat.c
-          test -f tools/sameboy_ps2_compat.h
-          test -f LICENSES/SameBoy-Expat.txt
-          cmp -s src/third_party/sameboy/LICENSE LICENSES/SameBoy-Expat.txt
-          python3 -m py_compile tools/prepare_sameboy_sgb_sources.py
 
-          sameboy_stage_root="$(mktemp -d)"
-          python3 tools/prepare_sameboy_sgb_sources.py             --source src/third_party/sameboy             --stage "$sameboy_stage_root/stage"
-          test -f "$sameboy_stage_root/stage/.aurora-sameboy-stage-v1"
-          test -f "$sameboy_stage_root/stage/Core/graphics/agb_border.inc"
-          rm -rf "$sameboy_stage_root"
 
           test "$(git config -f .gitmodules --get submodule.src/third_party/beetle-pce-fast.url)" = "https://github.com/itsveenee/beetle-pce-fast-libretro.git"
           test "$(git config -f .gitmodules --get submodule.src/third_party/beetle-pce-fast.branch)" = "master"
@@ -65,8 +47,6 @@ jobs:
           test "$(git config -f .gitmodules --get submodule.src/third_party/fceumm-fds.url)" = "https://github.com/itsveenee/Fceumm-PS2.git"
           test "$(git config -f .gitmodules --get submodule.src/third_party/fceumm-fds.branch)" = "master"
 
-          test "$(git config -f .gitmodules --get submodule.src/third_party/sameboy.url)" = "https://github.com/itsveenee/SameBoy.git"
-          test "$(git config -f .gitmodules --get submodule.src/third_party/sameboy.branch)" = "master"
 
           echo "Recursive submodules:"
           git submodule status --recursive
@@ -75,9 +55,6 @@ jobs:
           echo "FCEUmm/FDS commit:"
           git -C src/third_party/fceumm-fds rev-parse HEAD
           test "$(git -C src/third_party/fceumm-fds rev-parse HEAD)" = "dc77e3ca4baad08f0023f61dba9846550735b74d"
-          echo "SameBoy commit:"
-          git -C src/third_party/sameboy rev-parse HEAD
-          test "$(git -C src/third_party/sameboy rev-parse HEAD)" = "213a12ce93d66b105a113debd9396306066a7cfc"
 
 
       # AURORA_CONTINUOUS_PICODRIVE_SOURCE_V4_2
@@ -144,5 +121,5 @@ jobs:
           gh release delete continuous --cleanup-tag --yes || true
 
           # AURORA_BRANDING_RELEASE_ASSET_V9_20260821
-          gh release create continuous             build/SNESticle.elf             "$AURORA_SOURCE_BUNDLE"             /tmp/SOURCE-MANIFEST.txt             /tmp/SHA256SUMS.txt             LICENSE             BRANDING.md             LICENSES/PicoDrive-COPYING.txt             LICENSES/QuickNES-GPL-2.0.txt             LICENSES/Beetle-PCE-Fast-GPL-2.0.txt             LICENSES/FCEUmm-GPL-2.0.txt             LICENSES/SameBoy-Expat.txt             THIRD_PARTY.md             --target "$GITHUB_SHA"             --title "Continuous Build"             --prerelease             --notes-file CONTINUOUS_RELEASE.md  # AURORA_CONTINUOUS_RELEASE_FILE_V8_20260821
+          gh release create continuous             build/SNESticle.elf             "$AURORA_SOURCE_BUNDLE"             /tmp/SOURCE-MANIFEST.txt             /tmp/SHA256SUMS.txt             LICENSE             BRANDING.md             LICENSES/PicoDrive-COPYING.txt             LICENSES/QuickNES-GPL-2.0.txt             LICENSES/Beetle-PCE-Fast-GPL-2.0.txt             LICENSES/FCEUmm-GPL-2.0.txt             LICENSES/Gambatte-GPL-2.0.txt             THIRD_PARTY.md             --target "$GITHUB_SHA"             --title "Continuous Build"             --prerelease             --notes-file CONTINUOUS_RELEASE.md  # AURORA_CONTINUOUS_RELEASE_FILE_V8_20260821
 
