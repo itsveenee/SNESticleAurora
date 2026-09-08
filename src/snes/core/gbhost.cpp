@@ -10,15 +10,18 @@
 #define HAVE_STDINT_H 1
 #define AURORA_UNDEF_HAVE_STDINT_H 1
 #endif
-#ifndef VIDEO_SGB_SHADE8
-#define VIDEO_SGB_SHADE8 1
-#define AURORA_UNDEF_VIDEO_SGB_SHADE8 1
-#endif
 #include "gambatte.h"
-#ifdef AURORA_UNDEF_VIDEO_SGB_SHADE8
-#undef VIDEO_SGB_SHADE8
-#undef AURORA_UNDEF_VIDEO_SGB_SHADE8
+
+/* AURORA_SGB_CLASSIC_RGB32_V1_20260908
+ * Keep the host ABI identical to the staged Gambatte archive. The historical
+ * bsnes-plus/classic SGB bridge consumes Gambatte's normal 32-bit grayscale
+ * framebuffer and converts it to ICD2 bitplanes only at the SGB boundary. */
+#ifdef VIDEO_SGB_SHADE8
+#error "Aurora SGB classic RGB32 host must not be built with VIDEO_SGB_SHADE8"
 #endif
+typedef char AuroraSgbVideoPixelMustBe32Bit[
+    (sizeof(gambatte::video_pixel_t) == 4U) ? 1 : -1];
+
 #ifdef AURORA_UNDEF_HAVE_STDINT_H
 #undef HAVE_STDINT_H
 #undef AURORA_UNDEF_HAVE_STDINT_H
@@ -109,13 +112,15 @@ struct GBHost::Impl
     }
 };
 
-/* AURORA_V4_4_CUMULATIVE_20260908
- * VIDEO_SGB_SHADE8 makes each framebuffer pixel the final literal DMG shade
- * selected by BGP/OBP. GB::reset()/state restore can rebuild normal DMG
- * palette state, so this is host policy and must be asserted explicitly. */
+/* AURORA_SGB_CLASSIC_RGB32_V1_20260908
+ * Match bsnes-plus/classic Gambatte at the video boundary: the DMG palette
+ * is neutral 0xFFFFFF / 0xAAAAAA / 0x555555 / 0x000000 RGB32.
+ * SGB colourization remains entirely on the SNES side. */
 static void AuroraGambatteApplySgbShadePalette(GBHost::Impl *p)
 {
-    static const Uint32 s_DmgShade[4] = { 0U, 1U, 2U, 3U };
+    static const Uint32 s_DmgShade[4] = {
+        0x00ffffffU, 0x00aaaaaaU, 0x00555555U, 0x00000000U
+    }; /* AURORA_SGB_CLASSIC_RGB32_V1_20260908 */
     Uint32 pal, shade;
 
     if (!p)
@@ -138,12 +143,12 @@ extern "C" void AuroraGambatteSgbNewLy(unsigned line)
     if (!p || !p->loaded || line >= SNSGBICD2::LCD_TOTAL_LINES)
         return;
 
-    /* AURORA_SGB_GAMBATTE_SHADE8_JOYP_SYNC_PERF_V3_20260908
-     * video_pixel_t is one literal final DMG shade byte in this PS2-only
-     * Gambatte build. No RGB16 reinterpretation/conversion is involved. */
+    /* AURORA_SGB_CLASSIC_RGB32_V1_20260908
+     * Same data boundary as bsnes-plus/classic: Gambatte draws normal RGB32;
+     * ICD2 converts the previous completed 8-line row to 2bpp. */
     if (p->icd2FastPath)
         p->icd2FastPath->GambatteNewLy(
-            line, (const Uint8 *)p->screen);
+            line, (const Uint32 *)p->screen);
 }
 
 GBHost::GBHost() : m_p(NULL) {}
@@ -274,7 +279,7 @@ Bool GBHost::LoadROM(const Uint8 *pData, Uint32 nBytes, ModelE eModel)
      * small RunClocks() grant. */
     m_p->gb.setSgbVideoBuffer(m_p->screen, SNSGBICD2::LCD_WIDTH);
 
-    /* Preserve literal DMG shade identity; SGB color attributes are SNES-side. */
+    /* Preserve neutral classic DMG grayscale; SGB color attributes are SNES-side. */
     AuroraGambatteApplySgbShadePalette(m_p);
 
     m_p->romBytes = nBytes;
@@ -325,9 +330,9 @@ void GBHost::Reset(ModelE eModel)
     m_p->gb.reset();
     m_p->gb.setSgbPostBootState(m_p->model == MODEL_SGB2);
 
-    /* AURORA_V4_4_CUMULATIVE_20260908
+    /* AURORA_SGB_CLASSIC_RGB32_V1_20260908
      * full_init() behind GB::reset() restores ordinary DMG video state.
-     * Reassert every external SGB binding and the literal shade contract
+     * Reassert every external SGB binding and the classic grayscale contract
      * before the first post-reset pixel can reach ICD2. */
     m_p->gb.setSgbJoypCallback(&GBHost::GambatteJoypCallback, m_p);
     m_p->gb.setScanlineCallback(&AuroraGambatteSgbNewLy);

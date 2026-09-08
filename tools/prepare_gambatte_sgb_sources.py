@@ -11,7 +11,7 @@ import shutil
 import subprocess
 import sys
 
-STAGE_MARK = 'AURORA_SGB_GAMBATTE_STAGE_V3_SHADE8_20260908'
+STAGE_MARK = 'AURORA_SGB_GAMBATTE_STAGE_V4_CLASSIC_RGB32_20260908'
 STAMP_NAME = '.aurora-gambatte-stage-v3'
 
 
@@ -577,11 +577,29 @@ def prepare_stage(source, stage):
         ignore=shutil.ignore_patterns(
             ".git", "*.o", "*.a", "*.so", "*.dll", "*.dylib"))
 
-    # AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907
-    # SGB extensions now live in itsveenee/gambatte-libretro itself.
-    # Do not mutate the copied source a second time.
+    # AURORA_SGB_CLASSIC_RGB32_V1_20260908
+    # Keep the pinned Gambatte checkout pristine, but make the staged PS2
+    # archive use Gambatte's normal u32 RGB framebuffer like bsnes-plus /
+    # bsnes-classic. This changes only the generated build-tree copy.
+    p = stage / "Makefile.libretro"
+    s = read(p)
+    old = (
+        "   PLATFORM_DEFINES := -DPS2 -DVIDEO_SGB_SHADE8 "
+        "# AURORA_SGB_GAMBATTE_SHADE8_JOYP_SYNC_PERF_V3_20260908\n"
+    )
+    new = (
+        "   PLATFORM_DEFINES := -DPS2 "
+        "# AURORA_SGB_CLASSIC_RGB32_V1_20260908\n"
+    )
+    s = replace_once(
+        s, old, new,
+        "Makefile.libretro classic RGB32 SGB framebuffer")
+    write(p, s)
+
+    # All source-level SGB extensions remain authoritative in the pinned fork.
+    # Only the staged framebuffer ABI selection above is intentionally local.
     stamp.write_text(signature, encoding="utf-8")
-    print("[ Gambatte stage ] direct fork staged:", STAGE_MARK)
+    print("[ Gambatte stage ] classic RGB32 fork staged:", STAGE_MARK)
 
 def main():
     ap = argparse.ArgumentParser()

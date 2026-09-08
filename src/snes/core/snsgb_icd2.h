@@ -97,10 +97,11 @@ public:
         m_nVCounter = 0;
     }
 
-    /* AURORA_SGB_GAMBATTE_BSNESPLUS_VIDEO_V1_2_4_20260907
+    /* AURORA_SGB_CLASSIC_RGB32_V1_20260908
      * Called with NEW LY after Gambatte advances its LY counter.
-     * pFrame is the persistent 160x144 literal-shade framebuffer. */
-    void GambatteNewLy(Uint32 uNewLy, const Uint8 *pFrame); /* AURORA_SGB_GAMBATTE_SHADE8_JOYP_SYNC_PERF_V3_20260908 */
+     * pFrame is the persistent 160x144 RGB32 grayscale framebuffer, matching
+     * the historical bsnes-plus/classic Gambatte SGB bridge. */
+    void GambatteNewLy(Uint32 uNewLy, const Uint32 *pFrame);
 
     /* Legacy helpers retained for old source/state compatibility. */
     void PushLCDScanline(Int32 nLine, const Uint8 *pShade2Bit);

@@ -338,25 +338,30 @@ void SNSGBICD2::SubmitPacket(const Uint8 *pPacket)
  * PPUWrite/PPUHReset/PPUVReset moved inline to snsgb_icd2.h. */
 
 /* AURORA_SGB_GAMBATTE_BSNESPLUS_VIDEO_V1_2_4_20260907 */
-/* AURORA_SGB_GAMBATTE_SHADE8_JOYP_SYNC_PERF_V3_20260908 */
-static inline void AuroraSgbPack8Shade(const Uint8 *s, Uint8 *p0, Uint8 *p1)
+/* AURORA_SGB_CLASSIC_RGB32_V1_20260908 */
+static inline void AuroraSgbPack8ClassicRGB32(
+    const Uint32 *s, Uint8 *p0, Uint8 *p1)
 {
-    /* Eight literal 0..3 shades -> Game Boy tile bitplanes. The old nested
-       x-loop tested two branches per pixel. This fixed expression is both
-       exact and much friendlier to the R5900 compiler. */
-    *p0 = (Uint8)(
-        ((s[0] & 1U) << 7) | ((s[1] & 1U) << 6) |
-        ((s[2] & 1U) << 5) | ((s[3] & 1U) << 4) |
-        ((s[4] & 1U) << 3) | ((s[5] & 1U) << 2) |
-        ((s[6] & 1U) << 1) |  (s[7] & 1U));
-    *p1 = (Uint8)(
-        (((s[0] >> 1) & 1U) << 7) | (((s[1] >> 1) & 1U) << 6) |
-        (((s[2] >> 1) & 1U) << 5) | (((s[3] >> 1) & 1U) << 4) |
-        (((s[4] >> 1) & 1U) << 3) | (((s[5] >> 1) & 1U) << 2) |
-        (((s[6] >> 1) & 1U) << 1) |  ((s[7] >> 1) & 1U));
+    Uint8 b0 = 0;
+    Uint8 b1 = 0;
+    Uint32 x;
+
+    /* AURORA_SGB_CLASSIC_RGB32_V1_20260908
+     * Equivalent to the bsnes-plus/classic `pixel / 0x555555 ^ 3`
+     * conversion for the forced FF/AA/55/00 grayscale palette, but avoids
+     * an integer divide per pixel on the R5900. */
+    for (x = 0; x < 8U; ++x)
+    {
+        Uint32 pixel = ((s[x] >> 6) & 3U) ^ 3U;
+        b0 |= (Uint8)((pixel & 1U) << (7U - x));
+        b1 |= (Uint8)(((pixel >> 1) & 1U) << (7U - x));
+    }
+
+    *p0 = b0;
+    *p1 = b1;
 }
 
-void SNSGBICD2::GambatteNewLy(Uint32 uNewLy, const Uint8 *pFrame)
+void SNSGBICD2::GambatteNewLy(Uint32 uNewLy, const Uint32 *pFrame)
 {
     Uint32 newRow, oldRow, y, tile;
     Uint8 *pDest;
@@ -383,10 +388,10 @@ void SNSGBICD2::GambatteNewLy(Uint32 uNewLy, const Uint8 *pFrame)
      * The loop below writes 20 * 8 * 2 = all 320 visible bytes. Clearing the
      * same row first is pure EE memory bandwidth on this LY hot path. */
     for (y = 0; y < 8U; ++y) {
-        const Uint8 *src = pFrame + (oldRow * 8U + y) * LCD_WIDTH;
+        const Uint32 *src = pFrame + (oldRow * 8U + y) * LCD_WIDTH;
         for (tile = 0; tile < 20U; ++tile) {
             Uint8 p0, p1;
-            AuroraSgbPack8Shade(src + tile * 8U, &p0, &p1);
+            AuroraSgbPack8ClassicRGB32(src + tile * 8U, &p0, &p1);
             pDest[tile * 16U + y * 2U + 0U] = p0;
             pDest[tile * 16U + y * 2U + 1U] = p1;
         }
