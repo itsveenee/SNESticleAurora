@@ -29,18 +29,18 @@
 typedef char AuroraGbVideoPixelMustBe32Bit[
     (sizeof(gambatte::video_pixel_t) == 4U) ? 1 : -1];
 
-/* AURORA_GB_AUDIO_NATIVE64_R9_20260909
+/* AURORA_GB_SAFE_AUDIO_BIOS_OPT_R3_20260909
  * Gambatte reconstructs one stereo PSG frame per two 4.194304 MHz GB clocks:
- * 2,097,152 raw frames/s. The existing exact 64-frame box decimator therefore
- * yields 32,768 Hz with no fractional-rate conversion inside the core.
+ * 2,097,152 raw frames/s. Keep Aurora's current exact 32-frame box decimator:
+ * 65,536 Hz with no fractional-rate conversion.
  *
- * Request 4096 raw frames per normal frame-aware runFor-style call. Gambatte's
- * public contract allows up to 2064 raw frames of overrun, so the retained
- * 8192-frame scratch has >2 Ki raw-frame safety headroom while roughly halving
- * C++ call/setup overhead versus r8's 2064-frame request. */
+ * Request 5120 raw frames per normal frame-aware runFor-style call. Relative
+ * to the 8192-frame scratch and Gambatte's documented +2064 overrun allowance,
+ * this still leaves 1008 raw frames of reserve. It reduces frontend/runFor()
+ * dispatches without changing emulated clocks, frame-stop semantics or rate. */
 static const Uint32 AURORA_GB_RAW_SAMPLE_RATE = 2097152U;
 static const Uint32 AURORA_GB_RAW_SAMPLES_PER_FRAME = 35112U;
-static const Uint32 AURORA_GB_RAW_SAMPLES_PER_RUN = 4096U; /* AURORA_GB_HOTFIX_R13F_STANDALONE_BOOT_AUDIO_Y_20260909_BOOT: fewer runFor() calls; 8192 scratch remains safe. */
+static const Uint32 AURORA_GB_RAW_SAMPLES_PER_RUN = 5120U; /* AURORA_GB_SAFE_AUDIO_BIOS_OPT_R3_20260909: nominal full-frame dispatches ceil(35112/4096)=9 -> ceil(35112/5120)=7; 1008 raw-frame reserve after documented +2064. */
 static const Uint32 AURORA_GB_AUDIO_DECIMATION = 32U; /* AURORA_GB_HOTFIX_R13F_STANDALONE_BOOT_AUDIO_Y_20260909_AUDIO: 65536-Hz intermediate; less box-filter harshness. */
 static const Uint32 AURORA_GB_AUDIO_RATE =
     AURORA_GB_RAW_SAMPLE_RATE / AURORA_GB_AUDIO_DECIMATION;
@@ -763,18 +763,37 @@ static void AuroraGbOutputAudio(CMixBuffer *pMix,
 /* AURORA_GB_HOTFIX_R13D_COLOR_AUDIO_LIFECYCLE_20260909
  * Reuse the normal Gambatte full-rate PCM path that was already clean on PS2.
  * Carry partial 32-frame groups across runFor() calls to avoid boundary clicks. */
+/* AURORA_GB_SAFE_AUDIO_BIOS_OPT_R3_20260909
+ * Bit-equivalent 32:1 box decimator for the current 65,536-Hz standalone path.
+ *
+ * A carried partial block still uses the existing Int64 state. Complete
+ * 32-sample blocks use local Int32 sums (32 * signed-16-bit is safely inside
+ * Int32), then use normal signed C++ division exactly like the old path.
+ * Do not replace the division with >> 5: negative rounding would differ.
+ *
+ * Output is written in-place only after every input of that block was read,
+ * and 'out' always trails 'i', so no unread raw sample can be overwritten. */
 static Uint32 AuroraGbDecimateRawAudio(GambatteSystem::Impl *p, Uint32 nRaw)
 {
-    Uint32 i, out = 0;
+    Uint32 i = 0, out = 0;
     if (!p) return 0;
     if (nRaw > AURORA_GB_AUDIO_SCRATCH) nRaw = AURORA_GB_AUDIO_SCRATCH;
 
-    for (i = 0; i < nRaw; ++i)
+    /* Finish the partial group carried from the previous runFor() call. */
+    if (p->audioPhase)
     {
-        Uint32 packed = (Uint32)p->audioScratch[i];
-        p->audioSumL += (Int16)(packed & 0xffffU);
-        p->audioSumR += (Int16)((packed >> 16) & 0xffffU);
-        ++p->audioPhase;
+        Uint32 need = AURORA_GB_AUDIO_DECIMATION - p->audioPhase;
+        Uint32 take = (nRaw < need) ? nRaw : need;
+        Uint32 end = i + take;
+
+        for (; i < end; ++i)
+        {
+            Uint32 packed = (Uint32)p->audioScratch[i];
+            p->audioSumL += (Int16)(packed & 0xffffU);
+            p->audioSumR += (Int16)((packed >> 16) & 0xffffU);
+        }
+
+        p->audioPhase += take;
         if (p->audioPhase == AURORA_GB_AUDIO_DECIMATION)
         {
             Int32 l = (Int32)(p->audioSumL / (Int64)AURORA_GB_AUDIO_DECIMATION);
@@ -786,13 +805,50 @@ static Uint32 AuroraGbDecimateRawAudio(GambatteSystem::Impl *p, Uint32 nRaw)
             p->audioPhase = 0;
         }
     }
+
+    /* Fast path: whole 32-sample groups, no per-sample phase branch/Int64. */
+    while (i + AURORA_GB_AUDIO_DECIMATION <= nRaw)
+    {
+        Int32 sumL = 0;
+        Int32 sumR = 0;
+        Uint32 end = i + AURORA_GB_AUDIO_DECIMATION;
+
+        do
+        {
+            Uint32 packed = (Uint32)p->audioScratch[i++];
+            sumL += (Int16)(packed & 0xffffU);
+            sumR += (Int16)((packed >> 16) & 0xffffU);
+        } while (i < end);
+
+        {
+            Int32 l = sumL / (Int32)AURORA_GB_AUDIO_DECIMATION;
+            Int32 r = sumR / (Int32)AURORA_GB_AUDIO_DECIMATION;
+            p->audioScratch[out++] =
+                (gambatte::uint_least32_t)((Uint16)l | ((Uint32)(Uint16)r << 16));
+        }
+    }
+
+    /* Carry an incomplete tail exactly as before. */
+    if (i < nRaw)
+    {
+        Uint32 start = i;
+        for (; i < nRaw; ++i)
+        {
+            Uint32 packed = (Uint32)p->audioScratch[i];
+            p->audioSumL += (Int16)(packed & 0xffffU);
+            p->audioSumR += (Int16)((packed >> 16) & 0xffffU);
+        }
+        p->audioPhase += nRaw - start;
+    }
+
     return out;
 }
 
 
-/* AURORA_GB_AUDIO_NATIVE64_R9_20260909
- * Full-rate reconstruction + 32:1 averaging now happens inside Gambatte's
- * PSG::fillBufferSgb64(). Aurora receives only final 32768-Hz packed frames. */
+/* AURORA_GB_SAFE_AUDIO_BIOS_OPT_R3_20260909
+ * Standalone GB/GBC keeps Gambatte's normal full-rate runFor() PCM path.
+ * Aurora decimates that packed stereo stream 32:1 to 65,536 Hz below.
+ * PSG::fillBufferSgb64() belongs to the separate SGB/native64 path. */
 
 static inline Uint32 AuroraGbRgb32ToSurface(Uint32 rgb, Bool cgbFiveBit)
 {
