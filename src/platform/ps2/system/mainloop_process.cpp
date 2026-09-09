@@ -29,6 +29,7 @@
 #include "nes/fceumm/fceumm_fds_bridge.h" /* AURORA_FCEUMM_FDS_V0_5_PROCESS */
 /* AURORA_PCE_EXPERIMENTAL_V1 */
 #include "pce/beetle/pce_bridge.h"
+#include "gb/system/gambattesystem.h" /* AURORA_GAMBATTE_MAINLOOP_PRESENT_V2R6_20260908 */
 /* AURORA_PS2_PERF_V4_20260824 */
 #include "gskit_backend.h"
 
@@ -127,7 +128,8 @@ Bool MainLoopProcess()
                  _pSystem == _pFds ||
                  _pSystem == _pPce ||
                  _pSystem == _pSega ||
-                 _pSystem == _pNes) ? 1024 : 4095);
+                 _pSystem == _pNes ||
+                 _pSystem == _pGb) ? 1024 : 4095); /* AURORA_GAMBATTE_MAINLOOP_PRESENT_V2R6_20260908 */
 
             /* AURORA_AUDIO_SPLIT_VOLUMES_V36_20260823
              * Select which saved final gain the shared mixer will use. */
@@ -602,6 +604,24 @@ Bool MainLoopProcess()
                     PROF_ENTER("PceTexUploadFallback");
                     TextureUpload(&_OutTex, pSurface->GetLinePtr(0));
                     PROF_LEAVE("PceTexUploadFallback");
+                }
+            }
+            else if (_pSystem == _pGb)
+            {
+                PROF_ENTER("GbExecuteFrame");
+                _pGb->ExecuteFrame(&Input,
+                    bSafeSkip ? NULL : pSurface, pMixBuffer, eMode);
+                PROF_LEAVE("GbExecuteFrame");
+
+                if (!bSafeSkip)
+                {
+                    /* AURORA_GAMBATTE_MAINLOOP_PRESENT_V2R6_20260908
+                     * r5 executed Gambatte via the generic/SNES branch, but
+                     * SNES presentation never uploads a generic RGBA surface.
+                     * Standalone GB is software video, so upload it explicitly. */
+                    PROF_ENTER("GbTexUpload");
+                    TextureUpload(&_OutTex, pSurface->GetLinePtr(0));
+                    PROF_LEAVE("GbTexUpload");
                 }
             }
             else

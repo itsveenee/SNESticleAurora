@@ -746,6 +746,26 @@ void _MainLoopUnloadRom()
         }
     }
 
+    /* AURORA_GAMBATTE_STANDALONE_V2_20260908 */
+    if (_pSystem == _pGb && _pGb && _pGb->IsGameLoaded() &&
+        (_pGb->GetSavedataBytes() > 0 || _pGb->HasTurboFile())) /* AURORA_GB_ASCII_TURBO_FILE_R8_20260909 */
+    {
+        _MainLoop_SRAMUpdated = TRUE;
+        Bool bSaved = _MainLoopSaveSRAM(TRUE);
+        ConPrint("GB savedata unload flush: %s\n", bSaved ? "saved" : "FAILED");
+    }
+
+    /* AURORA_GAMBATTE_STANDALONE_V2_20260908
+     * Persist SRAM+RTC at the cartridge lifetime boundary. Force the bundle
+     * when one exists so RTC-only games are not dependent on RAM dirty bits. */
+    if (_pSystem == _pGb && _pGb && _pGb->IsGameLoaded() &&
+        _pGb->GetSavedataBytes() > 0)
+    {
+        _MainLoop_SRAMUpdated = TRUE;
+        Bool bSaved = _MainLoopSaveSRAM(TRUE);
+        ConPrint("GB savedata unload flush: %s\n", bSaved ? "saved" : "FAILED");
+    }
+
     /* AURORA_SWC_CART_SRAM_MEMORY_FINAL_V5_3_20260901
      * The flush above calls _MainLoopForceCheckSRAM/_MainLoopSaveSRAM while
      * the cart backing and cartridge filename still exist. Detach only now. */
@@ -805,6 +825,7 @@ _MainLoopSwcCartSRAMDetach();
 	if (_pSegaRom) _pSegaRom->Unload();
 	if (_pPce) _pPce->SetRom(NULL);
 	if (_pPceRom) _pPceRom->Unload();
+	if (_pGb) _pGb->UnloadGame(); /* AURORA_GAMBATTE_STANDALONE_V2_20260908 */
 
     if (s_PceCdrdaoTempCue[0])
     {
@@ -3225,6 +3246,8 @@ static Int32 _MainLoopScanSgbStemDirectory(
             valid = _MainLoopSgbProgramCRCAllowed(FALSE, crc, bytes);
         else if (kind == 2)
             valid = _MainLoopSgbProgramCRCAllowed(TRUE, crc, bytes);
+        else if (kind == 4)
+            valid = (bytes == 0x900U && crc == 0x41884E46U) ? TRUE : FALSE; /* AURORA_SGB_GAMBATTE_R8_COMPLETE_20260909 */
         else
             valid = _MainLoopSgbBootCRCAllowed(crc, bytes);
 
@@ -3350,26 +3373,24 @@ static Bool _MainLoopLoadRequiredSgbFirmware(
 static Bool _MainLoopFindAndLoadSgbFirmware(
     Bool *pbSgb2, Char *pChosen, Int32 nChosen)
 {
-    Char sgb1[1024], sgb2[1024];
     Bool wantSgb2;
-    const Char *selected;
+    Char selected[1024];
+    const Char *stem;
+    Int32 kind;
 
     if (!pbSgb2 || !pChosen || nChosen <= 0)
         return FALSE;
     pChosen[0] = 0;
 
-    /* Both accessory program ROMs are mandatory. */
-    if (!_MainLoopFindStrictSgbStem(
-            "sgb", 1, sgb1, sizeof(sgb1)) ||
-        !_MainLoopFindStrictSgbStem(
-            "sgb2", 2, sgb2, sizeof(sgb2)))
+    wantSgb2 = (VideoGetGameBoyMode() == 2) ? TRUE : FALSE;
+    stem = wantSgb2 ? "sgb2" : "sgb";
+    kind = wantSgb2 ? 2 : 1;
+
+    /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909:
+     * preflight only the accessory actually selected by the user. */
+    if (!_MainLoopFindStrictSgbStem(stem, kind, selected, sizeof(selected)))
         return FALSE;
-
-    wantSgb2 = VideoGetSgbBiosModel() ? TRUE : FALSE;
-    selected = wantSgb2 ? sgb2 : sgb1;
-
-    if (!_MainLoopLoadRequiredSgbFirmware(
-            selected, wantSgb2))
+    if (!_MainLoopLoadRequiredSgbFirmware(selected, wantSgb2))
         return FALSE;
 
     *pbSgb2 = wantSgb2;
@@ -3453,6 +3474,51 @@ static Bool _MainLoopLoadGbBios(
     return TRUE;
 }
 
+/* AURORA_GB_CGB_BIOS_PALETTE_R7_20260909
+ * Standalone default is a real CGB. CGB-capable games and ordinary DMG games
+ * therefore require the authentic 0x900-byte CGB bootstrap. The latter are
+ * run in CGB compatibility mode, letting the Nintendo BIOS choose its normal
+ * title palette and accept its boot-time palette button combinations. */
+static Bool _MainLoopLoadRequiredGbcBios(
+    Uint8 *pOut, Uint32 nOutBytes,
+    Char *pChosen, Uint32 nChosenBytes)
+{
+    static const Char *kStems[] = { "cgb_boot", "gbc_bios", "cgb_bios", NULL };
+    Char path[1024];
+    FILE *fp;
+    Uint32 crc = 0, bytes = 0;
+    size_t got;
+    Int32 i;
+
+    if (!pOut || nOutBytes < 0x900U)
+        return FALSE;
+    if (pChosen && nChosenBytes) pChosen[0] = 0;
+    path[0] = 0;
+
+    for (i = 0; kStems[i]; ++i)
+    {
+        if (_MainLoopFindStrictSgbStem(kStems[i], 4, path, sizeof(path)))
+            break;
+        path[0] = 0;
+    }
+    if (!path[0]) return FALSE;
+
+    if (!_MainLoopSgbFileCRC32(path, &crc, &bytes) ||
+        bytes != 0x900U || crc != 0x41884E46U)
+        return FALSE;
+
+    fp = fopen(path, "rb");
+    if (!fp) return FALSE;
+    got = fread(pOut, 1, 0x900U, fp);
+    fclose(fp);
+    if (got != 0x900U) return FALSE;
+
+    if (pChosen && nChosenBytes)
+        snprintf(pChosen, nChosenBytes, "%s", path);
+    ConPrint("CGB BIOS: %s CRC32=%08X\n", path, (unsigned)crc);
+    return TRUE; /* AURORA_SGB_GAMBATTE_R8_COMPLETE_20260909 */
+}
+
 static Bool _MainLoopBootSuperGameBoy(const Uint8 *pGbData, Uint32 nGbBytes,
                                       const Char *pOriginalPath,
                                       Uint32 uGbCRC, Bool bLoadSRAM)
@@ -3466,7 +3532,9 @@ static Bool _MainLoopBootSuperGameBoy(const Uint8 *pGbData, Uint32 nGbBytes,
     if (!_MainLoopFindAndLoadSgbFirmware(&bSgb2, firmware, sizeof(firmware)))
     {
         MainLoopModalPrintf(60 * 7,
-            "SGB requires valid sgb.* AND sgb2.* in SNESticle/SYSTEM.");
+            VideoGetGameBoyMode() == 2
+                ? "SGB2 requires valid sgb2.* in SNESticle/SYSTEM."
+                : "SGB1 requires valid sgb.* in SNESticle/SYSTEM."); /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909 */
         return FALSE;
     }
 
@@ -3784,8 +3852,10 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
             _MainLoop_fOutputIntensity = 1.0f;
             break;
         case MAINLOOP_ENTRYTYPE_GBROM:
-            pSystem = _pSnes; pRom = NULL; pBios = NULL;
-            _MainLoop_fOutputIntensity = 1.0f;
+            pSystem = (VideoGetGameBoyMode() == 0) ? (Emu::System *)_pGb
+                                                   : (Emu::System *)_pSnes;
+            pRom = NULL; pBios = NULL;
+            _MainLoop_fOutputIntensity = 1.0f; /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909 */
             break;
         case MAINLOOP_ENTRYTYPE_PCEROM:
             pSystem = _pPce; pRom = _pPceRom; pBios = NULL;
@@ -3946,17 +4016,80 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
 
     if (eType == MAINLOOP_ENTRYTYPE_GBROM)
     {
-        /* AURORA_SGB_PREBOOT_LOADING_FEEDBACK_V0_6_15_2_20260905
-         * User-facing reassurance must be presented BEFORE synchronous SGB
-         * firmware discovery/core attach/reset begins. This call site is the
-         * top-level browser/file-loader path, so rendering here is safe
-         * (unlike the old deep GB/ICD2 debug callbacks).
-         *
-         * Render twice so both GS buffers contain the message before we enter
-         * _MainLoopBootSuperGameBoy(). It is intentionally ordinary transient
-         * status, not a permanent overlay; later Hxx diagnostics or normal UI
-         * naturally replace it. */
-        MainLoopStatusPrintf(60 * 30, "Loading BIOS and game file...");
+        Int32 gbMode = VideoGetGameBoyMode();
+        if (gbMode == 0)
+        {
+            Bool bCgbCapable;
+            Bool bSgbCompatible;
+            GambatteSystem::StandaloneModeE eGbMode;
+            Uint8 gbcBios[0x900];
+            Uint32 gbcBiosBytes = 0;
+            Char gbcBiosPath[1024];
+
+            if (!_RomData || nRomBytes < 0x150)
+            {
+                _MainLoopFreeRomBuffer();
+                _MainLoopUnloadRom();
+                MainLoopModalPrintf(60 * 4, "ERROR: invalid Game Boy image");
+                return FALSE;
+            }
+
+            bCgbCapable = (_RomData[0x143] & 0x80U) ? TRUE : FALSE;
+            bSgbCompatible = (!bCgbCapable && _RomData[0x146] == 0x03U)
+                ? TRUE : FALSE;
+            eGbMode = bSgbCompatible
+                ? GambatteSystem::STANDALONE_SGB_PALETTE
+                : GambatteSystem::STANDALONE_CGB;
+
+            gbcBiosPath[0] = 0;
+            if (eGbMode == GambatteSystem::STANDALONE_CGB)
+            {
+                if (!_MainLoopLoadRequiredGbcBios(
+                        gbcBios, sizeof(gbcBios), gbcBiosPath, sizeof(gbcBiosPath)))
+                {
+                    _MainLoopFreeRomBuffer();
+                    _MainLoopUnloadRom();
+                    MainLoopModalPrintf(60 * 7,
+                        "GBC requires retail CGB BIOS CRC32 41884E46 in SYSTEM");
+                    return FALSE;
+                }
+                gbcBiosBytes = sizeof(gbcBios);
+            }
+
+            if (!_pGb || !_pGb->LoadGame(
+                    _RomData, (Uint32)nRomBytes, uRomIdentityCRC,
+                    eGbMode, gbcBiosBytes ? gbcBios : NULL, gbcBiosBytes))
+            {
+                _MainLoopFreeRomBuffer();
+                _MainLoopUnloadRom();
+                MainLoopModalPrintf(60 * 4,
+                    "ERROR: Gambatte cannot run this Game Boy image");
+                return FALSE;
+            }
+
+            _pSystem = _pGb;
+            snprintf(_RomPath, sizeof(_RomPath), "%s", OriginalPath);
+            MainLoopStateOnRomChanged();
+            MainLoopStatePrimeRomIdentityCRC(uRomIdentityCRC);
+            _MainLoopSetSampleRate(_pGb->GetSampleRate());
+            if (bLoadSRAM) _MainLoopLoadSRAM();
+
+            _fbTexture[0]->Clear();
+            TextureUpload(&_OutTex, _fbTexture[0]->GetLinePtr(0));
+            ConPrint("GB Loaded: %s [GBC option: %s%s%s]\n",
+                     pFileName,
+                     eGbMode == GambatteSystem::STANDALONE_CGB
+                         ? "CGB BIOS" : "standalone SGB palette",
+                     bCgbCapable ? ", CGB cart" : "",
+                     _pGb->HasTurboFile() ? ", ASCII Turbo File" : "");
+            _MainLoopFreeRomBuffer();
+            return TRUE;
+        }
+
+        /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909: real SGB1/SGB2 path. */
+        MainLoopStatusPrintf(60 * 30,
+            gbMode == 2 ? "Loading SGB2 BIOS and game file..."
+                        : "Loading SGB1 BIOS and game file...");
         MainLoopRender();
         MainLoopRender();
 

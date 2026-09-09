@@ -626,6 +626,7 @@ SRCS := \
 	src/snes/core/snmemmap.cpp \
 	src/snes/core/snsa1.cpp \
 	src/snes/core/gbhost.cpp \
+	src/gb/system/gambattesystem.cpp \
 	src/snes/core/snsgb_icd2.cpp \
 	src/snes/core/snsgb.cpp \
 	src/snes/core/snswc.cpp \
@@ -700,6 +701,8 @@ OBJS := \
 # Compiler flags live in this Makefile.  Make every main object depend on it
 # so changing flags causes a rebuild even when the user simply runs `make -j8`.
 $(OBJS): Makefile
+$(OBJ_DIR)/gb/system/gambattesystem.o: $(GAMBATTE_STAGE_STAMP)
+$(OBJ_DIR)/gb/system/gambattesystem.o: CXXFLAGS += -DHAVE_NETWORK -I$(GAMBATTE_STAGE_DIR)/libgambatte/src # AURORA_GB_ASCII_TURBO_FILE_R8_20260909 AURORA_GB_SERIAL_HEADER_PATH_R13C_20260909
 
 # Rastreamento de dependencia de headers.  -MMD faz o compilador gerar um
 # .d por objeto listando os headers que ele inclui; -MP adiciona alvos

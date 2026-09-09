@@ -34,9 +34,10 @@ void SNSGBICD2::Reset(ModelE eModel)
     m_nVCounter = 0;
     m_uHCounter = 0;
 
-    m_uJoypID = 0;
+    m_uJoypID = 3; /* AURORA_SGB_JOYP_TRANSITION_R11_20260909: real ICD power state */
     m_bJoyp15Lock = FALSE;
     m_bJoyp14Lock = FALSE; /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907 */
+    m_uJoypPreviousSelector = 0x30U; /* AURORA_SGB_JOYP_TRANSITION_R11_20260909 */
     m_bPulseLock = TRUE;
     m_bStrobeLock = FALSE;
     m_bPacketLock = FALSE;
@@ -50,12 +51,15 @@ void SNSGBICD2::Reset(ModelE eModel)
     memset(m_uJoypPacket, 0, sizeof(m_uJoypPacket));
     m_uPacketQueueCount = 0;
     memset(m_uPacketQueue, 0, sizeof(m_uPacketQueue));
-    memset(m_uOutput, 0x00, sizeof(m_uOutput)); /* bsnes-plus SGB ring power state */
+    memset(m_uOutput, 0xff, sizeof(m_uOutput)); /* AURORA_SGB_ICD2_BSNES_RING_R7_20260909: hardware power state */
     m_uClockAccumulator = 0;
 }
 
 Bool SNSGBICD2::IsMappedAddress(Uint32 uAddr)
 {
+    /* AURORA_SGB_ICD2_REAL_PACKET_MIRROR_R10_20260909
+     * Real SGB/SGB2 register mirrors verified on hardware (ares #2503).
+     * This is intentionally 0x40f80f, not the r7 low-16 exact decode. */
     Uint32 d = uAddr & 0x40f80fU;
     if (d == 0x6000U || d == 0x6001U || d == 0x6002U ||
         d == 0x6003U || d == 0x6004U || d == 0x6005U ||
@@ -66,6 +70,18 @@ Bool SNSGBICD2::IsMappedAddress(Uint32 uAddr)
     return FALSE;
 }
 
+Bool SNSGBICD2::IsMappedWriteAddress(Uint32 uAddr)
+{
+    /* AURORA_SGB_ICD2_RW_DECODE_R12_20260909
+     * ares #2503 changed readIO to 0x40f80f mirroring, while writeIO
+     * deliberately remained address & 0xffff. Only real write registers
+     * are accepted here; read mirrors must never alias a write. */
+    Uint32 d = uAddr & 0xffffU;
+    return (d == 0x6001U || d == 0x6003U ||
+            (d >= 0x6004U && d <= 0x6007U)) ? TRUE : FALSE;
+}
+
+
 Uint8 SNSGBICD2::Read(Uint32 uAddr)
 {
     if (!IsMappedAddress(uAddr)) return 0;
@@ -74,38 +90,22 @@ Uint8 SNSGBICD2::Read(Uint32 uAddr)
 
 void SNSGBICD2::Write(Uint32 uAddr, Uint8 uData)
 {
-    if (IsMappedAddress(uAddr))
-        WriteDecoded(uAddr & 0x40f80fU, uData);
+    if (IsMappedWriteAddress(uAddr))
+        WriteDecoded(uAddr & 0xffffU, uData);
 }
 
 Uint8 SNSGBICD2::ReadDecoded(Uint32 d)
 {
     if (d == 0x6000U) {
-        /* AURORA_SGB_GAMBATTE_BSNESPLUS_VIDEO_V1_2_4_20260907
-         * Match bsnes-plus SuperGameBoy wrapper:
-         * high bits = current 8-line vram_row;
-         * low 2 bits = next ring slot being written. */
-        return (Uint8)(((Uint8)m_nVCounter << 3) |
+        return (Uint8)(((Uint8)m_nVCounter & 0xf8U) |
                        (m_uWriteBank & 3U));
     }
 
     if (d == 0x6002U) {
-        /* AURORA_SGB_BSNES_PACKET_FIFO_V1_2_6_20260907
-         * Match bsnes/libsupergameboy: polling $6002 dequeues the next
-         * complete packet into the 16-byte $7000 register window. */
-        if (m_uPacketQueueCount)
-        {
-            Uint32 i;
-            memcpy(m_uPacket, m_uPacketQueue[0], PACKET_BYTES);
-            --m_uPacketQueueCount;
-            for (i = 0; i < m_uPacketQueueCount; ++i)
-                memcpy(m_uPacketQueue[i], m_uPacketQueue[i + 1], PACKET_BYTES);
-            memset(m_uPacketQueue[m_uPacketQueueCount], 0, PACKET_BYTES);
-            m_bPacketReady = m_uPacketQueueCount ? TRUE : FALSE;
-            return 1;
-        }
-        m_bPacketReady = FALSE;
-        return 0;
+        /* AURORA_SGB_ICD2_REAL_PACKET_MIRROR_R10_20260909
+         * Hardware: status read is pure. It neither clears ready nor advances
+         * a queue. Real ICD exposes only the most recently received packet. */
+        return m_bPacketReady ? 1U : 0U;
     }
 
     if (d == 0x600fU) return m_uIcdRevision;
@@ -131,18 +131,16 @@ Uint8 SNSGBICD2::ReadDecoded(Uint32 d)
                     break;
                 default: break;
             }
-            /* V1.2.6: FIFO advancement happens only at $6002. */
+            /* Hardware packet acknowledgement occurs on $7000, not $6002. */
+            m_bPacketReady = FALSE;
         }
         return m_uPacket[i];
     }
 
     if (d >= 0x7800U && d <= 0x780fU) {
-        /* AURORA_SGB_GAMBATTE_BSNESPLUS_VIDEO_V1_2_4_20260907
-         * 20 tiles * 16 bytes = exactly 320 bytes per tile row. */
         Uint8 v = m_uOutput[m_uReadBank & 3U][m_uReadAddress];
-        ++m_uReadAddress;
-        if (m_uReadAddress >= LCD_VISIBLE_BYTES)
-            m_uReadAddress = 0;
+        m_uReadAddress = (Uint16)((m_uReadAddress + 1U) &
+                                  (LCD_BANK_BYTES - 1U));
         return v;
     }
 
@@ -250,74 +248,96 @@ Uint8 SNSGBICD2::JoypRead(Bool p14, Bool p15) const
 Uint8 SNSGBICD2::JoypWrite(Bool p14, Bool p15)
 {
     Uint8 input;
+    Uint8 oldSel, newSel;
     Bool bit;
 
     p14 = p14 ? TRUE : FALSE;
     p15 = p15 ? TRUE : FALSE;
+    newSel = (Uint8)((p14 ? 0x10U : 0U) | (p15 ? 0x20U : 0U));
+    oldSel = (Uint8)(m_uJoypPreviousSelector & 0x30U);
 
-    /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907
-     * Later bsnes-plus joypad-ID lock sequence. */
-    if (p15 && p14) {
-        if (!m_bJoyp14Lock) {
-            m_bJoyp14Lock = TRUE;
-            m_uJoypID = (Uint8)((m_uJoypID + 1U) & ControllerMask());
-        }
-    }
+    /* AURORA_SGB_JOYP_TRANSITION_R11_20260909
+     * Hardware/test-ROM model (ares #2503 + sgb-ext-test passing Gambatte):
+     * only selector transitions are meaningful. P15 rising advances the
+     * multiplayer joypad index; repeated selector levels are a no-op. */
+    if (newSel == oldSel)
+        return JoypInput(p14, p15);
 
-    if (!p15) {
-        if (m_bJoyp15Lock)
-            m_bJoyp14Lock = m_bJoyp14Lock ? FALSE : TRUE;
-    }
+    if (!(oldSel & 0x20U) && (newSel & 0x20U))
+        m_uJoypID = (Uint8)((m_uJoypID + 1U) & ControllerMask());
+    m_uJoypPreviousSelector = newSel;
+
+    /* Legacy serialized lock fields now mirror the line levels only. */
+    m_bJoyp14Lock = p14;
     m_bJoyp15Lock = p15;
-
     input = JoypInput(p14, p15);
 
-    if (!p14 && !p15) {
-        m_bPulseLock = FALSE;
+    /* $00 holds packet transfer in reset/inactive state. */
+    if (newSel == 0x00U)
+    {
+        memset(m_uJoypPacket, 0, sizeof(m_uJoypPacket));
         m_uPacketOffset = 0;
         m_uBitOffset = 0;
-        m_bStrobeLock = TRUE;
+        m_uBitData = 0;
         m_bPacketLock = FALSE;
+        m_bPulseLock = TRUE;
+        m_bStrobeLock = TRUE;
         return input;
     }
 
-    if (m_bPulseLock) return input;
+    /* Commands/bits are committed only by a transition TO $30. */
+    if (newSel != 0x30U)
+        return input;
 
-    if (p14 && p15) {
+    /* $00 -> $30 begins a new 128-bit packet. */
+    if (oldSel == 0x00U)
+    {
+        memset(m_uJoypPacket, 0, sizeof(m_uJoypPacket));
+        m_uPacketOffset = 0;
+        m_uBitOffset = 0;
+        m_uBitData = 0;
+        m_bPacketLock = FALSE;
+        m_bPulseLock = FALSE;
         m_bStrobeLock = FALSE;
         return input;
     }
 
-    if (m_bStrobeLock) {
-        if (p14 || p15) {
-            m_bPacketLock = FALSE;
-            m_bPulseLock = TRUE;
-            m_uBitOffset = 0;
+    if (m_bPulseLock)
+        return input;
+
+    /* After 128 bits, the next committed $30 edge is the STOP commit. */
+    if (m_bPacketLock)
+    {
+        SubmitPacket(m_uJoypPacket);
+        memset(m_uJoypPacket, 0, sizeof(m_uJoypPacket));
+        m_uPacketOffset = 0;
+        m_uBitOffset = 0;
+        m_uBitData = 0;
+        m_bPacketLock = FALSE;
+        m_bPulseLock = TRUE;
+        m_bStrobeLock = FALSE;
+        return input;
+    }
+
+    /* $10 -> $30 commits 1; $20 -> $30 commits 0. LSB first. */
+    if (oldSel != 0x10U && oldSel != 0x20U)
+        return input;
+
+    bit = (oldSel == 0x10U) ? TRUE : FALSE;
+    if (bit)
+        m_uJoypPacket[m_uPacketOffset] |= (Uint8)(1U << m_uBitOffset);
+
+    ++m_uBitOffset;
+    if (m_uBitOffset >= 8U)
+    {
+        m_uBitOffset = 0;
+        ++m_uPacketOffset;
+        if (m_uPacketOffset >= PACKET_BYTES)
+        {
             m_uPacketOffset = 0;
+            m_bPacketLock = TRUE;
         }
-        return input;
     }
-
-    bit = !p15 ? TRUE : FALSE; /* p14=1,p15=0 => 1 */
-    m_bStrobeLock = TRUE;
-
-    if (m_bPacketLock) {
-        if (!p14 && p15) {
-            SubmitPacket(m_uJoypPacket);
-            memset(m_uJoypPacket, 0, sizeof(m_uJoypPacket));
-            m_bPacketLock = FALSE;
-            m_bPulseLock = TRUE;
-        }
-        return input;
-    }
-
-    m_uBitData = (Uint8)((bit ? 0x80U : 0U) | (m_uBitData >> 1));
-    m_uBitOffset = (Uint8)((m_uBitOffset + 1U) & 7U);
-    if (m_uBitOffset) return input;
-
-    m_uJoypPacket[m_uPacketOffset & 15U] = m_uBitData;
-    m_uPacketOffset = (Uint8)((m_uPacketOffset + 1U) & 15U);
-    if (!m_uPacketOffset) m_bPacketLock = TRUE;
     return input;
 }
 
@@ -325,12 +345,10 @@ void SNSGBICD2::SubmitPacket(const Uint8 *pPacket)
 {
     if (!pPacket) return;
 
-    /* AURORA_SGB_BSNES_PACKET_FIFO_V1_2_6_20260907 */
-    if (m_uPacketQueueCount >= PACKET_QUEUE_CAPACITY)
-        return;
-
-    memcpy(m_uPacketQueue[m_uPacketQueueCount], pPacket, PACKET_BYTES);
-    ++m_uPacketQueueCount;
+    /* AURORA_SGB_ICD2_REAL_PACKET_MIRROR_R10_20260909
+     * Real ICD has one live 16-byte command window. A new packet replaces the
+     * previous contents and asserts ready until SNES reads $7000. */
+    memcpy(m_uPacket, pPacket, PACKET_BYTES);
     m_bPacketReady = TRUE;
 }
 
@@ -363,43 +381,45 @@ static inline void AuroraSgbPack8ClassicRGB32(
 
 void SNSGBICD2::GambatteNewLy(Uint32 uNewLy, const Uint32 *pFrame)
 {
-    Uint32 newRow, oldRow, y, tile;
+    Uint32 oldRow, y, tile;
     Uint8 *pDest;
 
     if (!pFrame || uNewLy >= LCD_TOTAL_LINES)
         return;
 
-    /* Same bsnes-plus phase as V1.2.4: row 17 is committed when the next
-       frame enters LY 0; VBlank itself leaves vram_row at 17. */
-    if (uNewLy >= LCD_VISIBLE_LINES)
+    /* AURORA_SGB_ICD2_BSNES_RING_R7_20260909
+     * Callback is NEW LY after Gambatte's LY event. Mirror current bsnes:
+     * at LY 8,16,...,144 the previous visible row is complete; write it into
+     * the CURRENT bank, then rotate. VBlank LY152 rotates the physical ring
+     * too. VReset/new LY0 resets counters without rotating. */
+    if (uNewLy == 0U)
+    {
+        m_nVCounter = 0;
+        m_uHCounter = 0;
         return;
+    }
 
-    newRow = uNewLy >> 3;
-    oldRow = (Uint32)m_nVCounter;
-    if (newRow == oldRow)
-        return;
-
-    if (oldRow >= (LCD_VISIBLE_LINES >> 3))
-        oldRow = (LCD_VISIBLE_LINES >> 3) - 1U;
-
-    pDest = m_uOutput[m_uWriteBank & 3U];
-
-    /* AURORA_V4_4_CUMULATIVE_20260908
-     * The loop below writes 20 * 8 * 2 = all 320 visible bytes. Clearing the
-     * same row first is pure EE memory bandwidth on this LY hot path. */
-    for (y = 0; y < 8U; ++y) {
-        const Uint32 *src = pFrame + (oldRow * 8U + y) * LCD_WIDTH;
-        for (tile = 0; tile < 20U; ++tile) {
-            Uint8 p0, p1;
-            AuroraSgbPack8ClassicRGB32(src + tile * 8U, &p0, &p1);
-            pDest[tile * 16U + y * 2U + 0U] = p0;
-            pDest[tile * 16U + y * 2U + 1U] = p1;
+    if ((uNewLy & 7U) == 0U && uNewLy <= LCD_VISIBLE_LINES)
+    {
+        oldRow = (uNewLy >> 3) - 1U;
+        pDest = m_uOutput[m_uWriteBank & 3U];
+        for (y = 0; y < 8U; ++y)
+        {
+            const Uint32 *src = pFrame + (oldRow * 8U + y) * LCD_WIDTH;
+            for (tile = 0; tile < 20U; ++tile)
+            {
+                Uint8 p0, p1;
+                AuroraSgbPack8ClassicRGB32(src + tile * 8U, &p0, &p1);
+                pDest[tile * 16U + y * 2U + 0U] = p0;
+                pDest[tile * 16U + y * 2U + 1U] = p1;
+            }
         }
     }
 
-    m_nVCounter = (Int32)newRow;
-    m_uWriteBank = (Uint8)((m_uWriteBank + 1U) & 3U);
+    m_nVCounter = (Int32)uNewLy;
     m_uHCounter = 0;
+    if ((uNewLy & 7U) == 0U)
+        m_uWriteBank = (Uint8)((m_uWriteBank + 1U) & 3U);
 }
 
 void SNSGBICD2::PushLCDScanline(Int32 nLine, const Uint8 *pShade2Bit)
@@ -410,19 +430,13 @@ void SNSGBICD2::PushLCDScanline(Int32 nLine, const Uint8 *pShade2Bit)
     if (!pShade2Bit || nLine < 0 || nLine >= LCD_VISIBLE_LINES)
         return;
 
-
-    /* AURORA_SGB_ICD2_RING_PHASE_V1_2_3_20260907
-     * The ICD2 advances to the next write-row at the START of each
-     * visible 8-line character row, including LY=0. */
-    if ((nLine & 7) == 0)
-        m_uWriteBank = (Uint8)((m_uWriteBank + 1U) & 3U);
-
     m_nVCounter = nLine;
     rowBase = (Uint32)(nLine & 7) * 2U;
-
-    for (tile = 0; tile < 20; ++tile) {
+    for (tile = 0; tile < 20; ++tile)
+    {
         Uint8 p0 = 0, p1 = 0;
-        for (px = 0; px < 8; ++px) {
+        for (px = 0; px < 8; ++px)
+        {
             Uint8 c = pShade2Bit[tile * 8 + px] & 3U;
             Uint8 b = (Uint8)(0x80U >> px);
             if (c & 1U) p0 |= b;
@@ -435,15 +449,20 @@ void SNSGBICD2::PushLCDScanline(Int32 nLine, const Uint8 *pShade2Bit)
 
 void SNSGBICD2::EndLCDLine(Int32 nLine)
 {
+    Int32 next;
     if (nLine < 0 || nLine >= LCD_TOTAL_LINES) return;
 
-    m_nVCounter = nLine;
+    m_uHCounter = 0;
+    next = nLine + 1;
+    if (next >= LCD_TOTAL_LINES)
+    {
+        m_nVCounter = 0;
+        return;
+    }
 
-    /* AURORA_SGB_ICD2_RING_PHASE_V1_2_3_20260907
-     * Ring rotation now happens before PushLCDScanline() writes LY
-     * 0,8,16,... . HBlank/VBlank only advances the line counter here. */
-
-    m_nVCounter = (nLine == LCD_TOTAL_LINES - 1) ? 0 : nLine + 1;
+    m_nVCounter = next;
+    if ((next & 7) == 0)
+        m_uWriteBank = (Uint8)((m_uWriteBank + 1U) & 3U);
 }
 
 Uint32 SNSGBICD2::GetClockDivider() const
@@ -502,6 +521,7 @@ Bool SNSGBICD2::SaveState(StateT *s) const
     s->joypID = m_uJoypID;
     s->joyp15Lock = m_bJoyp15Lock;
     s->joyp14Lock = m_bJoyp14Lock;
+    s->joypPreviousSelector = m_uJoypPreviousSelector; /* AURORA_SGB_JOYP_TRANSITION_R11_20260909 */
     s->pulseLock = m_bPulseLock;
     s->strobeLock = m_bStrobeLock;
     s->packetLock = m_bPacketLock;
@@ -527,7 +547,8 @@ Bool SNSGBICD2::RestoreState(const StateT *s)
         s->readAddress >= LCD_BANK_BYTES || s->joypID >= 4 ||
         s->packetQueueCount > PACKET_QUEUE_CAPACITY ||
         s->packetOffset >= PACKET_BYTES || s->bitOffset >= 8 ||
-        s->vcounter < 0 || s->vcounter > 255 || s->hcounter > 0xffffU)
+        (s->joypPreviousSelector & ~0x30U) != 0U ||
+        s->vcounter < 0 || s->vcounter >= LCD_TOTAL_LINES || s->hcounter > 0xffffU) /* AURORA_SGB_JOYP_TRANSITION_R11_20260909 */
         return FALSE;
 
     m_eModel = (ModelE)s->model;
@@ -542,6 +563,7 @@ Bool SNSGBICD2::RestoreState(const StateT *s)
     m_uJoypID = (Uint8)s->joypID;
     m_bJoyp15Lock = s->joyp15Lock ? TRUE : FALSE;
     m_bJoyp14Lock = s->joyp14Lock ? TRUE : FALSE;
+    m_uJoypPreviousSelector = (Uint8)(s->joypPreviousSelector & 0x30U); /* AURORA_SGB_JOYP_TRANSITION_R11_20260909 */
     m_bPulseLock = s->pulseLock ? TRUE : FALSE;
     m_bStrobeLock = s->strobeLock ? TRUE : FALSE;
     m_bPacketLock = s->packetLock ? TRUE : FALSE;

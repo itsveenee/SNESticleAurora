@@ -261,13 +261,18 @@ Uint8 SNSuperGameBoy::Read(Uint32 uAddr, Uint8 uOpenBus)
 {
     if (!m_bActive || !SNSGBICD2::IsMappedAddress(uAddr))
         return uOpenBus;
+
+    if (m_ICD2.NeedsGBSyncBeforeRead(uAddr))
+        m_GB.FlushClocks(); /* AURORA_SGB_GAMBATTE_SELECTIVE_SYNC_V2_20260908 */
     return m_ICD2.Read(uAddr);
 }
 
 void SNSuperGameBoy::Write(Uint32 uAddr, Uint8 uData)
 {
-    if (!m_bActive || !SNSGBICD2::IsMappedAddress(uAddr))
+    if (!m_bActive || !SNSGBICD2::IsMappedWriteAddress(uAddr)) /* AURORA_SGB_ICD2_RW_DECODE_R12_20260909 */
         return;
+    if (m_ICD2.NeedsGBSyncBeforeWrite(uAddr))
+        m_GB.FlushClocks(); /* AURORA_SGB_GAMBATTE_SELECTIVE_SYNC_V2_20260908 */
     m_ICD2.Write(uAddr, uData);
     if (m_ICD2.ConsumeResetRequest())
     {
@@ -336,7 +341,7 @@ void SNSuperGameBoy::FlushClocks()
 } /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907 */
 
 /* AURORA_SGB_AUDIO_V0_5_20260904
- * Gambatte's GB PSG FIFO is sampled once per 32 logical GB clocks. Convert that
+ * Gambatte's SGB PSG FIFO is sampled once per 128 logical GB clocks. Convert that
  * exact rational clock relationship to the SNES mixer's output domain with
  * a box-decimation accumulator. This is intentionally cartridge-local: the
  * normal SNES/NES/Sega/PCE host mixer never sees an SGB-specific mode.
@@ -346,7 +351,7 @@ void SNSuperGameBoy::MixAudio(Int16 *pLeft, Int16 *pRight, Int32 nSamples, Uint3
     Int16 raw[256 * 2];
     Uint32 rawPos = 0, rawCount = 0;
     Uint32 produced = 0;
-    Uint32 sourceHz;
+    Uint32 sourceHz, divider;
     Uint64 denominator;
 
     if (!m_bActive || !pLeft || nSamples <= 0 || !uOutputHz || m_bBootHandshake)
@@ -355,8 +360,13 @@ void SNSuperGameBoy::MixAudio(Int16 *pLeft, Int16 *pRight, Int32 nSamples, Uint3
     m_GB.FlushClocks(); /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907 */
 
     sourceHz = m_GB.GetClockHz();
-    if (!sourceHz)
+    divider = m_ICD2.GetClockDivider();
+    if (!sourceHz || !divider)
         return;
+    sourceHz = (Uint32)(((Uint64)sourceHz * 5ULL) / divider);
+    /* AURORA_SGB_GAMBATTE_AUDIO_DIVIDER_V2_20260908:
+     * $6003 low bits can select /4,/5,/7,/9; consume the decimated FIFO at
+     * the same live cadence instead of assuming /5 forever. */
 
     /*
      * AURORA_SGB_GAMBATTE_RUNTIME_CURE_V1_20260906
@@ -554,7 +564,7 @@ Bool SNSuperGameBoy::RestoreState(const void *pData, Uint32 nBytes)
         h.BootHandshake > 1U ||
         h.BootLine >= SNSGBICD2::LCD_TOTAL_LINES ||
         h.BootLineClocks >= BOOT_LCD_LINE_CLOCKS ||
-        h.AudioPhase >= m_GB.GetClockHz() ||
+        h.AudioPhase >= (48000U * AUDIO_SOURCE_CLOCKS_PER_SAMPLE) || /* AURORA_SGB_AUDIO_PHASE_STATE_V2_20260908 */
         h.AudioCount > 8U) return FALSE;
     need = (Uint64)sizeof(h) + h.ICDBytes + h.GBBytes + h.SaveBytes;
     if (need != nBytes) return FALSE;

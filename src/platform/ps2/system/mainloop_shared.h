@@ -26,6 +26,7 @@
 /* AURORA_PCE_EXPERIMENTAL_V1 */
 #include "pcesystem.h"
 #include "pcerom.h"
+#include "gb/system/gambattesystem.h" /* AURORA_GAMBATTE_STANDALONE_V2_20260908 */
 #include "emusys.h"
 #include "emumovie.h"
 #include "rendersurface.h"
@@ -121,6 +122,7 @@ extern SegaSystem     *_pSega;
 extern SegaRom        *_pSegaRom;
 extern PceSystem      *_pPce;
 extern PceRom         *_pPceRom;
+extern GambatteSystem *_pGb; /* AURORA_GAMBATTE_STANDALONE_V2_20260908 */
 
 /* ---- ROM / framebuffer / audio buffers ---------------------------- */
 

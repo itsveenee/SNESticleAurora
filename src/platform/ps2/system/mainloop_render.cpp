@@ -648,7 +648,10 @@ void MainLoopRender()
             }
             else if (_pSystem == _pSnes)
             {
-    PolyRect(0.0f, 8.0f, 256.0f, 240.0f);
+                /* AURORA_GB_HOTFIX_R13F_STANDALONE_BOOT_AUDIO_Y_20260909_Y_SCOPE:
+                 * GB standalone positioning is done in GambatteSystem.
+                 * Native SNES/SGB outer presentation remains at Y=8. */
+                PolyRect(0.0f, 8.0f, 256.0f, 240.0f);
             }
             else
             {
@@ -788,8 +791,22 @@ void MainLoopRender()
 	if (_MainLoop_ModalCount > 0)
 	{
 		FontSelect(0);
-		FontColor4f(1.0, 1.0f, 1.0f, 1.0f);
-		FontPrintf(128 - FontGetStrWidth(_MainLoop_ModalStr) / 2,100, _MainLoop_ModalStr);
+		{
+			const Int32 textW = FontGetStrWidth(_MainLoop_ModalStr);
+			const Int32 textX = 128 - textW / 2;
+
+			/* AURORA_GB_HOTFIX_R13E_20260909_MODAL_BOX
+			 * Opaque black backing only behind the centered modal/error text. */
+			PolyTexture(NULL);
+			PolyBlend(FALSE);
+			PolyColor4f(0.0f, 0.0f, 0.0f, 1.0f);
+			PolyRect((Float32)(textX - 4), 96.0f,
+			         (Float32)(textW + 8), 16.0f);
+			PolyBlend(TRUE);
+
+			FontColor4f(1.0, 1.0f, 1.0f, 1.0f);
+			FontPrintf(textX, 100, _MainLoop_ModalStr);
+		}
 
 		_MainLoop_ModalCount--;
 	}

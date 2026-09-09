@@ -11,7 +11,7 @@ import shutil
 import subprocess
 import sys
 
-STAGE_MARK = 'AURORA_SGB_GAMBATTE_STAGE_V7_FINAL_REALBOOT_SCALAR_20260908'  # AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908
+STAGE_MARK = 'AURORA_SGB_GAMBATTE_STAGE_V9_NATIVE64_AUDIO_20260909'  # AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908
 STAMP_NAME = '.aurora-gambatte-stage-v3'
 
 
@@ -588,8 +588,8 @@ def prepare_stage(source, stage):
         "# AURORA_SGB_GAMBATTE_SHADE8_JOYP_SYNC_PERF_V3_20260908\n"
     )
     new = (
-        "   PLATFORM_DEFINES := -DPS2 "
-        "# AURORA_SGB_CLASSIC_RGB32_V1_20260908\n"
+        "   PLATFORM_DEFINES := -DPS2 -DHAVE_NETWORK "
+        "# AURORA_GAMBATTE_SERIAL_STAGE_R8_20260909\n"
     )
     s = replace_once(
         s, old, new,
@@ -627,6 +627,86 @@ def prepare_stage(source, stage):
 \t\t\t\tdst[7] = p.bgPalette[ ntileword           >> 14];
 """
     s = replace_once(s, old, new, "ppu.cpp historical scalar DMG gather")
+    write(p, s)
+
+    # AURORA_GAMBATTE_STAGE_R9_AUDIO_20260909
+    # Standalone GB keeps normal frame-aware runFor video semantics while
+    # reusing the exact core-side 64:1 PSG decimator already used by SGB.
+    p = stage / "libgambatte/include/gambatte.h"
+    s = read(p)
+    old = """   unsigned long runForClocksSgb64(gambatte::video_pixel_t *videoBuf, int pitch,
+         gambatte::uint_least32_t *soundBuf, std::size_t soundBufSize,
+         unsigned long clocks, unsigned &samples);
+   void clearSgbAudioDecimator();
+"""
+    new = """   unsigned long runForClocksSgb64(gambatte::video_pixel_t *videoBuf, int pitch,
+         gambatte::uint_least32_t *soundBuf, std::size_t soundBufSize,
+         unsigned long clocks, unsigned &samples);
+
+   /* AURORA_GB_AUDIO_NATIVE64_R9_20260909
+    * Frame-aware standalone entry point. rawSamplesRequest is in Gambatte's
+    * native reconstructed PSG frames (2,097,152 Hz); samples returns the
+    * exact carried 64:1 box-decimated 32,768-Hz frame count. Return value is
+    * >=0 when a video frame completed, -1 otherwise. */
+   long runForAurora64(gambatte::video_pixel_t *videoBuf, int pitch,
+         gambatte::uint_least32_t *soundBuf, std::size_t soundBufSize,
+         unsigned rawSamplesRequest, unsigned &samples);
+   void clearSgbAudioDecimator();
+"""
+    s = replace_once(s, old, new, "gambatte.h r9 standalone native64 audio API")
+    write(p, s)
+
+    p = stage / "libgambatte/src/gambatte.cpp"
+    s = read(p)
+    old = """unsigned long GB::runForClocksSgb64(
+      gambatte::video_pixel_t *const videoBuf, const int pitch,
+      gambatte::uint_least32_t *const soundBuf, std::size_t soundBufSize,
+      const unsigned long clocks, unsigned &samples) {
+   (void)videoBuf;
+   (void)pitch;
+   p_->cpu.setSoundBuffer(soundBuf, soundBufSize);
+   p_->cpu.runFor(clocks);
+   samples = (unsigned)p_->cpu.fillSoundBufferSgb64();
+   return p_->cpu.lastRunCycles();
+}
+
+void GB::clearSgbAudioDecimator() {
+"""
+    new = """unsigned long GB::runForClocksSgb64(
+      gambatte::video_pixel_t *const videoBuf, const int pitch,
+      gambatte::uint_least32_t *const soundBuf, std::size_t soundBufSize,
+      const unsigned long clocks, unsigned &samples) {
+   (void)videoBuf;
+   (void)pitch;
+   p_->cpu.setSoundBuffer(soundBuf, soundBufSize);
+   p_->cpu.runFor(clocks);
+   samples = (unsigned)p_->cpu.fillSoundBufferSgb64();
+   return p_->cpu.lastRunCycles();
+}
+
+/* AURORA_GB_AUDIO_NATIVE64_R9_20260909
+ * Same video/frame-stop contract as normal GB::runFor(), but reconstruct and
+ * decimate PSG in one core-side pass. The exact frameAt sample index is not
+ * needed by Aurora; only its sign is preserved. */
+long GB::runForAurora64(
+      gambatte::video_pixel_t *const videoBuf, const int pitch,
+      gambatte::uint_least32_t *const soundBuf, std::size_t soundBufSize,
+      const unsigned rawSamplesRequest, unsigned &samples) {
+   if (!rawSamplesRequest || !soundBuf || !soundBufSize) {
+      samples = 0;
+      return -1;
+   }
+   p_->cpu.setVideoBuffer(videoBuf, pitch);
+   p_->cpu.setSoundBuffer(soundBuf, soundBufSize);
+   const long cyclesSinceBlit =
+      p_->cpu.runFor((unsigned long)rawSamplesRequest * 2UL);
+   samples = (unsigned)p_->cpu.fillSoundBufferSgb64();
+   return cyclesSinceBlit < 0 ? -1L : 0L;
+}
+
+void GB::clearSgbAudioDecimator() {
+"""
+    s = replace_once(s, old, new, "gambatte.cpp r9 standalone native64 audio API")
     write(p, s)
 
     # RGB32 + scalar gather are staging policy; pinned submodule stays pristine.

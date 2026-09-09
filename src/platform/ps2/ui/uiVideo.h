@@ -22,5 +22,6 @@ public:
 void VideoSettingsLoad(void);
 void VideoSettingsSave(void);
 Int32 VideoGetSgbBiosModel(void); /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908 */
+Int32 VideoGetGameBoyMode(void); /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909: 0=GBC, 1=SGB1, 2=SGB2 */
 
 #endif

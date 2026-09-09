@@ -48,7 +48,7 @@ Bool MainLoopReinitVideoMode(Int32 mode);
 /* ------------------------------------------------------------------ */
 
 #define VIDEOCFG_MAGIC   0x53564944u   /* 'SVID' */
-#define VIDEOCFG_VERSION 46 /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908: append SGB1/SGB2 BIOS selector */
+#define VIDEOCFG_VERSION 48 /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909: GBC/SGB1/SGB2 selector */
 /* AURORA_CFG_MODE7_FULL_ONCE_V1_6_20260905: 44 -> 45; same-layout migration, Mode7 Full once. */
 /* AURORA_CD_MUSIC_REDBOOK_V3_20260830: v43 appends shared SCD/PCE CD Red Book toggle; old configs default On. */
 /* AURORA_PCE_SCALING_LIGHTGUN_TOGGLE_V2_20260830: v42 appends Light Gun; old configs default On. */
@@ -128,8 +128,10 @@ typedef struct
 	Int32  cdmusic;        /* v43: SCD/PCE CD Red Book CDDA; 1=On */
 	Int32  sgbinvert;     /* AURORA_CONFIG_STRICT_SGB_INVERT_CLOCK_V1_20260905: 0=Off, 1=On; effect SGB-only */
 	Int32  sgbbios;       /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908: 0=SGB1, 1=SGB2 */
+	Int32  gameboymode;   /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909: 0=GBC, 1=SGB1, 2=SGB2 */
 } VideoCfgT;
-#define VIDEOCFG_V45_BYTES (sizeof(VideoCfgT) - sizeof(Int32))
+#define VIDEOCFG_V46_BYTES (sizeof(VideoCfgT) - sizeof(Int32))
+#define VIDEOCFG_V45_BYTES (VIDEOCFG_V46_BYTES - sizeof(Int32))
 #define VIDEOCFG_V43_BYTES (VIDEOCFG_V45_BYTES - sizeof(Int32))
 #define VIDEOCFG_V42_BYTES (VIDEOCFG_V43_BYTES - sizeof(Int32))
 #define VIDEOCFG_V38_BYTES (VIDEOCFG_V42_BYTES - 3 * sizeof(Int32))
@@ -365,9 +367,16 @@ static void _VideoCfgPath(char *pOut)
 static Bool g_FamicloneAudio = FALSE;
 static Int32 g_SgbBiosModel = 0; /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908: default SGB1 */
 
+static Int32 g_GameBoyMode = 0; /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909: default GBC */
+
 Int32 VideoGetSgbBiosModel(void)
 {
-	return g_SgbBiosModel ? 1 : 0;
+	return g_GameBoyMode == 2 ? 1 : 0; /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909 */
+}
+
+Int32 VideoGetGameBoyMode(void)
+{
+	return (g_GameBoyMode >= 0 && g_GameBoyMode <= 2) ? g_GameBoyMode : 0; /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909 */
 }
 
 /* AURORA_CD_MUSIC_REDBOOK_V3_20260830
@@ -466,7 +475,8 @@ void VideoSettingsSave(void)
 	cfg.lightgun = QuicknesBridge_GetLightGunEnabled() ? 1 : 0;
 	cfg.cdmusic = g_CdMusicEnabled ? 1 : 0; /* AURORA_CD_MUSIC_REDBOOK_V3_20260830 */
 	cfg.sgbinvert = MainLoopSgbInvertGetEnabled() ? 1 : 0; /* AURORA_CONFIG_STRICT_SGB_INVERT_CLOCK_V1_20260905 */
-	cfg.sgbbios = g_SgbBiosModel ? 1 : 0; /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908 */
+	cfg.sgbbios = (g_GameBoyMode == 2) ? 1 : 0; /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909: compatibility mirror */
+	cfg.gameboymode = g_GameBoyMode; /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909 */
 	_VideoCfgPath(path);
 	BgmIOBegin();
 	MemCardWriteFile(path, (Uint8 *)&cfg, sizeof(cfg));
@@ -487,9 +497,11 @@ void VideoSettingsLoad(void)
 	MainLoopSafeFrameskipSetLevel(1);
 	MainLoopSgbInvertSetEnabled(FALSE); /* AURORA_CFG_LOADER_REBUILD_V1_13_20260905 */
 	g_SgbBiosModel = 0; /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908: SGB1 default */
+	g_GameBoyMode = 0; /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909: v45-and-older default GBC */
 	PicoDriveBridge_SetRenderingMode(0); /* AURORA_CFG_LOADER_REBUILD_V1_13_20260905: MD FAST default */
 	PicoDriveBridge_SetGgZoom(false);
 	memset(&cfg, 0, sizeof(cfg));
+	cfg.gameboymode = 0; /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909: old configs default GBC */
 	cfg.lightgun = 1; /* v42 default and all pre-v42 migrations: On */
 	cfg.cdmusic = 1;  /* AURORA_CD_MUSIC_REDBOOK_V3_20260830: pre-v43 default On */
 	QuicknesBridge_SetLightGunEnabled(true);
@@ -514,6 +526,26 @@ void VideoSettingsLoad(void)
 		if (header.version == VIDEOCFG_VERSION)
 		{
 			loaded = MemCardReadFile(path, (Uint8 *)&cfg, sizeof(cfg));
+		}
+		else if (header.version == 47)
+		{
+			/* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909: old 0=GB,1=SGB -> 0=GBC,1=SGB1,2=SGB2. */
+			loaded = MemCardReadFile(path, (Uint8 *)&cfg, sizeof(cfg));
+			if (loaded)
+			{
+				cfg.gameboymode = cfg.gameboymode ? (cfg.sgbbios ? 2 : 1) : 0;
+				cfg.version = VIDEOCFG_VERSION;
+			}
+		}
+		else if (header.version == 46)
+		{
+			/* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909: v46 had SGB model but no standalone selector. */
+			loaded = MemCardReadFile(path, (Uint8 *)&cfg, VIDEOCFG_V46_BYTES);
+			if (loaded)
+			{
+				cfg.gameboymode = cfg.sgbbios ? 2 : 1;
+				cfg.version = VIDEOCFG_VERSION;
+			}
 		}
 		else if (header.version == 45 || header.version == 44)
 		{
@@ -856,8 +888,9 @@ if (loaded && header.version != VIDEOCFG_VERSION)
 		if (header.version >= 44 && header.version <= VIDEOCFG_VERSION &&
 		    (cfg.sgbinvert == 0 || cfg.sgbinvert == 1))
 			MainLoopSgbInvertSetEnabled(cfg.sgbinvert ? TRUE : FALSE); /* AURORA_CFG_LOADER_REBUILD_V1_13_20260905 */
-		if (cfg.sgbbios == 0 || cfg.sgbbios == 1)
-			g_SgbBiosModel = cfg.sgbbios; /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908 */
+		if (cfg.gameboymode >= 0 && cfg.gameboymode <= 2)
+			g_GameBoyMode = cfg.gameboymode; /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909 */
+		g_SgbBiosModel = (g_GameBoyMode == 2) ? 1 : 0; /* compatibility mirror */
 		if (cfg.smsfm == 0 || cfg.smsfm == 1)
 			PicoDriveBridge_SetSmsFm(cfg.smsfm != 0);
 		if (cfg.bgmvol >= 0 && cfg.bgmvol <= 400) BgmSetVolume(cfg.bgmvol);
@@ -1313,9 +1346,9 @@ _VideoRow(vy, 19, m_iSelect, "Exit to OSD", ""); vy += 12;
 			_VideoHackAccurateStatus(SNPPU_HACK_WINDOWS_OFF)); vy += 12;
 		_VideoRow(vy, 27, m_iSelect, "Mode 7 Quality",
 			_VideoHackMode7Status()); vy += 12;
-		/* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908: limiter rows 28/29 hidden; implementation/persistence retained. */
-		_VideoRow(vy, 30, m_iSelect, "SGB Bios",
-			g_SgbBiosModel ? "SGB2" : "SGB1"); vy += 12;
+		/* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909: rows 28/29 stay hidden; one selector owns all GB hardware. */
+		_VideoRow(vy, 30, m_iSelect, "Game Boy",
+			g_GameBoyMode == 2 ? "SGB2" : (g_GameBoyMode == 1 ? "SGB1" : "GBC")); vy += 12;
 	}
 	else if (iPage == 2)
 	{
@@ -1400,7 +1433,7 @@ void CVideoScreen::Input(Uint32 buttons, Uint32 trigger)
 			/* Keep retired index 36 unreachable without renumbering 37. */
 			if (m_iSelect == 36) m_iSelect = 35;
 			if (m_iSelect == 15) m_iSelect = 14; /* AURORA_SWC_FLOPPY_V5_20260831 */
-			if (m_iSelect == 29 || m_iSelect == 28) m_iSelect = 27; /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908 */
+			if (m_iSelect == 29 || m_iSelect == 28) m_iSelect = 27; /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909 */
 		}
 		if (trigger & PAD_DOWN)
 		{
@@ -1408,7 +1441,7 @@ void CVideoScreen::Input(Uint32 buttons, Uint32 trigger)
 			if (m_iSelect > hi) m_iSelect = lo;
 			if (m_iSelect == 36) m_iSelect = 37;
 			if (m_iSelect == 15) m_iSelect = 16; /* AURORA_SWC_FLOPPY_V5_20260831 */
-			if (m_iSelect == 28 || m_iSelect == 29) m_iSelect = 30; /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908 */
+			if (m_iSelect == 28 || m_iSelect == 29) m_iSelect = 30; /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909 */
 		}
 	}
 
@@ -1650,7 +1683,10 @@ case 17: /* Famiclone Audio */
 			}
 			break;
 		case 30:
-			g_SgbBiosModel = g_SgbBiosModel ? 0 : 1; /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908 */
+			g_GameBoyMode += dir;
+			if (g_GameBoyMode < 0) g_GameBoyMode = 2;
+			if (g_GameBoyMode > 2) g_GameBoyMode = 0;
+			g_SgbBiosModel = (g_GameBoyMode == 2) ? 1 : 0; /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909 */
 			break;
 		case 31:
 			_VideoApplyCompatFlags(

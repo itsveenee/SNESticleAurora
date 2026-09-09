@@ -560,6 +560,10 @@ TextureUpload(&_OutTex, _fbTexture[0]->GetLinePtr(0));
 	_pSnes->Reset();
 
 	_pSnesRom = new SnesRom();
+
+	/* AURORA_GAMBATTE_STANDALONE_V2_20260908 */
+	_pGb = new GambatteSystem();
+	_pGb->Reset();
 	PathExtAdd(MAINLOOP_ENTRYTYPE_SNESROM, (char *)"sfc");
 	PathExtAdd(MAINLOOP_ENTRYTYPE_SNESROM, (char *)"smc");
 	PathExtAdd(MAINLOOP_ENTRYTYPE_SNESROM, (char *)"fig");

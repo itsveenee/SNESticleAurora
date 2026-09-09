@@ -87,6 +87,7 @@ SegaSystem  *_pSega;
 SegaRom     *_pSegaRom;
 PceSystem   *_pPce;
 PceRom      *_pPceRom;
+GambatteSystem *_pGb; /* AURORA_GAMBATTE_STANDALONE_V2_20260908 */
 
 Char _RomName[256];
 Char _RomPath[1024];

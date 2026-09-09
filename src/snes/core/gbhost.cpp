@@ -42,6 +42,7 @@ static const Uint32 AUDIO_FRAMES = 4096U;
  * stream while the CPU runs, hence 32768 entries for a 49152-clock batch. */
 static const Uint32 AUDIO_SCRATCH_FRAMES = 32768U;
 static const Uint32 RUN_BATCH_CLOCKS = 49152U; /* 64:1 audio contract remains inside Gambatte */
+/* AURORA_GB_HOTFIX_R13F_STANDALONE_BOOT_AUDIO_Y_20260909_SGB_CLEANUP: standalone R13D follow-up does not retime/filter SGB. */
 static const Uint32 SGB1_CLOCK_HZ = 4295454U;
 static const Uint32 SGB2_CLOCK_HZ = 4194304U;
 
@@ -259,8 +260,8 @@ static void AuroraGambatteConsumeAudio(GBHost::Impl *p, Uint32 nFrames)
 {
     /* AURORA_V6_RUNTIME_EFFECT_ALL5_20260908
      * audioScratch already contains exact 64-raw-frame box averages emitted
-     * in-place by Gambatte::PSG::fillBufferSgb64().  The old host pass walked
-     * every ~2.1 MHz reconstructed sample a second time. */
+     * in-place by Gambatte::PSG::fillBufferSgb64(). The SGB host only queues
+     * those final frames; standalone GB audio quality belongs to GambatteSystem. */
     const gambatte::uint_least32_t *src = p->audioScratch;
     while (nFrames--)
     {
@@ -522,7 +523,8 @@ static Uint32 AuroraGambatteDrainPending(GBHost::Impl *p)
         unsigned samples = 0;
         unsigned long step;
 
-        /* AURORA_V6_RUNTIME_EFFECT_ALL5_20260908: one Gambatte pass now converts + box-decimates PSG. */
+        /* AURORA_V6_RUNTIME_EFFECT_ALL5_20260908:
+         * one Gambatte pass converts + box-decimates SGB PSG. */
         step = p->gb.runForClocksSgb64(
             p->screen, SNSGBICD2::LCD_WIDTH,
             p->audioScratch, AUDIO_SCRATCH_FRAMES,
@@ -622,7 +624,8 @@ void GBHost::ClearAudio()
     if (!m_p)
         return;
 
-    /* AURORA_V6_RUNTIME_EFFECT_ALL5_20260908: transient 64:1 box phase moved into Gambatte PSG. */
+    /* AURORA_V6_RUNTIME_EFFECT_ALL5_20260908:
+     * transient 64:1 box phase lives inside Gambatte PSG. */
     m_p->gb.clearSgbAudioDecimator();
     m_p->audioRead = 0;
     m_p->audioWrite = 0;
