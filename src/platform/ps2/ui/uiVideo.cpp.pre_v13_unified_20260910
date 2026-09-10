@@ -1,4 +1,3 @@
-/* AURORA_V13_UNIFIED_GBC_AUDIO_32X_FRAMESKIP_20260910 */
 
 #include <stdlib.h>
 #include <string.h>
@@ -372,14 +371,12 @@ static Int32 g_GameBoyMode = 0; /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909: def
 
 Int32 VideoGetSgbBiosModel(void)
 {
-    /* AURORA_V12_SELF_AUDIT_GBC_FX1_20260910: SGB frontend disabled; API retained. */
-    return 0;
+	return g_GameBoyMode == 2 ? 1 : 0; /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909 */
 }
 
 Int32 VideoGetGameBoyMode(void)
 {
-    /* AURORA_V12_SELF_AUDIT_GBC_FX1_20260910: public Game Boy policy is permanently GBC. */
-    return 0;
+	return (g_GameBoyMode >= 0 && g_GameBoyMode <= 2) ? g_GameBoyMode : 0; /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909 */
 }
 
 /* AURORA_CD_MUSIC_REDBOOK_V3_20260830
@@ -478,8 +475,8 @@ void VideoSettingsSave(void)
 	cfg.lightgun = QuicknesBridge_GetLightGunEnabled() ? 1 : 0;
 	cfg.cdmusic = g_CdMusicEnabled ? 1 : 0; /* AURORA_CD_MUSIC_REDBOOK_V3_20260830 */
 	cfg.sgbinvert = MainLoopSgbInvertGetEnabled() ? 1 : 0; /* AURORA_CONFIG_STRICT_SGB_INVERT_CLOCK_V1_20260905 */
-	cfg.sgbbios = 0; /* AURORA_V12_SELF_AUDIT_GBC_FX1_20260910: compatibility field; GBC only */
-	cfg.gameboymode = 0; /* GBC always */
+	cfg.sgbbios = (g_GameBoyMode == 2) ? 1 : 0; /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909: compatibility mirror */
+	cfg.gameboymode = g_GameBoyMode; /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909 */
 	_VideoCfgPath(path);
 	BgmIOBegin();
 	MemCardWriteFile(path, (Uint8 *)&cfg, sizeof(cfg));
@@ -891,9 +888,9 @@ if (loaded && header.version != VIDEOCFG_VERSION)
 		if (header.version >= 44 && header.version <= VIDEOCFG_VERSION &&
 		    (cfg.sgbinvert == 0 || cfg.sgbinvert == 1))
 			MainLoopSgbInvertSetEnabled(cfg.sgbinvert ? TRUE : FALSE); /* AURORA_CFG_LOADER_REBUILD_V1_13_20260905 */
-		/* AURORA_V12_SELF_AUDIT_GBC_FX1_20260910: ignore legacy SGB policy on load. */
-		g_GameBoyMode = 0;
-		g_SgbBiosModel = 0;
+		if (cfg.gameboymode >= 0 && cfg.gameboymode <= 2)
+			g_GameBoyMode = cfg.gameboymode; /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909 */
+		g_SgbBiosModel = (g_GameBoyMode == 2) ? 1 : 0; /* compatibility mirror */
 		if (cfg.smsfm == 0 || cfg.smsfm == 1)
 			PicoDriveBridge_SetSmsFm(cfg.smsfm != 0);
 		if (cfg.bgmvol >= 0 && cfg.bgmvol <= 400) BgmSetVolume(cfg.bgmvol);
@@ -1349,7 +1346,9 @@ _VideoRow(vy, 19, m_iSelect, "Exit to OSD", ""); vy += 12;
 			_VideoHackAccurateStatus(SNPPU_HACK_WINDOWS_OFF)); vy += 12;
 		_VideoRow(vy, 27, m_iSelect, "Mode 7 Quality",
 			_VideoHackMode7Status()); vy += 12;
-		/* AURORA_V12_SELF_AUDIT_GBC_FX1_20260910: Game Boy selector retired; GBC is fixed. */
+		/* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909: rows 28/29 stay hidden; one selector owns all GB hardware. */
+		_VideoRow(vy, 30, m_iSelect, "Game Boy",
+			g_GameBoyMode == 2 ? "SGB2" : (g_GameBoyMode == 1 ? "SGB1" : "GBC")); vy += 12;
 	}
 	else if (iPage == 2)
 	{
@@ -1423,7 +1422,7 @@ void CVideoScreen::Input(Uint32 buttons, Uint32 trigger)
 		int lo, hi;
 		if (m_iSelect < 10)       { lo = 0;  hi = 8;  }
 		else if (m_iSelect < 20)  { lo = 10; hi = 19; }
-		else if (m_iSelect <= 30) { lo = 20; hi = 27; } /* AURORA_V12_SELF_AUDIT_GBC_FX1_20260910 */
+		else if (m_iSelect <= 30) { lo = 20; hi = 30; }
 		else if (m_iSelect < 40)  { lo = 31; hi = 37; }
 		else if (m_iSelect < 50)  { lo = 40; hi = 45; }
 		else                      { lo = 50; hi = 58; } /* AURORA_CD_MUSIC_REDBOOK_V3_20260830 */
@@ -1442,7 +1441,7 @@ void CVideoScreen::Input(Uint32 buttons, Uint32 trigger)
 			if (m_iSelect > hi) m_iSelect = lo;
 			if (m_iSelect == 36) m_iSelect = 37;
 			if (m_iSelect == 15) m_iSelect = 16; /* AURORA_SWC_FLOPPY_V5_20260831 */
-			if (m_iSelect >= 28 && m_iSelect <= 30) m_iSelect = 20; /* AURORA_V12_SELF_AUDIT_GBC_FX1_20260910 */
+			if (m_iSelect == 28 || m_iSelect == 29) m_iSelect = 30; /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909 */
 		}
 	}
 
@@ -1682,6 +1681,12 @@ case 17: /* Famiclone Audio */
 				if (mode >= SNPPU_OBJ_LIMIT_MODE_NUM) mode = 0;
 				SNPPURenderSetObjLimitMode((Uint8)mode);
 			}
+			break;
+		case 30:
+			g_GameBoyMode += dir;
+			if (g_GameBoyMode < 0) g_GameBoyMode = 2;
+			if (g_GameBoyMode > 2) g_GameBoyMode = 0;
+			g_SgbBiosModel = (g_GameBoyMode == 2) ? 1 : 0; /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909 */
 			break;
 		case 31:
 			_VideoApplyCompatFlags(

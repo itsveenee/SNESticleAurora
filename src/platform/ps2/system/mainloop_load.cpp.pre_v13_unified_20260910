@@ -1,4 +1,3 @@
-/* AURORA_V13_UNIFIED_GBC_AUDIO_32X_FRAMESKIP_20260910 */
 #include <string.h>
 #include <strings.h> /* AURORA_SWC_FLOPPY_V2_20260831: strcasecmp/strncasecmp */
 /* AURORA_SWC_FLOPPY_V3_20260831 */
@@ -486,16 +485,6 @@ static Bool _MainLoopAllocRomBuffer(Uint32 capacity)
         return FALSE;
 
     p = (Uint8 *)memalign(64, (size_t)capacity);
-    if (!p)
-    {
-        /* AURORA_V13_UNIFIED_GBC_AUDIO_32X_FRAMESKIP_20260910
-         * Some PS2 heaps become fragmented by optional drivers/storage. ROM
-         * data is CPU-read backing, not a GS DMA buffer; PicoDrive requires
-         * only normal word-safe storage and separately receives the exact
-         * capacity. Retry with a weaker-but-safe 16-byte alignment before
-         * reporting OOM. The normal 64-byte path remains unchanged. */
-        p = (Uint8 *)memalign(16, (size_t)capacity);
-    }
     if (!p)
         return FALSE;
 
@@ -4059,7 +4048,7 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
 
     if (eType == MAINLOOP_ENTRYTYPE_GBROM)
     {
-        const Int32 gbMode = 0; /* AURORA_V12_SELF_AUDIT_GBC_FX1_20260910: GBC-only frontend */
+        Int32 gbMode = VideoGetGameBoyMode();
         Bool bGbcFile;
         Bool bSgbCompatible;
         GambatteSystem::StandaloneModeE eGbMode;

@@ -1,4 +1,3 @@
-/* AURORA_V13_UNIFIED_GBC_AUDIO_32X_FRAMESKIP_20260910 */
 #include <string.h>
 #include "types.h"
 #include "snsa1.h"
@@ -15,65 +14,6 @@
 static Uint16 _SA1LE16(const Uint8 *p)
 {
     return (Uint16)p[0] | ((Uint16)p[1] << 8);
-}
-
-/* AURORA_SA1_SAFE_PERF_V9_20260910
- * Bit-exact 8x8 transpose for both character-conversion engines.
- * Byte N is pixel N; result byte N is plane N, pixel 0 in bit 7. */
-static unsigned long long _SA1Pack8Pixels(const Uint8 *p)
-{
-    return ((unsigned long long)p[0] << 0)  |
-           ((unsigned long long)p[1] << 8)  |
-           ((unsigned long long)p[2] << 16) |
-           ((unsigned long long)p[3] << 24) |
-           ((unsigned long long)p[4] << 32) |
-           ((unsigned long long)p[5] << 40) |
-           ((unsigned long long)p[6] << 48) |
-           ((unsigned long long)p[7] << 56);
-}
-
-static unsigned long long _SA1ExpandPackedPixels(unsigned long long bits, Uint32 depth)
-{
-    if (depth == 8)
-        return bits;
-    if (depth == 4)
-    {
-        return ((bits >> 0)  & 0x0FULL) |
-              (((bits >> 4)  & 0x0FULL) << 8)  |
-              (((bits >> 8)  & 0x0FULL) << 16) |
-              (((bits >> 12) & 0x0FULL) << 24) |
-              (((bits >> 16) & 0x0FULL) << 32) |
-              (((bits >> 20) & 0x0FULL) << 40) |
-              (((bits >> 24) & 0x0FULL) << 48) |
-              (((bits >> 28) & 0x0FULL) << 56);
-    }
-    return ((bits >> 0)  & 0x03ULL) |
-          (((bits >> 2)  & 0x03ULL) << 8)  |
-          (((bits >> 4)  & 0x03ULL) << 16) |
-          (((bits >> 6)  & 0x03ULL) << 24) |
-          (((bits >> 8)  & 0x03ULL) << 32) |
-          (((bits >> 10) & 0x03ULL) << 40) |
-          (((bits >> 12) & 0x03ULL) << 48) |
-          (((bits >> 14) & 0x03ULL) << 56);
-}
-
-static unsigned long long _SA1Transpose8x8ToPlanes(unsigned long long x)
-{
-    unsigned long long t;
-    t = (x ^ (x >> 7)) & 0x00AA00AA00AA00AAULL;
-    x ^= t ^ (t << 7);
-    t = (x ^ (x >> 14)) & 0x0000CCCC0000CCCCULL;
-    x ^= t ^ (t << 14);
-    t = (x ^ (x >> 28)) & 0x00000000F0F0F0F0ULL;
-    x ^= t ^ (t << 28);
-
-    x = ((x & 0x5555555555555555ULL) << 1) |
-        ((x >> 1) & 0x5555555555555555ULL);
-    x = ((x & 0x3333333333333333ULL) << 2) |
-        ((x >> 2) & 0x3333333333333333ULL);
-    x = ((x & 0x0F0F0F0F0F0F0F0FULL) << 4) |
-        ((x >> 4) & 0x0F0F0F0F0F0F0F0FULL);
-    return x;
 }
 
 SNSA1::SNSA1()
@@ -115,8 +55,8 @@ Bool SNSA1::Attach(SnesSystem *pOwner,
     m_bTrackBWRAMDirty = bTrackBWRAMDirty;
     m_bActive = TRUE;
 
-    /* AURORA_V12_SELF_AUDIT_GBC_FX1_20260910: Reset() already establishes the private SA-1 map. */
     Reset();
+    MapSA1CPU();
     return TRUE;
 }
 
@@ -134,18 +74,6 @@ void SNSA1::Detach()
     m_pBWRAM = NULL;
     m_nBWRAMBytes = 0;
     m_uBWRAMMask = 0;
-    m_uMainBWRAMBase = 0;
-    m_uSA1BWRAMBase = 0;
-    m_uSA1BitmapBaseBytes = 0;
-    m_uSA1BitmapPixelBase = 0;
-    m_uBWRAMProtectLimit = 0;
-    m_bSA1BWRAMBitmap = FALSE;
-    m_bBWRAMProtectActive = FALSE;
-    m_bDirectBWRAMWrite = FALSE;
-    m_uCCDSA = m_uCCDDA = m_uCCBPL = 0;
-    m_uTimerHMax = m_uTimerVMax = 0;
-    m_uTimerHTarget = m_uTimerVTarget = 0;
-    m_uCCBPP = m_uCCCharMask = m_uCCDmaSize = m_uCCTileXMask = m_uCCTileShift = 0;
 }
 
 void SNSA1::Reset()
@@ -176,8 +104,6 @@ void SNSA1::Reset()
     m_uHCounter = m_uVCounter = m_uPrevHCounter = 0;
     m_uLatchedHCounter = m_uLatchedVCounter = 0;
     m_bTimerLastState = FALSE;
-    RebuildFastState();
-    /* AURORA_V12_SELF_AUDIT_GBC_FX1_20260910: full MapSA1CPU() below supersedes reset-time bRAM-only refresh. */
 
     SNCPUResetCounters(&m_Cpu);
     SNCPUResetRegs(&m_Cpu);
@@ -188,12 +114,6 @@ void SNSA1::Reset()
     m_Cpu.Regs.rS.w = 0x01FF;
     m_Cpu.Regs.rPC = 0;
     m_Cpu.uMDR = 0;
-
-    /* AURORA_SA1_COMPAT_V12_RESET_MAP_20260910
-     * Reset changes Super MMC/BMAP/BMAPS/BWPA architectural state. Aurora's
-     * Bank[] page descriptors are materialized host state, so rebuild them
-     * now instead of carrying a pre-reset map into the next SA-1 instruction. */
-    MapSA1CPU();
 
     UpdateMainIRQ();
 }
@@ -272,7 +192,6 @@ Bool SNSA1::RestoreState(const SNSA1StateT *pState)
     m_bCharDMA = pState->CharDMA ? TRUE : FALSE;
     m_uBitmapFormat = pState->BitmapFormat;
     m_bTimerLastState = pState->TimerLastState ? TRUE : FALSE;
-    RebuildFastState();
 
     m_Cpu.Regs = pState->CpuRegs;
     m_Cpu.Cycles = pState->CpuCycles;
@@ -414,7 +333,7 @@ void SNSA1::MapRomPage(SNCpuT *pCpu, Uint32 uBus, Bool bMainCpu)
             SNCPUSetTrap(pCpu, uBus, 0x2000,
                          SnesSystem::ReadSA1ROM, SnesSystem::WriteSA1ROM);
         else
-            SNCPUSetTrap(pCpu, uBus, 0x2000, ReadROMCPU, WriteROMCPU);
+            SNCPUSetTrap(pCpu, uBus, 0x2000, ReadCPU, WriteCPU);
         SNCPUSetMemSpeed(pCpu, uBus, 0x2000, SNCPU_CYCLE_FAST);
         return;
     }
@@ -432,7 +351,7 @@ void SNSA1::MapRomPage(SNCpuT *pCpu, Uint32 uBus, Bool bMainCpu)
             SNCPUSetTrap(pCpu, uBus, 0x2000,
                          SnesSystem::ReadSA1ROM, SnesSystem::WriteSA1ROM);
         else
-            SNCPUSetTrap(pCpu, uBus, 0x2000, ReadROMCPU, WriteROMCPU);
+            SNCPUSetTrap(pCpu, uBus, 0x2000, ReadCPU, WriteCPU);
     }
 
     /* SA-1 ROM fetches use the fast 10.74 MHz execution domain in this V1;
@@ -470,155 +389,15 @@ void SNSA1::MapRomWindows(SNCpuT *pCpu, Bool bMainCpu)
         MapRomGroup(pCpu, uGroup, bMainCpu);
 }
 
-void SNSA1::RebuildFastState()
-{
-    /* AURORA_SA1_SAFE_PERF_V10_20260910 */
-    Uint32 bmaps = (Uint32)m_Reg[0x25];
-    Uint32 dmacb = (Uint32)(m_Reg[0x31] & 3u);
-    Uint32 dmasize = (Uint32)((m_Reg[0x31] >> 2) & 7u);
-
-    if (dmacb > 2u) dmacb = 2u;
-    if (dmasize > 5u) dmasize = 5u;
-
-    m_uMainBWRAMBase =
-        WrapBWRAMOffset((Uint32)(m_Reg[0x24] & 0x1F) << 13);
-    m_bSA1BWRAMBitmap = (bmaps & 0x80u) ? TRUE : FALSE;
-    m_uSA1BWRAMBase = m_bSA1BWRAMBitmap
-        ? 0u : WrapBWRAMOffset((bmaps & 0x1Fu) << 13);
-
-    m_uSA1BitmapBaseBytes = (bmaps & 0x7Fu) << 11;
-    m_uSA1BitmapPixelBase = (bmaps & 0x7Fu) <<
-        ((m_uBitmapFormat == 2) ? 13 : 12);
-
-    m_bBWRAMProtectActive =
-        (((m_Reg[0x26] | m_Reg[0x27]) & 0x80u) == 0) ? TRUE : FALSE;
-    m_uBWRAMProtectLimit = 0x100u << (m_Reg[0x28] & 0x0F);
-
-    /* A direct native write is equivalent to WriteBWRAMLinear only when
-     * no address can be rejected and no external per-write dirty callback
-     * is requested. Normal SA-1 SRAM persistence is checksum-discovered. */
-    m_bDirectBWRAMWrite =
-        (!m_bBWRAMProtectActive && !m_bTrackBWRAMDirty) ? TRUE : FALSE;
-
-    /* CC1/CC2 geometry changes only with $2231-$2236. */
-    m_uCCBPP = (Uint8)(8u >> dmacb);
-    m_uCCBPL = (8u << dmasize) >> dmacb;
-    m_uCCCharMask = (Uint8)((1u << (6u - dmacb)) - 1u);
-    m_uCCDmaSize = (Uint8)dmasize;
-    m_uCCTileXMask = (Uint8)((1u << dmasize) - 1u);
-    m_uCCTileShift = (Uint8)(6u - dmacb);
-    m_uCCDSA = (Uint32)m_Reg[0x32] |
-               ((Uint32)m_Reg[0x33] << 8) |
-               ((Uint32)m_Reg[0x34] << 16);
-    m_uCCDDA = (Uint32)m_Reg[0x35] | ((Uint32)m_Reg[0x36] << 8);
-
-    /* Timer mode/targets are hot on every SA-1 scheduler entry but change
-     * only through $2210/$2212-$2215. */
-    m_uTimerHMax = (m_Reg[0x10] & 0x80u) ? 0x800u : 1364u;
-    m_uTimerVMax = (m_Reg[0x10] & 0x80u) ? 0x200u : 262u;
-    m_uTimerHTarget = ((Uint32)m_Reg[0x12] |
-                       ((Uint32)m_Reg[0x13] << 8)) << 2;
-    m_uTimerVTarget = (Uint32)m_Reg[0x14] |
-                      ((Uint32)m_Reg[0x15] << 8);
-}
-
-void SNSA1::RefreshBWRAMDirectWrites()
-{
-    /* AURORA_SA1_SAFE_PERF_V11_20260910
-     * V10 made linear BW-RAM pages writable directly when protection is
-     * architecturally disabled and no external dirty callback is needed.
-     * Keep that fast path, but also keep the 24-bit overflow mirror coherent
-     * and extend the same proven-safe write path to the S-CPU's SA-1 BW-RAM
-     * mappings.  A page is touched on the S-CPU side only if its preserved
-     * write trap still identifies it as an SA-1 BW-RAM descriptor. */
-    Uint32 uBank, uAddr;
-    Uint8 writable = m_bDirectBWRAMWrite ? 0xFFu : 0u;
-    SNCpuT *pMainCpu = NULL;
-    Bool bTouchedMain = FALSE;
-
-    if (!m_bActive)
-        return;
-
-    /* SA-1 $40-$5F: contiguous linear BW-RAM pages already have pMem. */
-    for (uBank = 0x40; uBank <= 0x5F; ++uBank)
-    {
-        for (uAddr = 0; uAddr < 0x10000u; uAddr += 0x2000u)
-        {
-            SNCpuBankT *pBank = &m_Cpu.Bank[((uBank << 16) | uAddr) >> SNCPU_BANK_SHIFT];
-            pBank->bRAM = pBank->pMem ? writable : 0u;
-        }
-    }
-
-    /* SA-1 $00-$3F/$80-$BF:$6000: direct only while BMAPS is linear. */
-    for (uBank = 0; uBank <= 0x3F; ++uBank)
-    {
-        Uint32 a = (uBank << 16) | 0x6000u;
-        Uint32 b = ((uBank | 0x80u) << 16) | 0x6000u;
-        SNCpuBankT *pa = &m_Cpu.Bank[a >> SNCPU_BANK_SHIFT];
-        SNCpuBankT *pb = &m_Cpu.Bank[b >> SNCPU_BANK_SHIFT];
-        pa->bRAM = (!m_bSA1BWRAMBitmap && pa->pMem) ? writable : 0u;
-        pb->bRAM = (!m_bSA1BWRAMBitmap && pb->pMem) ? writable : 0u;
-    }
-
-    /* V10 changed bRAM after the map's initial mirror pass.  Re-copy bank
-     * $00 descriptors so an effective-address carry into $100:xxxx cannot
-     * retain stale direct-write permission or stale trap state. */
-    SNCPUMirror24BitBus(&m_Cpu);
-
-    if (m_pOwner)
-        pMainCpu = m_pOwner->GetCpu();
-    if (!pMainCpu)
-        return;
-
-    /* S-CPU $40-$4F linear BW-RAM.  The trap-function identity prevents an
-     * Attach-time refresh from ever marking unrelated ROM/RAM descriptors
-     * writable before MapMainCPU() has installed the SA-1 map. */
-    for (uBank = 0x40; uBank <= 0x4F; ++uBank)
-    {
-        for (uAddr = 0; uAddr < 0x10000u; uAddr += 0x2000u)
-        {
-            SNCpuBankT *pBank = &pMainCpu->Bank[((uBank << 16) | uAddr) >> SNCPU_BANK_SHIFT];
-            if (pBank->pWriteTrapFunc == SnesSystem::WriteSA1BWRAM)
-            {
-                pBank->bRAM = pBank->pMem ? writable : 0u;
-                bTouchedMain = TRUE;
-            }
-        }
-    }
-
-    /* S-CPU programmable $6000-$7FFF windows.  During CC1, pMem is NULL and
-     * writes correctly stay trapped even though ordinary writes are linear. */
-    for (uBank = 0; uBank <= 0x3F; ++uBank)
-    {
-        Uint32 a = (uBank << 16) | 0x6000u;
-        Uint32 b = ((uBank | 0x80u) << 16) | 0x6000u;
-        SNCpuBankT *pa = &pMainCpu->Bank[a >> SNCPU_BANK_SHIFT];
-        SNCpuBankT *pb = &pMainCpu->Bank[b >> SNCPU_BANK_SHIFT];
-        if (pa->pWriteTrapFunc == SnesSystem::WriteSA1BWRAM)
-        {
-            pa->bRAM = pa->pMem ? writable : 0u;
-            bTouchedMain = TRUE;
-        }
-        if (pb->pWriteTrapFunc == SnesSystem::WriteSA1BWRAM)
-        {
-            pb->bRAM = pb->pMem ? writable : 0u;
-            bTouchedMain = TRUE;
-        }
-    }
-
-    if (bTouchedMain)
-        SNCPUMirror24BitBus(pMainCpu);
-}
-
 void SNSA1::MapSA1BWRAMWindow()
 {
     Uint32 uBank;
     Uint32 uOff = 0;
     Bool bDirect = FALSE;
 
-    if (m_pBWRAM && m_nBWRAMBytes >= 0x2000u && !m_bSA1BWRAMBitmap)
+    if (m_pBWRAM && m_nBWRAMBytes >= 0x2000u && !(m_Reg[0x25] & 0x80))
     {
-        uOff = m_uSA1BWRAMBase;
+        uOff = WrapBWRAMOffset((Uint32)(m_Reg[0x25] & 0x1F) * 0x2000u);
         bDirect = (uOff + 0x2000u <= m_nBWRAMBytes) ? TRUE : FALSE;
     }
 
@@ -626,19 +405,16 @@ void SNSA1::MapSA1BWRAMWindow()
     {
         Uint32 a = (uBank << 16) | 0x6000;
         Uint32 b = ((uBank | 0x80) << 16) | 0x6000;
-        SNCPUSetTrap(&m_Cpu, a, 0x2000, ReadBWRAMWindowCPU, WriteBWRAMWindowCPU);
-        SNCPUSetTrap(&m_Cpu, b, 0x2000, ReadBWRAMWindowCPU, WriteBWRAMWindowCPU);
+        SNCPUSetTrap(&m_Cpu, a, 0x2000, ReadCPU, WriteCPU);
+        SNCPUSetTrap(&m_Cpu, b, 0x2000, ReadCPU, WriteCPU);
         SNCPUSetMemSpeed(&m_Cpu, a, 0x2000, 12);
         SNCPUSetMemSpeed(&m_Cpu, b, 0x2000, 12);
         if (bDirect)
         {
-            SNCPUSetBank(&m_Cpu, a, 0x2000, m_pBWRAM + uOff, m_bDirectBWRAMWrite);
-            SNCPUSetBank(&m_Cpu, b, 0x2000, m_pBWRAM + uOff, m_bDirectBWRAMWrite);
+            SNCPUSetBank(&m_Cpu, a, 0x2000, m_pBWRAM + uOff, FALSE);
+            SNCPUSetBank(&m_Cpu, b, 0x2000, m_pBWRAM + uOff, FALSE);
         }
     }
-
-    /* V11: BMAPS remaps bank $00:$6000 too; refresh the overflow mirror. */
-    SNCPUMirror24BitBus(&m_Cpu);
 }
 
 void SNSA1::MapMainBWRAMWindow(SNCpuT *pMainCpu)
@@ -651,7 +427,7 @@ void SNSA1::MapMainBWRAMWindow(SNCpuT *pMainCpu)
         return;
     if (!m_bCharDMA && m_pBWRAM && m_nBWRAMBytes >= 0x2000u)
     {
-        uOff = m_uMainBWRAMBase;
+        uOff = WrapBWRAMOffset((Uint32)(m_Reg[0x24] & 0x1F) * 0x2000u);
         bDirect = (uOff + 0x2000u <= m_nBWRAMBytes) ? TRUE : FALSE;
     }
 
@@ -667,13 +443,10 @@ void SNSA1::MapMainBWRAMWindow(SNCpuT *pMainCpu)
         SNCPUSetMemSpeed(pMainCpu, b, 0x2000, SNCPU_CYCLE_SLOW);
         if (bDirect)
         {
-            SNCPUSetBank(pMainCpu, a, 0x2000, m_pBWRAM + uOff, m_bDirectBWRAMWrite);
-            SNCPUSetBank(pMainCpu, b, 0x2000, m_pBWRAM + uOff, m_bDirectBWRAMWrite);
+            SNCPUSetBank(pMainCpu, a, 0x2000, m_pBWRAM + uOff, FALSE);
+            SNCPUSetBank(pMainCpu, b, 0x2000, m_pBWRAM + uOff, FALSE);
         }
     }
-
-    /* V11: BMAP/CC1 changes bank $00:$6000 at runtime. */
-    SNCPUMirror24BitBus(pMainCpu);
 }
 
 void SNSA1::MapSA1CPU()
@@ -684,33 +457,25 @@ void SNSA1::MapSA1CPU()
 
     SNCPUSetTrap(&m_Cpu, 0, SNCPU_MEM_SIZE, ReadCPU, WriteCPU);
     SNCPUSetMemSpeed(&m_Cpu, 0, SNCPU_MEM_SIZE, SNCPU_CYCLE_FAST);
+
     MapRomWindows(&m_Cpu, FALSE);
 
-    for (uBank = 0; uBank <= 0x3F; ++uBank)
-    {
-        Uint32 a = uBank << 16;
-        Uint32 b = (uBank | 0x80u) << 16;
-        SNCPUSetTrap(&m_Cpu, a + 0x0000u, 0x2000, ReadLow0CPU, WriteLow0CPU);
-        SNCPUSetTrap(&m_Cpu, a + 0x2000u, 0x2000, ReadLow1CPU, WriteLow1CPU);
-        SNCPUSetTrap(&m_Cpu, b + 0x0000u, 0x2000, ReadLow0CPU, WriteLow0CPU);
-        SNCPUSetTrap(&m_Cpu, b + 0x2000u, 0x2000, ReadLow1CPU, WriteLow1CPU);
-    }
-
+    /* BW-RAM is a two-SA-1-cycle region in reference emulator. */
     for (uBank = 0x40; uBank <= 0x5F; ++uBank)
-    {
-        SNCPUSetTrap(&m_Cpu, uBank << 16, 0x10000,
-                     ReadBWRAMLinearCPU, WriteBWRAMLinearCPU);
         SNCPUSetMemSpeed(&m_Cpu, uBank << 16, 0x10000, 12);
-    }
     for (uBank = 0x60; uBank <= 0x7F; ++uBank)
-    {
-        SNCPUSetTrap(&m_Cpu, uBank << 16, 0x10000,
-                     ReadBitmapCPU, WriteBitmapCPU);
         SNCPUSetMemSpeed(&m_Cpu, uBank << 16, 0x10000, 12);
-    }
     MapSA1BWRAMWindow();
 
-    /* Direct read pages retain the narrow write trap installed above. */
+    /* AURORA_SA1_PERF_STATE_V8_3_20260903
+     *
+     * $40-$5F is always linear BW-RAM. Give the native 65816 executor a
+     * direct READ pointer for every contiguous 8 KiB page. bRAM=FALSE is
+     * intentional: writes still take the pre-installed WriteCPU trap, so
+     * BWPA protection and dirty tracking remain exact.
+     *
+     * Bitmap $60-$7F and programmable $6000-$7FFF stay trapped.
+     */
     if (m_pBWRAM && m_nBWRAMBytes >= 0x2000u)
     {
         for (uBank = 0x40; uBank <= 0x5F; ++uBank)
@@ -718,9 +483,12 @@ void SNSA1::MapSA1CPU()
             for (uAddr = 0; uAddr < 0x10000; uAddr += 0x2000)
             {
                 Uint32 bus = (uBank << 16) | uAddr;
-                Uint32 off = WrapBWRAMOffset((((Uint32)uBank & 3u) << 16) | uAddr);
+                /* AURORA_V6_RUNTIME_EFFECT_ALL5_20260908: m_uBWRAMMask avoids R5900 div on normal power-of-two BW-RAM. */
+                Uint32 off = WrapBWRAMOffset(
+                    (((Uint32)uBank & 3u) << 16) | uAddr);
                 if (off + 0x2000u <= m_nBWRAMBytes)
-                    SNCPUSetBank(&m_Cpu, bus, 0x2000, m_pBWRAM + off, m_bDirectBWRAMWrite);
+                    SNCPUSetBank(&m_Cpu, bus, 0x2000,
+                                 m_pBWRAM + off, FALSE);
             }
         }
     }
@@ -754,7 +522,7 @@ void SNSA1::MapMainCPU(SNCpuT *pMainCpu)
             if (m_pBWRAM && m_nBWRAMBytes >= 0x2000 &&
                 wrapped + 0x2000 <= m_nBWRAMBytes)
                 SNCPUSetBank(pMainCpu, bus, 0x2000,
-                             m_pBWRAM + wrapped, m_bDirectBWRAMWrite);
+                             m_pBWRAM + wrapped, FALSE);
             SNCPUSetMemSpeed(pMainCpu, bus, 0x2000, SNCPU_CYCLE_SLOW);
         }
     }
@@ -773,13 +541,16 @@ Uint32 SNSA1::MainBWRAMOffset(Uint32 uAddr, Bool *pOK) const
     if ((bank <= 0x3F || (bank >= 0x80 && bank <= 0xBF)) &&
         addr >= 0x6000 && addr <= 0x7FFF)
     {
+        Uint32 off = (Uint32)(m_Reg[0x24] & 0x1F) * 0x2000u +
+                     (addr - 0x6000u);
         if (pOK) *pOK = TRUE;
-        return WrapBWRAMOffset(m_uMainBWRAMBase + (addr - 0x6000u));
+        return WrapBWRAMOffset(off);
     }
     if (bank >= 0x40 && bank <= 0x4F)
     {
+        Uint32 off = ((Uint32)(bank & 3) << 16) | addr;
         if (pOK) *pOK = TRUE;
-        return WrapBWRAMOffset(((Uint32)(bank & 3) << 16) | addr);
+        return WrapBWRAMOffset(off);
     }
     return 0;
 }
@@ -797,14 +568,18 @@ Uint32 SNSA1::SA1BWRAMOffset(Uint32 uAddr, Bool *pOK, Bool *pBitmap) const
         addr >= 0x6000 && addr <= 0x7FFF)
     {
         Uint32 local = addr - 0x6000u;
-        if (m_bSA1BWRAMBitmap)
+        if (m_Reg[0x25] & 0x80)
         {
+            Uint32 base = (Uint32)(m_Reg[0x25] & 0x7F) * 0x2000u / 4u;
             if (pOK) *pOK = TRUE;
             if (pBitmap) *pBitmap = TRUE;
-            return m_uSA1BitmapBaseBytes + local;
+            return base + local; /* pixel address relative to selected base */
         }
         if (pOK) *pOK = TRUE;
-        return WrapBWRAMOffset(m_uSA1BWRAMBase + local);
+        /* AURORA_V4_4_CUMULATIVE_20260908
+         * This is a byte-granular trapped path. Use the already-maintained
+         * power-of-two mask when possible instead of an R5900 integer modulo. */
+        return WrapBWRAMOffset((Uint32)(m_Reg[0x25] & 0x1F) * 0x2000u + local);
     }
 
     if (bank >= 0x40 && bank <= 0x5F)
@@ -812,11 +587,12 @@ Uint32 SNSA1::SA1BWRAMOffset(Uint32 uAddr, Bool *pOK, Bool *pBitmap) const
         if (pOK) *pOK = TRUE;
         return WrapBWRAMOffset((((Uint32)bank & 3u) << 16) | addr);
     }
+
     if (bank >= 0x60 && bank <= 0x7F)
     {
         if (pOK) *pOK = TRUE;
         if (pBitmap) *pBitmap = TRUE;
-        return (uAddr & 0x1FFFFFu) - 0x600000u;
+        return (uAddr & 0x1FFFFFu) - 0x600000u; /* virtual pixel address */
     }
     return 0;
 }
@@ -830,9 +606,11 @@ Uint8 SNSA1::ReadBWRAMLinear(Uint32 uOffset, Uint8 uOpenBus) const
 
 Bool SNSA1::BWRAMWriteProtected(Uint32 uOffset) const
 {
-    if (!m_bBWRAMProtectActive)
+    Uint32 limit;
+    if ((m_Reg[0x26] & 0x80) || (m_Reg[0x27] & 0x80))
         return FALSE;
-    return ((uOffset & 0x3FFFFu) < m_uBWRAMProtectLimit) ? TRUE : FALSE;
+    limit = 0x100u << (m_Reg[0x28] & 0x0F);
+    return ((uOffset & 0x3FFFFu) < limit) ? TRUE : FALSE;
 }
 
 void SNSA1::MarkBWRAMDirty()
@@ -924,64 +702,60 @@ void SNSA1::WriteMainIRAM(Uint16 uAddr, Uint8 uData)
 
 Uint8 SNSA1::ReadCC1(Uint32 bwoffset)
 {
-    Uint32 tile, ty, tx, bwaddr;
-    Uint32 y;
-    Uint32 bpp = (Uint32)m_uCCBPP;
-    Uint32 charmask = (Uint32)m_uCCCharMask;
+    Uint32 charmask, bpp, bpl, tile, ty, tx, bwaddr, dsa, dda;
+    Uint32 y, x, byte;
+    Int32 dmacb = m_Reg[0x31] & 3;
+    Int32 dmasize = (m_Reg[0x31] >> 2) & 7;
+    if (dmacb > 2) dmacb = 2;
+    if (dmasize > 5) dmasize = 5;
+
+    dsa = (Uint32)m_Reg[0x32] | ((Uint32)m_Reg[0x33] << 8) |
+          ((Uint32)m_Reg[0x34] << 16);
+    dda = (Uint32)m_Reg[0x35] | ((Uint32)m_Reg[0x36] << 8);
+    charmask = (1u << (6 - dmacb)) - 1u;
 
     if ((bwoffset & charmask) == 0 && m_nBWRAMBytes)
     {
-        tile = WrapBWRAMOffset(bwoffset - m_uCCDSA) >> m_uCCTileShift;
-        ty = tile >> m_uCCDmaSize;
-        tx = tile & m_uCCTileXMask;
-        bwaddr = m_uCCDSA + ty * 8u * m_uCCBPL + tx * bpp;
+        bpp = 2u << (2 - dmacb);
+        bpl = (8u << dmasize) >> dmacb;
+        tile = WrapBWRAMOffset(bwoffset - dsa) >> (6 - dmacb);
+        ty = tile >> dmasize;
+        tx = tile & ((1u << dmasize) - 1u);
+        bwaddr = dsa + ty * 8u * bpl + tx * bpp;
 
         for (y = 0; y < 8; ++y)
         {
             unsigned long long bits = 0;
-            unsigned long long pixels, planes;
-            Uint32 rowOff = WrapBWRAMOffset(bwaddr);
-
-            if (m_pBWRAM && rowOff + bpp <= m_nBWRAMBytes)
+            Uint8 out[8];
+            memset(out, 0, sizeof(out));
+            for (byte = 0; byte < bpp; ++byte)
+                bits |= (unsigned long long)ReadBWRAMLinear(bwaddr + byte, 0) << (byte << 3);
+            bwaddr += bpl;
+            for (x = 0; x < 8; ++x)
             {
-                const Uint8 *q = m_pBWRAM + rowOff;
-                bits = (unsigned long long)q[0] | ((unsigned long long)q[1] << 8);
-                if (bpp >= 4)
-                    bits |= ((unsigned long long)q[2] << 16) | ((unsigned long long)q[3] << 24);
-                if (bpp >= 8)
-                    bits |= ((unsigned long long)q[4] << 32) | ((unsigned long long)q[5] << 40) |
-                            ((unsigned long long)q[6] << 48) | ((unsigned long long)q[7] << 56);
-            }
-            else
-            {
-                Uint32 byte;
-                for (byte = 0; byte < bpp; ++byte)
-                    bits |= (unsigned long long)ReadBWRAMLinear(bwaddr + byte, 0) << (byte << 3);
-            }
-
-            bwaddr += m_uCCBPL;
-            pixels = _SA1ExpandPackedPixels(bits, bpp);
-            planes = _SA1Transpose8x8ToPlanes(pixels);
-            {
-                Uint32 p = m_uCCDDA + (y << 1);
-                m_IRAM[(p + 0) & 0x7FF] = (Uint8)(planes >> 0);
-                m_IRAM[(p + 1) & 0x7FF] = (Uint8)(planes >> 8);
-                if (bpp >= 4)
+                out[0] |= (Uint8)((bits & 1u) << (7 - x)); bits >>= 1;
+                out[1] |= (Uint8)((bits & 1u) << (7 - x)); bits >>= 1;
+                if (dmacb != 2)
                 {
-                    m_IRAM[(p + 16) & 0x7FF] = (Uint8)(planes >> 16);
-                    m_IRAM[(p + 17) & 0x7FF] = (Uint8)(planes >> 24);
+                    out[2] |= (Uint8)((bits & 1u) << (7 - x)); bits >>= 1;
+                    out[3] |= (Uint8)((bits & 1u) << (7 - x)); bits >>= 1;
+                    if (dmacb != 1)
+                    {
+                        out[4] |= (Uint8)((bits & 1u) << (7 - x)); bits >>= 1;
+                        out[5] |= (Uint8)((bits & 1u) << (7 - x)); bits >>= 1;
+                        out[6] |= (Uint8)((bits & 1u) << (7 - x)); bits >>= 1;
+                        out[7] |= (Uint8)((bits & 1u) << (7 - x)); bits >>= 1;
+                    }
                 }
-                if (bpp >= 8)
-                {
-                    m_IRAM[(p + 32) & 0x7FF] = (Uint8)(planes >> 32);
-                    m_IRAM[(p + 33) & 0x7FF] = (Uint8)(planes >> 40);
-                    m_IRAM[(p + 48) & 0x7FF] = (Uint8)(planes >> 48);
-                    m_IRAM[(p + 49) & 0x7FF] = (Uint8)(planes >> 56);
-                }
+            }
+            for (byte = 0; byte < bpp; ++byte)
+            {
+                Uint32 p = dda + (y << 1) + ((byte & 6u) << 3) + (byte & 1u);
+                m_IRAM[p & 0x7FF] = out[byte];
             }
         }
     }
-    return m_IRAM[(m_uCCDDA + (bwoffset & charmask)) & 0x7FF];
+    return m_IRAM[(dda + (bwoffset & charmask)) & 0x7FF];
 }
 
 Uint8 SNSA1::ReadMainBWRAM(Uint32 uAddr, Uint8 uOpenBus)
@@ -1039,130 +813,6 @@ void SNCPU_TRAPFUNC SNSA1::WriteCPU(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData)
     if (p) p->WriteBus(uAddr, uData);
 }
 
-Uint8 SNCPU_TRAPFUNC SNSA1::ReadLow0CPU(SNCpuT *pCpu, Uint32 uAddr)
-{
-    SNSA1 *p = (SNSA1 *)pCpu->pUserData;
-    Uint16 a = (Uint16)uAddr;
-    Uint8 v = pCpu->uMDR;
-    if (p && a <= 0x07FFu) v = p->m_IRAM[a & 0x07FFu];
-    pCpu->uMDR = v;
-    return v;
-}
-
-void SNCPU_TRAPFUNC SNSA1::WriteLow0CPU(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData)
-{
-    SNSA1 *p = (SNSA1 *)pCpu->pUserData;
-    Uint16 a = (Uint16)uAddr;
-    pCpu->uMDR = uData;
-    if (p && a <= 0x07FFu &&
-        (p->m_Reg[0x2A] & (Uint8)(1u << ((a & 0x07FFu) >> 8))))
-        p->m_IRAM[a & 0x07FFu] = uData;
-}
-
-Uint8 SNCPU_TRAPFUNC SNSA1::ReadLow1CPU(SNCpuT *pCpu, Uint32 uAddr)
-{
-    SNSA1 *p = (SNSA1 *)pCpu->pUserData;
-    Uint16 a = (Uint16)uAddr;
-    Uint8 v = pCpu->uMDR;
-    if (p)
-    {
-        if (a >= 0x2301u && a <= 0x230Du) v = p->ReadRegister(a, v);
-        else if (a >= 0x3000u && a <= 0x37FFu) v = p->m_IRAM[a & 0x07FFu];
-    }
-    pCpu->uMDR = v;
-    return v;
-}
-
-void SNCPU_TRAPFUNC SNSA1::WriteLow1CPU(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData)
-{
-    SNSA1 *p = (SNSA1 *)pCpu->pUserData;
-    Uint16 a = (Uint16)uAddr;
-    pCpu->uMDR = uData;
-    if (!p) return;
-    if (a >= 0x2200u && a <= 0x23FFu)
-    {
-        if (SA1CanWriteRegister(a)) p->WriteRegister(a, uData);
-        return;
-    }
-    if (a >= 0x3000u && a <= 0x37FFu)
-    {
-        Uint32 off = a & 0x07FFu;
-        if (p->m_Reg[0x2A] & (Uint8)(1u << (off >> 8))) p->m_IRAM[off] = uData;
-    }
-}
-
-Uint8 SNCPU_TRAPFUNC SNSA1::ReadBWRAMWindowCPU(SNCpuT *pCpu, Uint32 uAddr)
-{
-    SNSA1 *p = (SNSA1 *)pCpu->pUserData;
-    Uint8 v = pCpu->uMDR;
-    if (p)
-    {
-        Uint32 local = (Uint32)((Uint16)uAddr - 0x6000u);
-        v = p->m_bSA1BWRAMBitmap
-            ? p->ReadBitmap(p->m_uSA1BitmapPixelBase + local, v)
-            : p->ReadBWRAMLinear(p->m_uSA1BWRAMBase + local, v);
-    }
-    pCpu->uMDR = v;
-    return v;
-}
-
-void SNCPU_TRAPFUNC SNSA1::WriteBWRAMWindowCPU(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData)
-{
-    SNSA1 *p = (SNSA1 *)pCpu->pUserData;
-    pCpu->uMDR = uData;
-    if (!p) return;
-    Uint32 local = (Uint32)((Uint16)uAddr - 0x6000u);
-    if (p->m_bSA1BWRAMBitmap) p->WriteBitmap(p->m_uSA1BitmapPixelBase + local, uData);
-    else p->WriteBWRAMLinear(p->m_uSA1BWRAMBase + local, uData);
-}
-
-Uint8 SNCPU_TRAPFUNC SNSA1::ReadBWRAMLinearCPU(SNCpuT *pCpu, Uint32 uAddr)
-{
-    SNSA1 *p = (SNSA1 *)pCpu->pUserData;
-    Uint8 v = pCpu->uMDR;
-    if (p) v = p->ReadBWRAMLinear((((uAddr >> 16) & 3u) << 16) | (uAddr & 0xFFFFu), v);
-    pCpu->uMDR = v;
-    return v;
-}
-
-void SNCPU_TRAPFUNC SNSA1::WriteBWRAMLinearCPU(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData)
-{
-    SNSA1 *p = (SNSA1 *)pCpu->pUserData;
-    pCpu->uMDR = uData;
-    if (p) p->WriteBWRAMLinear((((uAddr >> 16) & 3u) << 16) | (uAddr & 0xFFFFu), uData);
-}
-
-Uint8 SNCPU_TRAPFUNC SNSA1::ReadBitmapCPU(SNCpuT *pCpu, Uint32 uAddr)
-{
-    SNSA1 *p = (SNSA1 *)pCpu->pUserData;
-    Uint8 v = pCpu->uMDR;
-    if (p) v = p->ReadBitmap((uAddr & 0x1FFFFFu) - 0x600000u, v);
-    pCpu->uMDR = v;
-    return v;
-}
-
-void SNCPU_TRAPFUNC SNSA1::WriteBitmapCPU(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData)
-{
-    SNSA1 *p = (SNSA1 *)pCpu->pUserData;
-    pCpu->uMDR = uData;
-    if (p) p->WriteBitmap((uAddr & 0x1FFFFFu) - 0x600000u, uData);
-}
-
-Uint8 SNCPU_TRAPFUNC SNSA1::ReadROMCPU(SNCpuT *pCpu, Uint32 uAddr)
-{
-    SNSA1 *p = (SNSA1 *)pCpu->pUserData;
-    Uint8 v = p ? p->ReadMainROM(uAddr, pCpu->uMDR) : pCpu->uMDR;
-    pCpu->uMDR = v;
-    return v;
-}
-
-void SNCPU_TRAPFUNC SNSA1::WriteROMCPU(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData)
-{
-    SNSA1 *p = (SNSA1 *)pCpu->pUserData;
-    pCpu->uMDR = uData;
-    if (p) p->WriteMainROM(uAddr, uData);
-}
-
 Uint8 SNSA1::ReadBus(Uint32 uAddr, Uint8 uOpenBus)
 {
     Uint8 bank = (Uint8)(uAddr >> 16);
@@ -1186,8 +836,10 @@ Uint8 SNSA1::ReadBus(Uint32 uAddr, Uint8 uOpenBus)
             if (!ok) return uOpenBus;
             if (bitmap)
             {
-                Uint32 pixel =
-                    (off - m_uSA1BitmapBaseBytes) + m_uSA1BitmapPixelBase;
+                Uint32 baseBytes = (Uint32)(m_Reg[0x25] & 0x7F) * 0x2000u / 4u;
+                Uint32 pixel = (off - baseBytes);
+                if (m_uBitmapFormat == 2) pixel += baseBytes * 4u;
+                else pixel += baseBytes * 2u;
                 return ReadBitmap(pixel, uOpenBus);
             }
             return ReadBWRAMLinear(off, uOpenBus);
@@ -1255,8 +907,9 @@ void SNSA1::WriteBus(Uint32 uAddr, Uint8 uData)
             if (!ok) return;
             if (bitmap)
             {
-                Uint32 pixel =
-                    (off - m_uSA1BitmapBaseBytes) + m_uSA1BitmapPixelBase;
+                Uint32 baseBytes = (Uint32)(m_Reg[0x25] & 0x7F) * 0x2000u / 4u;
+                Uint32 pixel = off - baseBytes;
+                pixel += baseBytes * (m_uBitmapFormat == 2 ? 4u : 2u);
                 WriteBitmap(pixel, uData);
             }
             else WriteBWRAMLinear(off, uData);
@@ -1413,8 +1066,7 @@ void SNSA1::ReadVariableLength(Bool bInc, Bool bNoShift)
                   ((Uint32)m_Reg[0x5B] << 16);
     Uint8 shift = m_Reg[0x58] & 15;
     Uint8 s;
-    Uint32 data = 0;
-    Bool bDirect = FALSE;
+    Uint32 data;
 
     if (bNoShift) shift = 0;
     else if (!shift) shift = 16;
@@ -1425,30 +1077,10 @@ void SNSA1::ReadVariableLength(Bool bInc, Bool bNoShift)
         s &= 15;
     }
 
-    {
-        Uint32 a = addr & 0xFFFFFFu;
-        Uint32 pageOff = a & SNCPU_BANK_MASK;
-        Uint32 bankOff = a & 0xFFFFu;
-        if (pageOff <= (SNCPU_BANK_MASK - 3u) && bankOff <= 0xFFFCu)
-        {
-            SNCpuBankT *pBank = &m_Cpu.Bank[a >> SNCPU_BANK_SHIFT];
-            if (pBank->pMem)
-            {
-                const Uint8 *q = pBank->pMem + a;
-                data = (Uint32)q[0] | ((Uint32)q[1] << 8) |
-                       ((Uint32)q[2] << 16) | ((Uint32)q[3] << 24);
-                bDirect = TRUE;
-            }
-        }
-    }
-
-    if (!bDirect)
-    {
-        data = (Uint32)ReadBus(addr, 0) |
-               ((Uint32)ReadBus((addr & 0xFF0000u) | ((addr + 1) & 0xFFFFu), 0) << 8) |
-               ((Uint32)ReadBus((addr + 2) & 0xFFFFFFu, 0) << 16) |
-               ((Uint32)ReadBus((addr + 3) & 0xFFFFFFu, 0) << 24);
-    }
+    data = (Uint32)ReadBus(addr, 0) |
+           ((Uint32)ReadBus((addr & 0xFF0000u) | ((addr + 1) & 0xFFFFu), 0) << 8) |
+           ((Uint32)ReadBus((addr + 2) & 0xFFFFFFu, 0) << 16) |
+           ((Uint32)ReadBus((addr + 3) & 0xFFFFFFu, 0) << 24);
     data >>= s;
     m_Reg[0x10C] = (Uint8)data;
     m_Reg[0x10D] = (Uint8)(data >> 8);
@@ -1464,29 +1096,39 @@ void SNSA1::ReadVariableLength(Bool bInc, Bool bNoShift)
 
 void SNSA1::DoCC2()
 {
+    Uint32 dest = (Uint32)m_Reg[0x35] | ((Uint32)m_Reg[0x36] << 8);
     Uint32 offset = (m_uCharIndex & 7) ? 0u : 1u;
-    Int32 depth = (Int32)m_uCCBPP;
+    Int32 depth = (m_Reg[0x31] & 3) == 0 ? 8 :
+                  (m_Reg[0x31] & 3) == 1 ? 4 : 2;
     Int32 bytesPerChar = 8 * depth;
     Uint8 *q = m_CharData + offset * 64;
-    Int32 l;
-    Uint32 p = (m_uCCDDA & 0x7FFu) + offset * (Uint32)bytesPerChar;
+    Int32 l, b;
+    Uint32 p = (dest & 0x7FFu) + offset * (Uint32)bytesPerChar;
 
     for (l = 0; l < 8; ++l, q += 8)
     {
-        unsigned long long planes = _SA1Transpose8x8ToPlanes(_SA1Pack8Pixels(q));
-        m_IRAM[(p + 0) & 0x7FF] = (Uint8)(planes >> 0);
-        m_IRAM[(p + 1) & 0x7FF] = (Uint8)(planes >> 8);
+        Uint8 plane[8];
+        memset(plane, 0, sizeof(plane));
+        for (b = 0; b < 8; ++b)
+        {
+            Uint8 r = q[b];
+            Int32 bit;
+            for (bit = 0; bit < depth; ++bit)
+                plane[bit] = (Uint8)((plane[bit] << 1) | ((r >> bit) & 1));
+        }
+        m_IRAM[(p + 0) & 0x7FF] = plane[0];
+        m_IRAM[(p + 1) & 0x7FF] = plane[1];
         if (depth >= 4)
         {
-            m_IRAM[(p + 16) & 0x7FF] = (Uint8)(planes >> 16);
-            m_IRAM[(p + 17) & 0x7FF] = (Uint8)(planes >> 24);
+            m_IRAM[(p + 16) & 0x7FF] = plane[2];
+            m_IRAM[(p + 17) & 0x7FF] = plane[3];
         }
         if (depth >= 8)
         {
-            m_IRAM[(p + 32) & 0x7FF] = (Uint8)(planes >> 32);
-            m_IRAM[(p + 33) & 0x7FF] = (Uint8)(planes >> 40);
-            m_IRAM[(p + 48) & 0x7FF] = (Uint8)(planes >> 48);
-            m_IRAM[(p + 49) & 0x7FF] = (Uint8)(planes >> 56);
+            m_IRAM[(p + 32) & 0x7FF] = plane[4];
+            m_IRAM[(p + 33) & 0x7FF] = plane[5];
+            m_IRAM[(p + 48) & 0x7FF] = plane[6];
+            m_IRAM[(p + 49) & 0x7FF] = plane[7];
         }
         p += 2;
     }
@@ -1504,53 +1146,11 @@ void SNSA1::DoDMA()
     Bool bDstBWRAM = (m_Reg[0x30] & 4) ? TRUE : FALSE;
     Bool bBulkDone = FALSE;
 
-    if (len && uSrcType == 0 && (!bDstBWRAM || (m_pBWRAM && m_nBWRAMBytes)))
-    {
-        while (n < len)
-        {
-            Uint32 sAddr = (src + n) & 0xFFFFFFu;
-            Uint8 sBank = (Uint8)(sAddr >> 16);
-            Uint16 sOff16 = (Uint16)sAddr;
-            SNCpuBankT *pBank = &m_Cpu.Bank[sAddr >> SNCPU_BANK_SHIFT];
-            const Uint8 *pSrc = pBank->pMem ? pBank->pMem + sAddr : NULL;
-            Bool bSourceBWRAM =
-                ((sBank >= 0x40 && sBank <= 0x5F) ||
-                 ((sBank <= 0x3F || (sBank >= 0x80 && sBank <= 0xBF)) &&
-                  sOff16 >= 0x6000 && sOff16 <= 0x7FFF && !m_bSA1BWRAMBitmap))
-                ? TRUE : FALSE;
-
-            if (pSrc && !(bDstBWRAM && bSourceBWRAM))
-            {
-                Uint32 chunk = len - n;
-                Uint32 pageBytes = SNCPU_BANK_SIZE - (sAddr & SNCPU_BANK_MASK);
-                if (chunk > pageBytes) chunk = pageBytes;
-                if (bDstBWRAM)
-                {
-                    Uint32 dOff = WrapBWRAMOffset(dst + n);
-                    Uint32 dBytes = m_nBWRAMBytes - dOff;
-                    if (chunk > dBytes) chunk = dBytes;
-                    memcpy(m_pBWRAM + dOff, pSrc, chunk);
-                }
-                else
-                {
-                    Uint32 dOff = (dst + n) & 0x7FFu;
-                    Uint32 dBytes = 0x800u - dOff;
-                    if (chunk > dBytes) chunk = dBytes;
-                    memcpy(m_IRAM + dOff, pSrc, chunk);
-                }
-                n += chunk;
-                continue;
-            }
-
-            Uint8 v = ReadBus(sAddr, 0);
-            if (bDstBWRAM) m_pBWRAM[WrapBWRAMOffset(dst + n)] = v;
-            else m_IRAM[(dst + n) & 0x7FFu] = v;
-            ++n;
-        }
-        bBulkDone = TRUE;
-    }
-
-    if (!bBulkDone && len && m_pBWRAM && m_nBWRAMBytes)
+    /* AURORA_SA1_PERF_V8_3_2_20260903
+     * Cross-space copies are between distinct arrays, so chunked memcpy
+     * preserves byte order and wrap. Same-space copies keep the original
+     * forward loop because overlap can deliberately feed newly-written data. */
+    if (len && m_pBWRAM && m_nBWRAMBytes)
     {
         if (uSrcType == 1 && !bDstBWRAM)
         {
@@ -1584,38 +1184,6 @@ void SNSA1::DoDMA()
             }
             bBulkDone = TRUE;
         }
-        else if (uSrcType == 1 && bDstBWRAM && len >= 16u)
-        {
-            /* AURORA_SA1_V11_SAME_SPACE_DMA
-             * Preserve the old byte-forward semantics whenever the physical
-             * ranges overlap or either logical range wraps.  Only the proven
-             * non-overlapping contiguous case is collapsed into memcpy. */
-            Uint32 sOff = WrapBWRAMOffset(src);
-            Uint32 dOff = WrapBWRAMOffset(dst);
-            if (sOff + len <= m_nBWRAMBytes &&
-                dOff + len <= m_nBWRAMBytes &&
-                (sOff + len <= dOff || dOff + len <= sOff))
-            {
-                memcpy(m_pBWRAM + dOff, m_pBWRAM + sOff, len);
-                n = len;
-                bBulkDone = TRUE;
-            }
-        }
-    }
-
-    if (!bBulkDone && len >= 16u &&
-        (uSrcType == 2 || uSrcType == 3) && !bDstBWRAM)
-    {
-        Uint32 sOff = src & 0x7FFu;
-        Uint32 dOff = dst & 0x7FFu;
-        if (sOff + len <= 0x800u &&
-            dOff + len <= 0x800u &&
-            (sOff + len <= dOff || dOff + len <= sOff))
-        {
-            memcpy(m_IRAM + dOff, m_IRAM + sOff, len);
-            n = len;
-            bBulkDone = TRUE;
-        }
     }
 
     if (!bBulkDone)
@@ -1640,9 +1208,11 @@ void SNSA1::DoDMA()
         }
     }
 
-    if (bDstBWRAM && len) MarkBWRAMDirty();
+    if (bDstBWRAM && len)
+        MarkBWRAMDirty();
     m_Reg[0x101] |= 0x20;
-    if (m_Reg[0x0A] & 0x20) m_Reg[0x0B] &= (Uint8)~0x20;
+    if (m_Reg[0x0A] & 0x20)
+        m_Reg[0x0B] &= (Uint8)~0x20;
 }
 
 void SNSA1::WriteRegister(Uint16 uAddr, Uint8 uData)
@@ -1711,11 +1281,6 @@ void SNSA1::WriteRegister(Uint16 uAddr, Uint8 uData)
             m_Reg[0x101] &= (Uint8)~uData;
             m_Reg[0x0B] = uData;
             return;
-        case 0x2210:
-        case 0x2212: case 0x2213: case 0x2214: case 0x2215:
-            m_Reg[i] = uData;
-            RebuildFastState();
-            return;
         case 0x2211:
             m_uHCounter = m_uVCounter = m_uPrevHCounter = 0;
             m_bTimerLastState = FALSE;
@@ -1757,7 +1322,6 @@ void SNSA1::WriteRegister(Uint16 uAddr, Uint8 uData)
             if (old == uData)
                 return;
             m_Reg[i] = uData;
-            RebuildFastState();
             if (m_pOwner)
             {
                 SNCpuT *pMainCpu = m_pOwner->GetCpu();
@@ -1769,22 +1333,16 @@ void SNSA1::WriteRegister(Uint16 uAddr, Uint8 uData)
             if (old == uData)
                 return;
             m_Reg[i] = uData;
-            RebuildFastState();
             MapSA1BWRAMWindow();
             SNCPUAbort(&m_Cpu);
             return;
         case 0x2226: case 0x2227: case 0x2228:
-            m_Reg[i] = uData;
-            RebuildFastState();
-            RefreshBWRAMDirectWrites();
-            return;
         case 0x2229: case 0x222A:
         case 0x2230:
             m_Reg[i] = uData;
             return;
         case 0x2231:
             m_Reg[i] = uData;
-            RebuildFastState();
             if (uData & 0x80)
             {
                 Bool bWasCharDMA = m_bCharDMA;
@@ -1800,11 +1358,9 @@ void SNSA1::WriteRegister(Uint16 uAddr, Uint8 uData)
         case 0x2232: case 0x2233: case 0x2234:
         case 0x2235:
             m_Reg[i] = uData;
-            RebuildFastState();
             return;
         case 0x2236:
             m_Reg[i] = uData;
-            RebuildFastState();
             if ((m_Reg[0x30] & 0xA4) == 0x80)
                 DoDMA();
             else if ((m_Reg[0x30] & 0xB0) == 0xB0)
@@ -1832,7 +1388,6 @@ void SNSA1::WriteRegister(Uint16 uAddr, Uint8 uData)
         case 0x223F:
             m_Reg[i] = uData;
             m_uBitmapFormat = (uData & 0x80) ? 2 : 4;
-            RebuildFastState();
             return;
         case 0x2240: case 0x2241: case 0x2242: case 0x2243:
         case 0x2244: case 0x2245: case 0x2246: case 0x2247:
@@ -1991,32 +1546,42 @@ void SNSA1::UpdateTimer(Uint32 nSA1Cycles)
 {
     Uint8 uTimer = m_Reg[0x10];
     Bool thisIRQ;
+    Uint32 hMax = (uTimer & 0x80) ? 0x800u : 1364u;
+    Uint32 vMax = (uTimer & 0x80) ? 0x200u : 262u;
 
     m_uPrevHCounter = m_uHCounter;
     m_uHCounter += nSA1Cycles;
-    while (m_uHCounter >= m_uTimerHMax)
+    while (m_uHCounter >= hMax)
     {
-        m_uHCounter -= m_uTimerHMax;
-        if (++m_uVCounter >= m_uTimerVMax) m_uVCounter = 0;
+        m_uHCounter -= hMax;
+        if (++m_uVCounter >= vMax) m_uVCounter = 0;
     }
 
+    /* AURORA_SA1_PERF_V8_3_2_20260903
+     * Counter reads remain live, but most code leaves timer IRQ compare off. */
     if (!(uTimer & 3))
     {
         m_bTimerLastState = FALSE;
         return;
     }
 
-    thisIRQ = TRUE;
-    if (uTimer & 1)
     {
-        Bool crossed =
-            (m_uPrevHCounter <= m_uTimerHTarget && m_uHCounter >= m_uTimerHTarget) ||
-            (m_uHCounter < m_uPrevHCounter &&
-             (m_uTimerHTarget >= m_uPrevHCounter || m_uTimerHTarget <= m_uHCounter));
-        if (!crossed) thisIRQ = FALSE;
+        Uint32 hTarget = ((Uint32)m_Reg[0x12] |
+                          ((Uint32)m_Reg[0x13] << 8)) * 4u;
+        Uint32 vTarget = (Uint32)m_Reg[0x14] |
+                         ((Uint32)m_Reg[0x15] << 8);
+        thisIRQ = TRUE;
+        if (uTimer & 1)
+        {
+            Bool crossed =
+                (m_uPrevHCounter <= hTarget && m_uHCounter >= hTarget) ||
+                (m_uHCounter < m_uPrevHCounter &&
+                 (hTarget >= m_uPrevHCounter || hTarget <= m_uHCounter));
+            if (!crossed) thisIRQ = FALSE;
+        }
+        if ((uTimer & 2) && m_uVCounter != vTarget)
+            thisIRQ = FALSE;
     }
-    if ((uTimer & 2) && m_uVCounter != m_uTimerVTarget)
-        thisIRQ = FALSE;
 
     if (!m_bTimerLastState && thisIRQ)
     {

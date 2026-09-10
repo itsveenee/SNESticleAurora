@@ -1,4 +1,3 @@
-/* AURORA_V13_UNIFIED_GBC_AUDIO_32X_FRAMESKIP_20260910 */
 /* AURORA_GAMBATTE_STANDALONE_V2_20260908
  *
  * Standalone Game Boy / Game Boy Color frontend for Aurora.
@@ -43,7 +42,6 @@ typedef char AuroraGbVideoPixelMustBe32Bit[
 static const Uint32 AURORA_GB_RAW_SAMPLE_RATE = 2097152U;
 static const Uint32 AURORA_GB_RAW_SAMPLES_PER_FRAME = 35112U;
 static const Uint32 AURORA_GB_RAW_SAMPLES_PER_RUN = 5120U; /* AURORA_GB_SAFE_AUDIO_BIOS_OPT_R3_20260909: nominal full-frame dispatches ceil(35112/4096)=9 -> ceil(35112/5120)=7; 1008 raw-frame reserve after documented +2064. */
-static const Uint32 AURORA_GB_RAW_SAMPLES_PER_BIOS_RUN = 6000U; /* AURORA_V13: BIOS-only batching; 6000+2064=8064 < 8192 scratch. */
 static const Uint32 AURORA_GB_AUDIO_DECIMATION = 32U; /* AURORA_GB_HOTFIX_R13F_STANDALONE_BOOT_AUDIO_Y_20260909_AUDIO: 65536-Hz intermediate; less box-filter harshness. */
 static const Uint32 AURORA_GB_AUDIO_RATE =
     AURORA_GB_RAW_SAMPLE_RATE / AURORA_GB_AUDIO_DECIMATION;
@@ -53,8 +51,6 @@ typedef char AuroraGbAudioRateMustBe65536[
     (AURORA_GB_AUDIO_RATE == 65536U) ? 1 : -1];
 typedef char AuroraGbAudioScratchMustCoverRunOverrun[
     (AURORA_GB_AUDIO_SCRATCH >= AURORA_GB_RAW_SAMPLES_PER_RUN + 2064U) ? 1 : -1];
-typedef char AuroraGbBiosAudioScratchMustCoverRunOverrun[
-    (AURORA_GB_AUDIO_SCRATCH >= AURORA_GB_RAW_SAMPLES_PER_BIOS_RUN + 2064U) ? 1 : -1];
 typedef char AuroraGbBiosAudioQueueMustCoverOneFrame[
     (AURORA_GB_BIOS_AUDIO_QUEUE >=
      (AURORA_GB_RAW_SAMPLES_PER_FRAME + AURORA_GB_AUDIO_SCRATCH +
@@ -1116,11 +1112,12 @@ static void AuroraGbOutputAudio(CMixBuffer *pMix,
             Uint32 packed = (Uint32)pPacked[pos + i];
             Int16 l = (Int16)(packed & 0xffffU);
             Int16 r = (Int16)((packed >> 16) & 0xffffU);
-            /* AURORA_V13_UNIFIED_GBC_AUDIO_32X_FRAMESKIP_20260910
-             * Preserve Gambatte's native left/right routing through the
-             * host boundary. No APU/register/state semantics change. */
-            left[i] = l;
-            right[i] = r;
+            Int16 mono = (Int16)(((Int32)l + (Int32)r) / 2);
+            /* AURORA_GB_FINAL_R1_MONO_OUTPUT_20260909
+             * Collapse only at the host mixer boundary. Gambatte's APU,
+             * routing registers, decimator and savestates remain stereo. */
+            left[i] = mono;
+            right[i] = mono;
         }
         pMix->OutputSamplesStereo(left, right, (Int32)batch);
         pos += batch;
@@ -1549,9 +1546,7 @@ void GambatteSystem::ExecuteFrame(Emu::SysInputT *pInput,
     while (!frameDone && rawTotal < AURORA_GB_RAW_SAMPLES_PER_FRAME &&
            guard++ < 32U)
     {
-        unsigned samples = biosAtFrameStart
-            ? AURORA_GB_RAW_SAMPLES_PER_BIOS_RUN
-            : AURORA_GB_RAW_SAMPLES_PER_RUN; /* AURORA_V13_UNIFIED_GBC_AUDIO_32X_FRAMESKIP_20260910 */
+        unsigned samples = AURORA_GB_RAW_SAMPLES_PER_RUN;
         long frameAt = m_p->gb.runFor(
             m_p->screen, 160,
             m_p->audioScratch, AURORA_GB_AUDIO_SCRATCH,

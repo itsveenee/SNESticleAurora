@@ -1,4 +1,3 @@
-/* AURORA_V13_UNIFIED_GBC_AUDIO_32X_FRAMESKIP_20260910 */
 
 #include <stdio.h>
 #include "types.h"
@@ -319,36 +318,6 @@ Int32 AudMixBuffer::ConvertSamplesStereo_Linear48(
         m_uLinearResamplePhase = 0;
         m_bLinearHavePrev = TRUE;
         i = 1;
-    }
-
-    /* AURORA_V13_UNIFIED_GBC_AUDIO_32X_FRAMESKIP_20260910
-     * GBC standalone feeds exactly 65,536 Hz. Since input rate > 48 kHz,
-     * the generic inner `while` can emit at most one host sample per input.
-     * Specialise that case without changing Q15 phase, interpolation, chunk
-     * state or output count. This removes a hot variable-rate loop/branches
-     * during the CGB boot ROM and normal gameplay. */
-    if (m_uSampleRate == 65536U)
-    {
-        for (; i < nInSamples && out < nMaxOut; ++i)
-        {
-            Int32 l0 = m_iLinearPrev[0], r0 = m_iLinearPrev[1];
-            Int32 l1 = pLeftSamples[i],   r1 = pRightSamples[i];
-
-            if (m_uLinearResamplePhase < 48000U)
-            {
-                Int32 frac = (Int32)((m_uLinearResamplePhase * 32768U) / 48000U);
-                pOutLeft[out] = (Int16)(l0 + (((l1 - l0) * frac) >> 15));
-                pOutRight[out] = (Int16)(r0 + (((r1 - r0) * frac) >> 15));
-                ++out;
-                m_uLinearResamplePhase += 65536U;
-            }
-            if (m_uLinearResamplePhase >= 48000U)
-                m_uLinearResamplePhase -= 48000U;
-
-            m_iLinearPrev[0] = l1;
-            m_iLinearPrev[1] = r1;
-        }
-        return out;
     }
 
     for (; i < nInSamples && out < nMaxOut; ++i)

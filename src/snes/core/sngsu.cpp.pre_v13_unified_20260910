@@ -1,4 +1,3 @@
-/* AURORA_V13_UNIFIED_GBC_AUDIO_32X_FRAMESKIP_20260910 */
 /*
  * sngsu.cpp - SuperFX / GSU core
  *
@@ -269,51 +268,11 @@ Uint8 SNGSU::CodeRead(Uint16 pc)
             Uint16 base = (Uint16)(m_CBR + lineBase);
             Bool bCodeFromRam = _SNGSUBankIsRam(m_PBR);
             Uint32 i;
-
-            if (bCodeFromRam)
+            for (i = 0; i < 16; i++)
             {
-                /* RAM reads retain their own timing and wrapping path. */
-                for (i = 0; i < 16; ++i)
-                    m_Cache[lineBase + i] = RawCodeRead((Uint16)(base + i));
-            }
-            else
-            {
-                Bool bFilled = FALSE;
-
-                /* AURORA_V12_SELF_AUDIT_GBC_FX1_20260910
-                 * Collapse only HOST clock-accounting work: legacy charged
-                 * exactly one external access for each of these 16 bytes. */
-                ChargeClocks(MemoryClockCost() * 16);
-
-                if (m_PBR >= 0x60)
-                {
-                    /* Non-RAM banks >= $60 are open/unmapped in this core. */
-                    memset(m_Cache + lineBase, 0xFF, 16);
-                    bFilled = TRUE;
-                }
-                else if (m_pRom && m_uRomSize >= 16 &&
-                         (m_uRomSize & m_uRomMask) == 0)
-                {
-                    Uint32 off = RomOffset(m_PBR, base);
-                    Uint32 phys = off & m_uRomMask;
-                    Bool bBusContiguous = (m_PBR < 0x40)
-                        ? (((Uint32)base & 0x7FFFu) <= 0x7FF0u)
-                        : ((Uint32)base <= 0xFFF0u);
-
-                    /* No GSU-bus or physical-ROM mirror may occur in-span. */
-                    if (bBusContiguous && phys + 16u <= m_uRomSize)
-                    {
-                        memcpy(m_Cache + lineBase, m_pRom + phys, 16);
-                        bFilled = TRUE;
-                    }
-                }
-
-                /* Boundary crossings / irregular ROMs keep exact old decode. */
-                if (!bFilled)
-                {
-                    for (i = 0; i < 16; ++i)
-                        m_Cache[lineBase + i] = RawCodeRead((Uint16)(base + i));
-                }
+                // RamReadByte() charges itself; ROM/unmapped bus does not.
+                if (!bCodeFromRam) ChargeClocks(MemoryClockCost());
+                m_Cache[lineBase + i] = RawCodeRead((Uint16)(base + i));
             }
             m_CacheValid |= (Uint32)1 << line;
         }
@@ -330,7 +289,7 @@ Uint8 SNGSU::CodeRead(Uint16 pc)
     {
         Bool bCodeFromRam = _SNGSUBankIsRam(m_PBR);
         if (!bCodeFromRam) ChargeClocks(MemoryClockCost());
-        b = RawCodeRead(pc);
+        b = RawCodeRead(pc);       // RAM path charges in RamReadByte()
     }
     return b;
 }
@@ -600,33 +559,23 @@ void SNGSU::PixFlush(Int32 nCache)
     }
     else
     {
-        /* AURORA_V12_SELF_AUDIT_GBC_FX1_20260910
-         * Keep exactly one emulated RAM read + write per bitplane, but merge
-         * all eight pixel bits at once instead of branching per pixel. */
-        const Uint8 writeMask = (Uint8)(
-            ((flags & 0x01u) << 7) | ((flags & 0x02u) << 5) |
-            ((flags & 0x04u) << 3) | ((flags & 0x08u) << 1) |
-            ((flags & 0x10u) >> 1) | ((flags & 0x20u) >> 3) |
-            ((flags & 0x40u) >> 5) | ((flags & 0x80u) >> 7));
-
+        /* Legacy partial-row path: preserve untouched pixels exactly. */
         for (Int32 b = 0; b < bpp; b++)
         {
             Uint32 addr = rowAddr + (Uint32)((b >> 1) * 16 + (b & 1));
-            Uint8 plane = (Uint8)(
-                (((pColor[0] >> b) & 1u) << 7) |
-                (((pColor[1] >> b) & 1u) << 6) |
-                (((pColor[2] >> b) & 1u) << 5) |
-                (((pColor[3] >> b) & 1u) << 4) |
-                (((pColor[4] >> b) & 1u) << 3) |
-                (((pColor[5] >> b) & 1u) << 2) |
-                (((pColor[6] >> b) & 1u) << 1) |
-                (((pColor[7] >> b) & 1u) << 0));
             Uint8 byte = RamReadByte(addr);
-            byte = (Uint8)((byte & (Uint8)~writeMask) | (plane & writeMask));
+            for (Int32 i = 0; i < 8; i++)
+            {
+                if (flags & (1 << i))
+                {
+                    Uint8 mask = (Uint8)(1 << (7 - i));
+                    if ((pColor[i] >> b) & 1) byte |= mask;
+                    else                          byte &= (Uint8)~mask;
+                }
+            }
             RamWriteByte(addr, byte);
         }
     }
-
     m_PixFlags[nCache] = 0;
 }
 

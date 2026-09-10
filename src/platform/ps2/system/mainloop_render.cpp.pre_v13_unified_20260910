@@ -1,4 +1,3 @@
-/* AURORA_V13_UNIFIED_GBC_AUDIO_32X_FRAMESKIP_20260910 */
 /* mainloop_render.cpp
  *
  * Hosts MainLoopRender() and the file-static state it needs
@@ -120,65 +119,40 @@ static void _MainLoopSafeFrameskipLearn(Uint32 delta, Bool gameplay)
     if (delta == 0)
         return;
 
-    /* AURORA_V13_UNIFIED_GBC_AUDIO_32X_FRAMESKIP_20260910
-     * Do not let one transition/first-frame timing sample permanently poison
-     * Auto. Before a period is established, acquire three mutually coherent
-     * VBlank intervals. A 25% disagreement restarts acquisition from the new
-     * sample instead of rejecting every later healthy sample forever. */
-    if (s_SafeFrameskipPeriod == 0)
+    if (s_SafeFrameskipPeriod != 0)
     {
-        if (s_SafeFrameskipSampleCount != 0)
+        if (gameplay)
         {
-            Uint32 lastPos = (s_SafeFrameskipSamplePos + 2u) % 3u;
-            Uint32 ref = s_SafeFrameskipSamples[lastPos];
-            if ((Uint64)delta * 4u < (Uint64)ref * 3u ||
-                (Uint64)delta * 4u > (Uint64)ref * 5u)
-            {
-                s_SafeFrameskipSamples[0] = delta;
-                s_SafeFrameskipSamples[1] = 0;
-                s_SafeFrameskipSamples[2] = 0;
-                s_SafeFrameskipSamplePos = 1u;
-                s_SafeFrameskipSampleCount = 1u;
+            /* Only a healthy single-VBlank presentation may refine timing. */
+            if ((Uint64)delta * 4u < (Uint64)s_SafeFrameskipPeriod * 3u ||
+                (Uint64)delta * 4u > (Uint64)s_SafeFrameskipPeriod * 5u)
                 return;
-            }
         }
-
-        s_SafeFrameskipSamples[s_SafeFrameskipSamplePos] = delta;
-        s_SafeFrameskipSamplePos = (s_SafeFrameskipSamplePos + 1u) % 3u;
-        if (s_SafeFrameskipSampleCount < 3u)
-            ++s_SafeFrameskipSampleCount;
-
-        if (s_SafeFrameskipSampleCount < 3u)
-            return;
-
-        s_SafeFrameskipPeriod = _MainLoopSafeFrameskipMedian3(
-            s_SafeFrameskipSamples[0],
-            s_SafeFrameskipSamples[1],
-            s_SafeFrameskipSamples[2]);
-        _MainLoopSafeFrameskipResetTiming();
-        return;
-    }
-
-    if (gameplay)
-    {
-        /* Only a healthy single-VBlank presentation may refine timing. */
-        if ((Uint64)delta * 4u < (Uint64)s_SafeFrameskipPeriod * 3u ||
-            (Uint64)delta * 4u > (Uint64)s_SafeFrameskipPeriod * 5u)
-            return;
-    }
-    else
-    {
-        if ((Uint64)delta * 3u < (Uint64)s_SafeFrameskipPeriod * 2u ||
-            (Uint64)delta * 2u > (Uint64)s_SafeFrameskipPeriod * 3u)
-            return;
+        else
+        {
+            /* Menu can teach PAL/NTSC drift while rejecting half/double noise. */
+            if ((Uint64)delta * 3u < (Uint64)s_SafeFrameskipPeriod * 2u ||
+                (Uint64)delta * 2u > (Uint64)s_SafeFrameskipPeriod * 3u)
+                return;
+        }
     }
 
     s_SafeFrameskipSamples[s_SafeFrameskipSamplePos] = delta;
     s_SafeFrameskipSamplePos = (s_SafeFrameskipSamplePos + 1u) % 3u;
-    s_SafeFrameskipPeriod = _MainLoopSafeFrameskipMedian3(
-        s_SafeFrameskipSamples[0],
-        s_SafeFrameskipSamples[1],
-        s_SafeFrameskipSamples[2]);
+    if (s_SafeFrameskipSampleCount < 3u)
+        ++s_SafeFrameskipSampleCount;
+
+    if (s_SafeFrameskipSampleCount == 1u)
+        s_SafeFrameskipPeriod = s_SafeFrameskipSamples[0];
+    else if (s_SafeFrameskipSampleCount == 2u)
+        s_SafeFrameskipPeriod = (Uint32)(
+            ((Uint64)s_SafeFrameskipSamples[0] +
+             (Uint64)s_SafeFrameskipSamples[1]) / 2u);
+    else
+        s_SafeFrameskipPeriod = _MainLoopSafeFrameskipMedian3(
+            s_SafeFrameskipSamples[0],
+            s_SafeFrameskipSamples[1],
+            s_SafeFrameskipSamples[2]);
 }
 
 Int32 MainLoopSafeFrameskipGetLevel(void)
@@ -306,9 +280,7 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
 
     /* PicoDrive Auto: if more than one target frame late, discard video,
      * limited by max_skip. Here the menu level IS max_skip. */
-    /* AURORA_V13: tolerate ordinary scheduling jitter; catch up only
-     * once host debt exceeds 1.25 learned VBlank periods. */
-    if ((Int64)diff * 4 < -(Int64)target * 5)
+    if (diff < -target)
     {
         if (s_SafeFrameskipConsecutive < (Uint32)s_SafeFrameskipLevel)
         {

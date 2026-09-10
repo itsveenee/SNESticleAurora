@@ -1,4 +1,3 @@
-/* AURORA_V13_UNIFIED_GBC_AUDIO_32X_FRAMESKIP_20260910 */
 #ifndef _SNSA1_H
 #define _SNSA1_H
 
@@ -119,33 +118,6 @@ private:
     Uint32 m_nBWRAMBytes;
     Uint32 m_uBWRAMMask; /* V8.3.2: size-1 when power-of-two, else 0 */
 
-    /* AURORA_SA1_SAFE_PERF_V9_20260910
-     * Derived state for byte-granular hot paths. None is serialized:
-     * Reset/RestoreState/WriteRegister rebuild it from architectural regs. */
-    Uint32 m_uMainBWRAMBase;
-    Uint32 m_uSA1BWRAMBase;
-    Uint32 m_uSA1BitmapBaseBytes;
-    Uint32 m_uSA1BitmapPixelBase;
-    Uint32 m_uBWRAMProtectLimit;
-    Bool   m_bSA1BWRAMBitmap;
-    Bool   m_bBWRAMProtectActive;
-
-    /* AURORA_SA1_SAFE_PERF_V10_20260910
-     * Further derived-only hot state; never serialized. */
-    Bool   m_bDirectBWRAMWrite;
-    Uint32 m_uCCDSA;
-    Uint32 m_uCCDDA;
-    Uint32 m_uCCBPL;
-    Uint32 m_uTimerHMax;
-    Uint32 m_uTimerVMax;
-    Uint32 m_uTimerHTarget;
-    Uint32 m_uTimerVTarget;
-    Uint8  m_uCCBPP;
-    Uint8  m_uCCCharMask;
-    Uint8  m_uCCDmaSize;
-    Uint8  m_uCCTileXMask;
-    Uint8  m_uCCTileShift;
-
     Uint8 m_Reg[0x200];       /* $2200-$23FF backing/status */
     Uint8 m_IRAM[0x800];      /* real 2 KiB SA-1 I-RAM */
     Uint8 m_CharData[0x80];   /* CC2 staging, not hidden in ROM storage */
@@ -171,20 +143,6 @@ private:
     static Uint8 SNCPU_TRAPFUNC ReadCPU(SNCpuT *pCpu, Uint32 uAddr);
     static void  SNCPU_TRAPFUNC WriteCPU(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData);
 
-    /* V9: narrow traps avoid the full ReadBus/WriteBus decoder on known pages. */
-    static Uint8 SNCPU_TRAPFUNC ReadLow0CPU(SNCpuT *pCpu, Uint32 uAddr);
-    static void  SNCPU_TRAPFUNC WriteLow0CPU(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData);
-    static Uint8 SNCPU_TRAPFUNC ReadLow1CPU(SNCpuT *pCpu, Uint32 uAddr);
-    static void  SNCPU_TRAPFUNC WriteLow1CPU(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData);
-    static Uint8 SNCPU_TRAPFUNC ReadBWRAMWindowCPU(SNCpuT *pCpu, Uint32 uAddr);
-    static void  SNCPU_TRAPFUNC WriteBWRAMWindowCPU(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData);
-    static Uint8 SNCPU_TRAPFUNC ReadBWRAMLinearCPU(SNCpuT *pCpu, Uint32 uAddr);
-    static void  SNCPU_TRAPFUNC WriteBWRAMLinearCPU(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData);
-    static Uint8 SNCPU_TRAPFUNC ReadBitmapCPU(SNCpuT *pCpu, Uint32 uAddr);
-    static void  SNCPU_TRAPFUNC WriteBitmapCPU(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData);
-    static Uint8 SNCPU_TRAPFUNC ReadROMCPU(SNCpuT *pCpu, Uint32 uAddr);
-    static void  SNCPU_TRAPFUNC WriteROMCPU(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData);
-
     Uint8 ReadBus(Uint32 uAddr, Uint8 uOpenBus);
     void  WriteBus(Uint32 uAddr, Uint8 uData);
 
@@ -202,8 +160,6 @@ private:
     void MapSA1BWRAMWindow();
     void MapMainBWRAMWindow(SNCpuT *pMainCpu);
     void MapSA1CPU();
-    void RebuildFastState();
-    void RefreshBWRAMDirectWrites();
 
     Uint32 MainBWRAMOffset(Uint32 uAddr, Bool *pOK) const;
     Uint32 SA1BWRAMOffset(Uint32 uAddr, Bool *pOK, Bool *pBitmap) const;
