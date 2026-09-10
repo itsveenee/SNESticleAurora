@@ -1116,11 +1116,10 @@ static void AuroraGbOutputAudio(CMixBuffer *pMix,
             Uint32 packed = (Uint32)pPacked[pos + i];
             Int16 l = (Int16)(packed & 0xffffU);
             Int16 r = (Int16)((packed >> 16) & 0xffffU);
-            /* AURORA_V13_UNIFIED_GBC_AUDIO_32X_FRAMESKIP_20260910
-             * Preserve Gambatte's native left/right routing through the
-             * host boundary. No APU/register/state semantics change. */
-            left[i] = l;
-            right[i] = r;
+            Int16 mono = (Int16)(((Int32)l + (Int32)r) / 2);
+            /* GB/GBC internal speaker: mono signal replicated to host L/R. */
+            left[i] = mono;
+            right[i] = mono;
         }
         pMix->OutputSamplesStereo(left, right, (Int32)batch);
         pos += batch;
