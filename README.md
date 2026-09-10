@@ -61,8 +61,8 @@ Emulation:
 
 User interface:
 
-* Save SRAM to USB
-* Browse SRAM files
+* Save SRAM and states to USB
+* Browse SRAM and state files
 * Confirmation prompt for saving and loading states
 * Faster UI navigation
 * Many options to enable emulation hacks and compatibility modes (exchange accuracy for performance or vice-versa)
