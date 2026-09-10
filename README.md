@@ -7,11 +7,11 @@ SNESticle Aurora is based on **SNESticle Revive by @ReyFxck (Thomas R.)**, whose
 <!-- AURORA_CORE_NOTICES_V6_20260824 -->
 NES emulation through **QuickNES** and **FCEUmm** (for Disk System only) is based on: the **QuickNES core originally by Shay Green**, with the libretro core maintained by **libretro contributors**, using `itsveenee/QuickNES_Core` as a pinned Git submodule for its PS2 integration (see [THIRD_PARTY.md](THIRD_PARTY.md) and `LICENSES/QuickNES-GPL-2.0.txt`); **FCEUmm**, using the pinned `itsveenee/Fceumm-PS2` Git submodule at `src/third_party/fceumm-fds` (FDS firmware is **not included**: users must provide `disksys.rom` in `SNESticle/SYSTEM`) (see [THIRD_PARTY.md](THIRD_PARTY.md) and `LICENSES/FCEUmm-GPL-2.0.txt`).
 
-Mega Drive, Master System, Game Gear, 32X and Sega CD emulation through **PicoDrive** is based on the emulator originally by **notaz**, with current PicoDrive/libretro work by **irixxxx and other contributors**. Sega CD is exposed experimentally through path-only `.cue` loading; users provide a matching regional BIOS in `SNESticle/SYSTEM`. See [THIRD_PARTY.md](THIRD_PARTY.md) and `LICENSES/PicoDrive-COPYING.txt`.
+Mega Drive, Master System, Game Gear, 32X and Sega CD emulation through **PicoDrive** is based on the emulator originally by **notaz**, with current PicoDrive/libretro work by **irixxxx and other contributors**. For CD games, users must provide a matching regional BIOS in `SNESticle/SYSTEM`. See [THIRD_PARTY.md](THIRD_PARTY.md) and `LICENSES/PicoDrive-COPYING.txt`.
 
-PC Engine / TurboGrafx-16 emulation through **Beetle PC Engine Fast** is based on the libretro port/fork of **Mednafen PCE Fast**, maintained by libretro and Mednafen contributors. Aurora uses `itsveenee/beetle-pce-fast-libretro` with PS2-specific integration and optimization. HuCard (`.pce`, including ZIP/GZ paths) and experimental PC Engine CD `.cue` loading are exposed; CD firmware is user-supplied in `SNESticle/SYSTEM`. See [THIRD_PARTY.md](THIRD_PARTY.md) and `LICENSES/Beetle-PCE-Fast-GPL-2.0.txt`.
+PC Engine / TurboGrafx-16 emulation through **Beetle PC Engine Fast** is based on the libretro port/fork of **Mednafen PCE Fast**, maintained by libretro and Mednafen contributors. Aurora uses `itsveenee/beetle-pce-fast-libretro` with PS2-specific integration and optimization. For CD games, firmware must be user-supplied in `SNESticle/SYSTEM`. See [THIRD_PARTY.md](THIRD_PARTY.md) and `LICENSES/Beetle-PCE-Fast-GPL-2.0.txt`.
 
-Game Boy and Super Game Boy emulation use **Gambatte**. Standalone Game Boy / Game Boy Color emulation runs Gambatte directly, while Super Game Boy uses Gambatte as the embedded Game Boy CPU/PPU/APU/MBC backend with Aurora emulating the SNES and ICD2 side. Both paths are **experimental**. See [THIRD_PARTY.md](THIRD_PARTY.md) and `LICENSES/Gambatte-GPL-2.0.txt`. <!-- AURORA_GB_FINAL_R1_README_20260909 -->
+Game Boy and Super Game Boy emulation use **Gambatte**. See [THIRD_PARTY.md](THIRD_PARTY.md) and `LICENSES/Gambatte-GPL-2.0.txt`. <!-- AURORA_GB_FINAL_R1_README_20260909 -->
 
 SNESticle Aurora code covered by the GPL remains under GNU GPLv2; separately licensed third-party components remain under their own terms. **Code license and project branding are separate.** The applicable software licenses grant rights in the code; they **do not grant permission to use the SNESticle Aurora name** or the project-specific **Aurora** identity/branding for an unofficial fork, modified build, redistributed binary, or derivative project. Unless separately authorized by **@itsveenee**, use a distinct project/product name and distinct branding. Factual attribution such as “based on SNESticle Aurora” remains welcome. See [BRANDING.md](BRANDING.md).
 
@@ -41,9 +41,8 @@ If the repository was cloned without `--recurse-submodules`, run
 
 Emulation:
 
-* NES emulation with QuickNES, Famicom Disk System through FCEUmm (no firmware included)
 * Support added for more NES mappers: 13, 16, 18, 27, 48, 64, 65, 67, 68, 72, 77, 80, 82, 92, 96, 99, 101, 105, 118, 119, 151, 153, 155, 157, 158, 159, 185, 188, 210, 216, and 552. Every licensed NES and Famicom game will boot now.
-* Famicom Disk System (firmware not included) with FCEUmm, press L2+TRIANGLE to change the disk side.
+* Famicom Disk System (firmware not included), press L2+TRIANGLE to change the disk side.
 * Changed SRAM and RAM initialization for both NES and SNES. This will fix all the very few games that rely on specific initial values to work properly.
 * Mega Drive / Genesis + Sega Master System / Mark III + Game Gear + 32X + Sega CD emulation with PicoDrive
 * PC Engine / TurboGrafx-16 HuCard and PC Engine CD emulation with Beetle PCE Fast
@@ -53,12 +52,12 @@ Emulation:
 * Turbo button toggle (hold R2+ANY BUTTON) for SNES and MD games
 * In-game soft reset (L2+SELECT)
 * SNES and MD mouse emulation
-* ASCII Turbo File for Famicom and Super Famicom (accessory for many ASCII games)
+* ASCII Turbo File for Famicom, Super Famicom and Game Boy (accessory for many ASCII games)
 * Battle Box for Famicom (accessory for Armadillo)
 * Arkanoid Pad for Famicom (accessory for Arkanoid and Arkanoid II)
 * Famicom Microphone (L2+START)
 * NES Zapper / Famicom Light Gun (X to shoot, L2+SQUARE to simulate shooting away from the screen)
-* Region selector
+* Region selector (all consoles)
 
 User interface:
 
@@ -86,7 +85,7 @@ CD firmware and images **(experimental)**
 
 **FIXED:**
 
-* PC Engine video modes (Ninja Spirits, Aoi Blink, Toumaden, more)
+* PC Engine alternative video modes (Ninja Spirits, Aoi Blink, Toumaden, Puyo Puyo, more)
 * Pilotwings (SNES) and Secret of Mana (SNES) mode 7 rendering, also fixes other games that rely on it
 * Secret of Mana (SNES) mode 5 rendering, also fixes other games that rely on it
 * Accele Brid (SNES) freeze fix
@@ -98,10 +97,11 @@ CD firmware and images **(experimental)**
 
 * SNES SA-1 Emulation (experimental state)
 * SNES FX1 and FX2 emulation (experimental state)
-* PC Engine CD and Sega CD performance
+* PC Engine CD and Sega CD performance (experimental state)
+* 32X emulation (experimental state)
 * SMB (ethernet crossover cable) connection
 * Krazy Creatures (NES) minor graphical glitches
-* Super Mario World 2 (SNES) performance
+* Super Mario World 2 (SNES) performance (Super FX2)
 * The Lost Vikings 1 and 2 (SNES) black screen
 * Addams Family (SNES) graphical glitches and timing issues
 * Sunset Riders (SNES) graphical glitches
