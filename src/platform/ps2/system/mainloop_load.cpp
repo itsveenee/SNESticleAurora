@@ -4080,13 +4080,8 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
         bSgbCompatible = (!bGbcFile && _RomData[0x146] == 0x03U)
             ? TRUE : FALSE;
 
-        if (bSgbCompatible)
-            bSgbCompatible = FALSE; /* TEMP_FORCE_ALL_GB_TO_CGB */
-            eGbMode = (gbMode == 2)
-                ? GambatteSystem::STANDALONE_SGB2_DYNAMIC
-                : GambatteSystem::STANDALONE_SGB1_DYNAMIC;
-        else
-            eGbMode = GambatteSystem::STANDALONE_CGB;
+        /* TEMP_FORCE_ALL_GB_TO_CGB */
+        eGbMode = GambatteSystem::STANDALONE_CGB;
 
         gbcBiosPath[0] = 0;
         if (eGbMode == GambatteSystem::STANDALONE_CGB)
