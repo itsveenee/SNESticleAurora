@@ -103,6 +103,36 @@ static Bool _MainLoopSegaExtEquals(const char *pName, const char *pExt)
     return (*p == '\0' && *pExt == '\0') ? TRUE : FALSE;
 }
 
+/* AURORA_GB_FINAL_R1_STRICT_EXTENSION_ROUTING_20260909
+ * The frontend selector names hardware policy, but the cartridge extension
+ * still has one hard rule: .gbc is always a CGB image and never enters the
+ * SNES/SGB shell. A .gb selected as GBC remains standalone Gambatte in DMG
+ * mode with Aurora's SGB title palette database. ZIP already exposes its
+ * member name here; accept the common .gbc.gz spelling as well. */
+static Bool _MainLoopGbContentIsGbc(const char *pName)
+{
+    const char *begin, *end, *ext;
+    size_t n;
+
+    if (!pName || !*pName)
+        return FALSE;
+
+    begin = pName;
+    end = pName + strlen(pName);
+    n = (size_t)(end - begin);
+    if (n >= 3U && !strncasecmp(end - 3, ".gz", 3))
+        end -= 3;
+
+    ext = end;
+    while (ext > begin && ext[-1] != '.' && ext[-1] != '/' &&
+           ext[-1] != '\\' && ext[-1] != ':')
+        --ext;
+
+    return (ext > begin && ext[-1] == '.' &&
+            (size_t)(end - ext) == 3U &&
+            !strncasecmp(ext, "gbc", 3)) ? TRUE : FALSE;
+}
+
 /* AURORA_MD_PRELOAD_VECTOR_PROBE_V4_2
  *
  * Mega Drive begins with big-endian 68000 reset vectors. A normal initial
@@ -3852,10 +3882,12 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
             _MainLoop_fOutputIntensity = 1.0f;
             break;
         case MAINLOOP_ENTRYTYPE_GBROM:
-            pSystem = (VideoGetGameBoyMode() == 0) ? (Emu::System *)_pGb
-                                                   : (Emu::System *)_pSnes;
+            /* AURORA_GB_STANDALONE_DYNAMIC_R4_20260909
+             * GB/GBC never selects the SNES core here.  SGB1/SGB2 are now
+             * standalone Gambatte presentation modes only. */
+            pSystem = (Emu::System *)_pGb;
             pRom = NULL; pBios = NULL;
-            _MainLoop_fOutputIntensity = 1.0f; /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909 */
+            _MainLoop_fOutputIntensity = 1.0f;
             break;
         case MAINLOOP_ENTRYTYPE_PCEROM:
             pSystem = _pPce; pRom = _pPceRom; pBios = NULL;
@@ -4017,87 +4049,90 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
     if (eType == MAINLOOP_ENTRYTYPE_GBROM)
     {
         Int32 gbMode = VideoGetGameBoyMode();
-        if (gbMode == 0)
+        Bool bGbcFile;
+        Bool bSgbCompatible;
+        GambatteSystem::StandaloneModeE eGbMode;
+        Uint8 gbcBios[0x900];
+        Uint32 gbcBiosBytes = 0;
+        Char gbcBiosPath[1024];
+
+        if (!_RomData || nRomBytes < 0x150)
         {
-            Bool bCgbCapable;
-            Bool bSgbCompatible;
-            GambatteSystem::StandaloneModeE eGbMode;
-            Uint8 gbcBios[0x900];
-            Uint32 gbcBiosBytes = 0;
-            Char gbcBiosPath[1024];
-
-            if (!_RomData || nRomBytes < 0x150)
-            {
-                _MainLoopFreeRomBuffer();
-                _MainLoopUnloadRom();
-                MainLoopModalPrintf(60 * 4, "ERROR: invalid Game Boy image");
-                return FALSE;
-            }
-
-            bCgbCapable = (_RomData[0x143] & 0x80U) ? TRUE : FALSE;
-            bSgbCompatible = (!bCgbCapable && _RomData[0x146] == 0x03U)
-                ? TRUE : FALSE;
-            eGbMode = bSgbCompatible
-                ? GambatteSystem::STANDALONE_SGB_PALETTE
-                : GambatteSystem::STANDALONE_CGB;
-
-            gbcBiosPath[0] = 0;
-            if (eGbMode == GambatteSystem::STANDALONE_CGB)
-            {
-                if (!_MainLoopLoadRequiredGbcBios(
-                        gbcBios, sizeof(gbcBios), gbcBiosPath, sizeof(gbcBiosPath)))
-                {
-                    _MainLoopFreeRomBuffer();
-                    _MainLoopUnloadRom();
-                    MainLoopModalPrintf(60 * 7,
-                        "GBC requires retail CGB BIOS CRC32 41884E46 in SYSTEM");
-                    return FALSE;
-                }
-                gbcBiosBytes = sizeof(gbcBios);
-            }
-
-            if (!_pGb || !_pGb->LoadGame(
-                    _RomData, (Uint32)nRomBytes, uRomIdentityCRC,
-                    eGbMode, gbcBiosBytes ? gbcBios : NULL, gbcBiosBytes))
-            {
-                _MainLoopFreeRomBuffer();
-                _MainLoopUnloadRom();
-                MainLoopModalPrintf(60 * 4,
-                    "ERROR: Gambatte cannot run this Game Boy image");
-                return FALSE;
-            }
-
-            _pSystem = _pGb;
-            snprintf(_RomPath, sizeof(_RomPath), "%s", OriginalPath);
-            MainLoopStateOnRomChanged();
-            MainLoopStatePrimeRomIdentityCRC(uRomIdentityCRC);
-            _MainLoopSetSampleRate(_pGb->GetSampleRate());
-            if (bLoadSRAM) _MainLoopLoadSRAM();
-
-            _fbTexture[0]->Clear();
-            TextureUpload(&_OutTex, _fbTexture[0]->GetLinePtr(0));
-            ConPrint("GB Loaded: %s [GBC option: %s%s%s]\n",
-                     pFileName,
-                     eGbMode == GambatteSystem::STANDALONE_CGB
-                         ? "CGB BIOS" : "standalone SGB palette",
-                     bCgbCapable ? ", CGB cart" : "",
-                     _pGb->HasTurboFile() ? ", ASCII Turbo File" : "");
             _MainLoopFreeRomBuffer();
-            return TRUE;
+            _MainLoopUnloadRom();
+            MainLoopModalPrintf(60 * 4, "ERROR: invalid Game Boy image");
+            return FALSE;
         }
 
-        /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909: real SGB1/SGB2 path. */
-        MainLoopStatusPrintf(60 * 30,
-            gbMode == 2 ? "Loading SGB2 BIOS and game file..."
-                        : "Loading SGB1 BIOS and game file...");
-        MainLoopRender();
-        MainLoopRender();
+        /* AURORA_GB_STANDALONE_R5_ROUTE_BIOS_TURBO_20260909
+         * Deterministic automatic system choice:
+         *   .gbc                       -> CGB
+         *   .gb + SGB flag 0x146=0x03 -> standalone dynamic SGB
+         *   .gb without SGB flag       -> CGB
+         *
+         * Do NOT consult 0x143 to override an explicit .gb filename here:
+         * the requested Aurora policy gives .gb+SGB precedence.  Do NOT use
+         * the menu to choose CGB-vs-SGB either.  Once the ROM itself selected
+         * SGB, an explicit SGB2 menu value may select the SGB2 post-boot
+         * identity; GBC/SGB1 menu values both mean SGB1 for such a ROM.
+         * Static 1-A/2-A/etc palettes are never a fallback. */
+        bGbcFile = _MainLoopGbContentIsGbc(FileName) ? TRUE : FALSE;
+        bSgbCompatible = (!bGbcFile && _RomData[0x146] == 0x03U)
+            ? TRUE : FALSE;
 
-        Bool ok = _MainLoopBootSuperGameBoy(_RomData, (Uint32)nRomBytes,
-                                             OriginalPath, uRomIdentityCRC, bLoadSRAM);
+        if (bSgbCompatible)
+            bSgbCompatible = FALSE; /* TEMP_FORCE_ALL_GB_TO_CGB */
+            eGbMode = (gbMode == 2)
+                ? GambatteSystem::STANDALONE_SGB2_DYNAMIC
+                : GambatteSystem::STANDALONE_SGB1_DYNAMIC;
+        else
+            eGbMode = GambatteSystem::STANDALONE_CGB;
+
+        gbcBiosPath[0] = 0;
+        if (eGbMode == GambatteSystem::STANDALONE_CGB)
+        {
+            if (!_MainLoopLoadRequiredGbcBios(
+                    gbcBios, sizeof(gbcBios), gbcBiosPath, sizeof(gbcBiosPath)))
+            {
+                _MainLoopFreeRomBuffer();
+                _MainLoopUnloadRom();
+                MainLoopModalPrintf(60 * 7,
+                    "GBC requires retail CGB BIOS CRC32 41884E46 in SYSTEM");
+                return FALSE;
+            }
+            gbcBiosBytes = sizeof(gbcBios);
+        }
+
+        if (!_pGb || !_pGb->LoadGame(
+                _RomData, (Uint32)nRomBytes, uRomIdentityCRC,
+                eGbMode, gbcBiosBytes ? gbcBios : NULL, gbcBiosBytes))
+        {
+            _MainLoopFreeRomBuffer();
+            _MainLoopUnloadRom();
+            MainLoopModalPrintf(60 * 4,
+                "ERROR: Gambatte cannot run this Game Boy image");
+            return FALSE;
+        }
+
+        _pSystem = _pGb;
+        snprintf(_RomPath, sizeof(_RomPath), "%s", OriginalPath);
+        MainLoopStateOnRomChanged();
+        MainLoopStatePrimeRomIdentityCRC(uRomIdentityCRC);
+        _MainLoopSetSampleRate(_pGb->GetSampleRate());
+        if (bLoadSRAM) _MainLoopLoadSRAM();
+
+        _fbTexture[0]->Clear();
+        TextureUpload(&_OutTex, _fbTexture[0]->GetLinePtr(0));
+        ConPrint("GB Loaded: %s [standalone: %s%s%s]\n",
+                 pFileName,
+                 eGbMode == GambatteSystem::STANDALONE_CGB
+                     ? "CGB"
+                     : (eGbMode == GambatteSystem::STANDALONE_SGB2_DYNAMIC
+                         ? "SGB2 dynamic" : "SGB1 dynamic"),
+                 bGbcFile ? ", .gbc" : "",
+                 _pGb->HasTurboFile() ? ", ASCII Turbo File" : "");
         _MainLoopFreeRomBuffer();
-        if (!ok) _MainLoopUnloadRom();
-        return ok;
+        return TRUE;
     }
 
     if (pBios)
