@@ -11,7 +11,7 @@ Mega Drive, Master System, Game Gear, 32X and Sega CD emulation through **PicoDr
 
 PC Engine / TurboGrafx-16 emulation through **Beetle PC Engine Fast** is based on the libretro port/fork of **Mednafen PCE Fast**, maintained by libretro and Mednafen contributors. Aurora uses `itsveenee/beetle-pce-fast-libretro` with PS2-specific integration and optimization. For CD games, firmware must be user-supplied in `SNESticle/SYSTEM`. See [THIRD_PARTY.md](THIRD_PARTY.md) and `LICENSES/Beetle-PCE-Fast-GPL-2.0.txt`.
 
-Game Boy and Super Game Boy emulation use **Gambatte**. See [THIRD_PARTY.md](THIRD_PARTY.md) and `LICENSES/Gambatte-GPL-2.0.txt`. <!-- AURORA_GB_FINAL_R1_README_20260909 -->
+Game Boy and Color emulation use Gambatte, an open-source Game Boy / Game Boy Color emulator originally developed by Sinamas, with subsequent development and maintenance by additional contributors. Firmware must be user-supplied in `SNESticle/SYSTEM`. See THIRD_PARTY.md and LICENSES/Gambatte-GPL-2.0.txt for attribution, licensing information, and additional details.
 
 SNESticle Aurora code covered by the GPL remains under GNU GPLv2; separately licensed third-party components remain under their own terms. **Code license and project branding are separate.** The applicable software licenses grant rights in the code; they **do not grant permission to use the SNESticle Aurora name** or the project-specific **Aurora** identity/branding for an unofficial fork, modified build, redistributed binary, or derivative project. Unless separately authorized by **@itsveenee**, use a distinct project/product name and distinct branding. Factual attribution such as “based on SNESticle Aurora” remains welcome. See [BRANDING.md](BRANDING.md).
 
