@@ -41,14 +41,14 @@ If the repository was cloned without `--recurse-submodules`, run
 
 Emulation:
 
-* Support added for more NES mappers: 13, 16, 18, 27, 48, 64, 65, 67, 68, 72, 77, 80, 82, 92, 96, 99, 101, 105, 118, 119, 151, 153, 155, 157, 158, 159, 185, 188, 210, 216, and 552. Every licensed NES and Famicom game will boot now.
+* Support added for more NES mappers: 13, 16, 18, 27, 48, 64, 65, 67, 68, 72, 77, 80, 82, 92, 96, 99, 101, 105, 118, 119, 151, 153, 155, 157, 158, 159, 185, 188, 210, 216, and 552. Every licensed NES and Famicom game and most of the bootleg and unlicensed games will boot now.
 * Famicom Disk System (firmware not included), press L2+TRIANGLE to change the disk side.
 * Changed SRAM and RAM initialization for both NES and SNES. This will fix all the very few games that rely on specific initial values to work properly.
 * Mega Drive / Genesis + Sega Master System / Mark III + Game Gear + 32X + Sega CD emulation with PicoDrive
 * PC Engine / TurboGrafx-16 HuCard and PC Engine CD emulation with Beetle PCE Fast
-* Super Game Boy emulation with Gambatte (experimental)
+* Game Boy + Color emulation with Gambatte
 * Fixes and improvements for the 240p display modes, improved screen positioning and overscan settings for each system and graphical resolution/modes.
-* Dedicated turbo buttons for NES, PCE, GG and SMS games
+* Dedicated turbo buttons for NES, GB, GBC, PCE, GG and SMS games
 * Turbo button toggle (hold R2+ANY BUTTON) for SNES and MD games
 * In-game soft reset (L2+SELECT)
 * SNES and MD mouse emulation
@@ -110,6 +110,7 @@ CD firmware and images **(experimental)**
 
 **TO BE ADDED:**
 
+* More light gun accessories support
 * Other stupid (or not-so-stupid) ideas I might come up with. Thanks!
 
 
