@@ -34,3 +34,7 @@ src/platform/ps2/iop/aurora_ps2mouse/obj/
 !tools/prepare_fceumm_fds_sources.py
 
 !tools/prepare_gambatte_sgb_sources.py
+
+# Required gpSP build tools
+!tools/namespace_gpsp_archive.py
+!tools/prepare_gpsp_aurora_sources.py
