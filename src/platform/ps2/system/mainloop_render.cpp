@@ -570,6 +570,7 @@ void MainLoopRender()
     /* AURORA_GPSP_GBA_V14_NATIVE_SQUARE_20260911
      * Interlaced 2x2 handheld presentation leaves physical side bars, so use
      * the existing complete framebuffer clear instead of full-width fast-clear. */
+    /* AURORA_GAMBATTE_SQUARE_CLEAR_V13_20260911: retained and extended by GBA V14. */
     GSK_SetGameplayFastClear(
         (!_bMenu && _pSystem && !_MainLoop_BlackScreen &&
          !(GSK_GetActiveVideoMode() != GSK_VIDMODE_240P &&
@@ -669,6 +670,7 @@ void MainLoopRender()
             /* AURORA_GPSP_GBA_V14_NATIVE_SQUARE_20260911
              * Scope the 480i/1080i 2x2 transform to the handheld game image;
              * overlays/status/modal geometry immediately returns to normal. */
+            /* AURORA_GAMBATTE_DRAW_SCOPE_V13_20260911: retained and extended by GBA V14. */
             const Bool bHandheldSquareDraw =
                 (GSK_GetActiveVideoMode() != GSK_VIDMODE_240P &&
                  bSquareHandheldGameplay) ? TRUE : FALSE;
