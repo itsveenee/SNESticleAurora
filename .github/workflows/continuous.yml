@@ -38,6 +38,38 @@ jobs:
           test -f tools/Makefile.fceumm-fds-ps2
           test -f tools/prepare_fceumm_fds_sources.py
           test -f tools/namespace_fceumm_fds_archive.py
+          # AURORA_GPSP_GBA_V1_20260911
+          test -f src/third_party/gpsp/Makefile
+          test -f src/third_party/gpsp/COPYING
+          test -f src/third_party/gpsp/libretro/libretro.c
+          test -f tools/namespace_gpsp_archive.py
+          test -f tools/prepare_gpsp_aurora_sources.py # AURORA_GPSP_GBA_V2_TFA_BLEND_20260911
+          grep -q 'AURORA_GPSP_GBA_V13_SAFE_PERF_20260911' src/gba/system/gpspsystem.cpp
+          grep -q 'AURORA_GAMBATTE_SQUARE_ASPECT_V13_20260911' src/gb/system/gambattesystem.cpp
+          grep -q 'AURORA_GAMBATTE_SQUARE_ASPECT_V13_20260911' src/platform/ps2/gs/gskit_backend.c
+          grep -q 'AURORA_GAMBATTE_SQUARE_ASPECT_V13_20260911' src/platform/ps2/system/mainloop_render.cpp
+          grep -q 'AURORA_GAMBATTE_TARGET_INIT_V13_20260911' src/gb/system/gambattesystem.cpp
+          grep -q 'AURORA_GAMBATTE_SQUARE_CLEAR_V13_20260911' src/platform/ps2/system/mainloop_render.cpp
+          grep -q 'AURORA_GAMBATTE_DRAW_SCOPE_V13_20260911' src/platform/ps2/gs/gskit_backend.h
+          grep -q 'AURORA_GAMBATTE_DRAW_SCOPE_V13_20260911' src/platform/ps2/gs/gskit_backend.c
+          grep -q 'AURORA_GAMBATTE_DRAW_SCOPE_V13_20260911' src/platform/ps2/system/mainloop_render.cpp
+          grep -q 'AURORA_GPSP_GBA_V13_SAFE_PERF_20260911' src/platform/ps2/system/mainloop_state.cpp
+          grep -q 'AURORA_GPSP_GBA_V13_SAFE_PERF_20260911' tools/prepare_gpsp_aurora_sources.py
+          grep -q 'AURORA_GPSP_GBA_V13_BITMASK_TURBO_INPUT_20260911' src/gba/system/gpspsystem.cpp
+          grep -q 'AURORA_GPSP_GBA_V13_SHOULDER_TURBO_CORE_20260911' tools/prepare_gpsp_aurora_sources.py
+          grep -q 'AURORA_GPSP_GBA_V13_CORE_SAFE_PERF_20260911' tools/prepare_gpsp_aurora_sources.py
+          grep -q 'AURORA_GPSP_GBA_V13_BITMASK_INPUT_20260911' src/gba/system/gpspsystem.cpp
+          grep -q 'AURORA_GPSP_GBA_V13_SCALER_LUT_20260911' src/gba/system/gpspsystem.cpp
+          grep -q 'AURORA_GPSP_GBA_V13_POSTFX_SAFE_FRAMESKIP_CC_20260911' tools/prepare_gpsp_aurora_sources.py
+          grep -q 'AURORA_GPSP_GBA_V13_SAFE_FRAMESKIP_BRIDGE_20260911' src/gba/system/gpspsystem.cpp
+          grep -q 'AURORA_GPSP_GBA_V13_PS2_COLOR_CORRECTION_20260911' src/gba/system/gpspsystem.cpp
+          grep -q 'aurora_mix_history_valid' tools/prepare_gpsp_aurora_sources.py
+          grep -q 'aurora_set_frontend_skip' tools/prepare_gpsp_aurora_sources.py
+          grep -q 'ROM_BUFFER_SIZE=8' tools/prepare_gpsp_aurora_sources.py
+          grep -Fq 'ROM_TRANSLATION_CACHE_SIZE (1024 * 1024 * 4)' tools/prepare_gpsp_aurora_sources.py
+          grep -q 'SyncDCache(baseaddr, endptr)' tools/prepare_gpsp_aurora_sources.py
+          grep -q '0x7BDE7BDEU' tools/prepare_gpsp_aurora_sources.py
+          test -f LICENSES/gpSP-GPL-2.0.txt
 
 
 
@@ -47,6 +79,9 @@ jobs:
           test "$(git config -f .gitmodules --get submodule.src/third_party/fceumm-fds.url)" = "https://github.com/itsveenee/Fceumm-PS2.git"
           test "$(git config -f .gitmodules --get submodule.src/third_party/fceumm-fds.branch)" = "master"
 
+          test "$(git config -f .gitmodules --get submodule.src/third_party/gpsp.url)" = "https://github.com/itsveenee/gpsp.git"
+          test "$(git config -f .gitmodules --get submodule.src/third_party/gpsp.branch)" = "master"
+
 
           echo "Recursive submodules:"
           git submodule status --recursive
@@ -55,6 +90,9 @@ jobs:
           echo "FCEUmm/FDS commit:"
           git -C src/third_party/fceumm-fds rev-parse HEAD
           test "$(git -C src/third_party/fceumm-fds rev-parse HEAD)" = "dc77e3ca4baad08f0023f61dba9846550735b74d"
+          echo "gpSP commit:"
+          git -C src/third_party/gpsp rev-parse HEAD
+          test "$(git -C src/third_party/gpsp rev-parse HEAD)" = "8d268a6bb2cd799f8f2791ebb544a7ef550cfc6f"
 
 
       # AURORA_CONTINUOUS_PICODRIVE_SOURCE_V4_2
@@ -121,5 +159,5 @@ jobs:
           gh release delete continuous --cleanup-tag --yes || true
 
           # AURORA_BRANDING_RELEASE_ASSET_V9_20260821
-          gh release create continuous             build/SNESticle.elf             "$AURORA_SOURCE_BUNDLE"             /tmp/SOURCE-MANIFEST.txt             /tmp/SHA256SUMS.txt             LICENSE             BRANDING.md             LICENSES/PicoDrive-COPYING.txt             LICENSES/QuickNES-GPL-2.0.txt             LICENSES/Beetle-PCE-Fast-GPL-2.0.txt             LICENSES/FCEUmm-GPL-2.0.txt             LICENSES/Gambatte-GPL-2.0.txt             THIRD_PARTY.md             --target "$GITHUB_SHA"             --title "Continuous Build"             --prerelease             --notes-file CONTINUOUS_RELEASE.md  # AURORA_CONTINUOUS_RELEASE_FILE_V8_20260821
+          gh release create continuous             build/SNESticle.elf             "$AURORA_SOURCE_BUNDLE"             /tmp/SOURCE-MANIFEST.txt             /tmp/SHA256SUMS.txt             LICENSE             BRANDING.md             LICENSES/PicoDrive-COPYING.txt             LICENSES/QuickNES-GPL-2.0.txt             LICENSES/Beetle-PCE-Fast-GPL-2.0.txt             LICENSES/FCEUmm-GPL-2.0.txt             LICENSES/Gambatte-GPL-2.0.txt             LICENSES/gpSP-GPL-2.0.txt             THIRD_PARTY.md             --target "$GITHUB_SHA"             --title "Continuous Build"             --prerelease             --notes-file CONTINUOUS_RELEASE.md  # AURORA_CONTINUOUS_RELEASE_FILE_V8_20260821
 

@@ -87,6 +87,17 @@ void GSK_SetWidescreen(int on);
    untouched and changes only PCRTC horizontal magnification. */
 void GSK_SetNative240pPar(int on);
 
+/* AURORA_GAMBATTE_SQUARE_ASPECT_V13_20260911
+ * Square-pixel handheld presentation policy for standalone Gambatte CGB/GB.
+ * In 240p this owns only uniform PCRTC pixel width. Interlaced draw scaling is
+ * deliberately scoped to the game blit through GSK_SetGbSquarePixelDraw(). */
+void GSK_SetGbSquarePixelPresentation(int on);
+
+/* AURORA_GAMBATTE_DRAW_SCOPE_V13_20260911
+ * Transient 480i/1080i 2x2 transform for the Gambatte game rectangle only.
+ * Must be disabled again before frontend overlays, status text or modals. */
+void GSK_SetGbSquarePixelDraw(int on);
+
 /* Tear down and rebuild the GS for the current g_GskVideoMode. The caller
    MUST re-upload any textures it owns afterwards (e.g. FontInit). Intended
    to run once at boot after the saved settings are read from the card. */

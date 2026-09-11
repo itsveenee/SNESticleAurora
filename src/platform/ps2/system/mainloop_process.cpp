@@ -30,6 +30,7 @@
 /* AURORA_PCE_EXPERIMENTAL_V1 */
 #include "pce/beetle/pce_bridge.h"
 #include "gb/system/gambattesystem.h" /* AURORA_GAMBATTE_MAINLOOP_PRESENT_V2R6_20260908 */
+#include "gba/system/gpspsystem.h" /* AURORA_GPSP_GBA_V14_EXPLICIT_UPLOAD_20260911 */
 /* AURORA_PS2_PERF_V4_20260824 */
 #include "gskit_backend.h"
 
@@ -622,6 +623,32 @@ Bool MainLoopProcess()
                     PROF_ENTER("GbTexUpload");
                     TextureUpload(&_OutTex, pSurface->GetLinePtr(0));
                     PROF_LEAVE("GbTexUpload");
+                }
+            }
+            else if (_pSystem == _pGba)
+            {
+                /* AURORA_GPSP_GBA_V14_EXPLICIT_UPLOAD_20260911
+                 * gpSP is software video exactly like standalone Gambatte.
+                 * v1-v13 executed it through the generic/SNES fallthrough,
+                 * which never TextureUpload'ed its CRenderSurface. CPU/audio
+                 * therefore ran while _OutTex remained stale/white. */
+                if (_AudMix)
+                {
+                    Uint32 uRateNum = 60, uRateDen = 1;
+                    GSK_GetRefreshRate(&uRateNum, &uRateDen);
+                    _AudMix->SetFrameRateRational(uRateNum, uRateDen);
+                }
+
+                PROF_ENTER("GbaExecuteFrame");
+                _pGba->ExecuteFrame(&Input,
+                    bSafeSkip ? NULL : pSurface, pMixBuffer, eMode);
+                PROF_LEAVE("GbaExecuteFrame");
+
+                if (!bSafeSkip)
+                {
+                    PROF_ENTER("GbaTexUpload");
+                    TextureUpload(&_OutTex, pSurface->GetLinePtr(0));
+                    PROF_LEAVE("GbaTexUpload");
                 }
             }
             else

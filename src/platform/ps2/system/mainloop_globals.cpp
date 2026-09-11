@@ -88,6 +88,7 @@ SegaRom     *_pSegaRom;
 PceSystem   *_pPce;
 PceRom      *_pPceRom;
 GambatteSystem *_pGb; /* AURORA_GAMBATTE_STANDALONE_V2_20260908 */
+GpSPSystem *_pGba; /* AURORA_GPSP_GBA_V1_20260911 */
 
 Char _RomName[256];
 Char _RomPath[1024];

@@ -60,6 +60,14 @@ static int _gsk_fb_width    = 640; /* active FB width                     */
 static int _gsk_fb_height   = 480; /* active FB height                    */
 static int _gsk_active_mode = GSK_VIDMODE_480I; /* mode the GS is in now   */
 static int _gsk_native240p_par = 0;
+/* AURORA_GAMBATTE_SQUARE_ASPECT_V13_20260911
+ * Handheld LCD pixels are square; keep this independent of the SNES/NES PAR
+ * profile because that profile also carries hardware-tested console offsets. */
+static int _gsk_gb_square_pixels = 0;
+/* AURORA_GAMBATTE_DRAW_SCOPE_V13_20260911
+ * Transient render-transform latch. Keep frontend/UI geometry independent of
+ * the persistent handheld presentation/PCRTC policy above. */
+static int _gsk_gb_square_draw = 0;
 static int _gsk_240p_fb_width = 256;
 /* AURORA_PCE_FIXED512_DBX0_CUMULATIVE_V8_20260830
  * Optional horizontal scanout window inside the 240p framebuffer.
@@ -327,6 +335,25 @@ static void _GskApplyRenderTransform(void)
 {
     float sx = (float)_gsk_fb_width / (float)GSK_LOGICAL_W;
     float sy = (float)_gsk_fb_height / (float)GSK_LOGICAL_H;
+    float ox = 0.0f;
+
+    /* AURORA_GAMBATTE_SQUARE_ASPECT_V13_20260911
+     * 480i and 1080i both render through the same 640x480 source buffer.
+     * The generic 4:3 transform is 2.5x horizontally and 2x vertically,
+     * which makes a native 160x144 handheld image 25% too wide.
+     * Use exact 2x2 integer presentation instead: the logical 256-wide canvas
+     * occupies 512 pixels and is centred with 64 black framebuffer pixels on
+     * each side. No GB source pixel is dropped, duplicated unevenly or filtered.
+     * 240p is handled below at PCRTC level because its framebuffer is already
+     * 1:1 logical storage. */
+    if (_gsk_gb_square_draw &&
+        _gsk_active_mode != GSK_VIDMODE_240P &&
+        _gsk_fb_width == 640 && _gsk_fb_height == 480)
+    {
+        sx = sy; /* exactly 2.0 for the 640x480 source */
+        ox = ((float)_gsk_fb_width -
+              (float)GSK_LOGICAL_W * sx) * 0.5f;
+    }
 
     /* AURORA_MD_UI256_320FB_V1_20260823
      * No 256->320 fractional UI scaling. Draw logical UI columns 1:1. */
@@ -337,7 +364,7 @@ static void _GskApplyRenderTransform(void)
         sx = 1.0f;
     }
 
-    GPPrimSetTransform(sx, sy, 0.0f, 0.0f);
+    GPPrimSetTransform(sx, sy, ox, 0.0f);
 }
 
 static void _GskApplyDisplay(void)
@@ -432,6 +459,34 @@ static void _GskApplyDisplay(void)
             0);
     }
 
+    /* AURORA_GAMBATTE_SQUARE_ASPECT_V13_20260911
+     * Standalone GB/GBC LCD pixels are square. In 240p the logical framebuffer
+     * is already 256x240 1:1 storage, so never resample it. Instead narrow the
+     * PCRTC sample width to the closest integer representation of the exact
+     * 4/5 correction required when a 256x240 canvas would otherwise occupy a
+     * 4:3 aperture. With gsKit's normal 11 VCK/source-pixel timing this rounds
+     * to 9 VCK/source-pixel. Every source column therefore has identical width.
+     * Unlike the NES/SNES profile below, no console-specific X/Y bias is added. */
+    if (_gsk_gb_square_pixels &&
+        _gsk_active_mode == GSK_VIDMODE_240P &&
+        g_GskOverscan == 0 &&
+        _gsk_base_magh > 0 &&
+        _gsk_240p_window_w <= 0)
+    {
+        int old_magh1 = _gsk_base_magh + 1;
+        int new_magh1 = (old_magh1 * 4 + 2) / 5; /* nearest integer to 0.8x */
+        int srcpix;
+        int new_dw;
+
+        if (new_magh1 < 1)
+            new_magh1 = 1;
+        srcpix = _gsk_base_dw / old_magh1;
+        new_dw = srcpix * new_magh1;
+        startx += (dw - new_dw) / 2;
+        dw = new_dw;
+        magh = new_magh1 - 1;
+    }
+
     /*
      * NES/SNES 240p horizontal PAR correction.
      *
@@ -445,7 +500,7 @@ static void _GskApplyDisplay(void)
      * remains exactly the same physical width as every other source pixel:
      * no 256->248 resampling pattern, no uneven columns.
      */
-    if (_gsk_native240p_par &&
+    if (_gsk_native240p_par && !_gsk_gb_square_pixels &&
         _gsk_active_mode == GSK_VIDMODE_240P &&
         g_GskOverscan == 0 &&
         _gsk_base_magh > 0 &&
@@ -651,6 +706,30 @@ void GSK_SetNative240pPar(int on)
 
     _gsk_native240p_par = on;
     _GskApplyDisplay();
+}
+
+/* AURORA_GAMBATTE_SQUARE_ASPECT_V13_20260911 */
+void GSK_SetGbSquarePixelPresentation(int on)
+{
+    on = on ? 1 : 0;
+
+    if (_gsk_gb_square_pixels == on)
+        return;
+
+    _gsk_gb_square_pixels = on;
+    _GskApplyDisplay();
+}
+
+/* AURORA_GAMBATTE_DRAW_SCOPE_V13_20260911 */
+void GSK_SetGbSquarePixelDraw(int on)
+{
+    on = on ? 1 : 0;
+
+    if (_gsk_gb_square_draw == on)
+        return;
+
+    _gsk_gb_square_draw = on;
+    _GskApplyRenderTransform();
 }
 
 void GSK_ReinitVideo(void)

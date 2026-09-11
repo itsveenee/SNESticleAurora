@@ -34,6 +34,10 @@ public:
                   const Uint8 *pCgbBootRom, Uint32 nCgbBootRomBytes);
     void UnloadGame();
     Bool IsGameLoaded() const;
+    /* AURORA_GAMBATTE_SQUARE_ASPECT_V13_20260911
+     * Standalone CGB/GB uses the handheld's square-pixel presentation.
+     * Dynamic SGB keeps the SNES-host presentation policy. */
+    Bool UsesSquarePixelPresentation() const;
     Uint32 GetGameCRC() const;
     Uint32 GetGameBytes() const;
 

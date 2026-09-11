@@ -111,6 +111,28 @@ GAMBATTE_LIB ?= $(GAMBATTE_STAGE_DIR)/gambatte_libretro_ps2.a
 GAMBATTE_PREPARE_TOOL := $(CURDIR)/tools/prepare_gambatte_sgb_sources.py
 GAMBATTE_PYTHON ?= python3
 
+
+# AURORA_GPSP_GBA_V1_20260911
+# gpSP already carries a PS2 dynarec target. Build its raw static archive in
+# the pinned checkout, then namespace every archive-defined global before the
+# final Aurora link so retro_* and libretro-common symbols cannot collide.
+GPSP_DIR ?= $(CURDIR)/src/third_party/gpsp
+# AURORA_GPSP_GBA_V2_TFA_BLEND_20260911
+# Keep the pinned submodule pristine: Aurora's TFA SIO hooks and PS2-specific
+# frame-mix fix are injected only into this build-tree staging copy.
+GPSP_STAGE_DIR ?= $(CURDIR)/build/gpsp-src
+# AURORA_GPSP_GBA_V13_SAFE_PERF_20260911
+GPSP_STAGE_STAMP := $(GPSP_STAGE_DIR)/.aurora-gpsp-stage-v13
+GPSP_RAW_LIB ?= $(GPSP_STAGE_DIR)/gpsp_libretro_ps2.a
+GPSP_BUILD_DIR ?= $(CURDIR)/build/gpsp
+GPSP_LIB ?= $(GPSP_BUILD_DIR)/gpsp_libretro_ps2.a
+GPSP_NAMESPACE_TOOL := $(CURDIR)/tools/namespace_gpsp_archive.py
+GPSP_PREPARE_TOOL := $(CURDIR)/tools/prepare_gpsp_aurora_sources.py
+GPSP_PYTHON ?= python3
+GPSP_NM ?= $(shell if command -v mips64r5900el-ps2-elf-nm >/dev/null 2>&1; then command -v mips64r5900el-ps2-elf-nm; elif [ -x "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-nm" ]; then echo "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-nm"; else echo nm; fi)
+GPSP_OBJCOPY ?= $(shell if command -v mips64r5900el-ps2-elf-objcopy >/dev/null 2>&1; then command -v mips64r5900el-ps2-elf-objcopy; elif [ -x "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-objcopy" ]; then echo "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-objcopy"; else echo objcopy; fi)
+GPSP_RANLIB ?= $(shell if command -v mips64r5900el-ps2-elf-ranlib >/dev/null 2>&1; then command -v mips64r5900el-ps2-elf-ranlib; elif [ -x "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-ranlib" ]; then echo "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-ranlib"; else echo ranlib; fi)
+
 # AURORA_PD_TRYAGAIN_V1_PS2_BUILD_PARITY
 # PicoDrive's standalone PS2 configure path explicitly uses -G0. Keep
 # the embedded libretro core on the same EE small-data ABI assumption;
@@ -486,7 +508,8 @@ INCS := \
 	-I$(SRC_DIR)/sega/picodrive \
 	-I$(SRC_DIR)/pce/system \
 	-I$(SRC_DIR)/pce/beetle \
-	-I$(GAMBATTE_STAGE_DIR)/libgambatte/include
+	-I$(GAMBATTE_STAGE_DIR)/libgambatte/include \
+	-I$(GPSP_DIR)/libretro/libretro-common/include
 
 LIBDIRS := \
 	-L$(PS2SDK)/ee/lib \
@@ -627,6 +650,7 @@ SRCS := \
 	src/snes/core/snsa1.cpp \
 	src/snes/core/gbhost.cpp \
 	src/gb/system/gambattesystem.cpp \
+	src/gba/system/gpspsystem.cpp \
 	src/snes/core/snsgb_icd2.cpp \
 	src/snes/core/snsgb.cpp \
 	src/snes/core/snswc.cpp \
@@ -1108,6 +1132,35 @@ fceumm-fds-clean:
 	@rm -rf "$(FCEUMM_FDS_BUILD_DIR)"
 # AURORA_FCEUMM_FDS_V0_6_RULES_END
 
+# AURORA_GPSP_GBA_V1_20260911
+.PHONY: FORCE_GPSP_STAGE
+FORCE_GPSP_STAGE:
+
+$(GPSP_STAGE_STAMP): FORCE_GPSP_STAGE $(GPSP_PREPARE_TOOL)
+	@printf '[ gpSP GBA ] checking Aurora staged source\n'
+	@test -f "$(GPSP_DIR)/Makefile" || { echo "ERROR: missing gpSP checkout: $(GPSP_DIR)"; exit 1; }
+	+@$(GPSP_PYTHON) "$(GPSP_PREPARE_TOOL)" --source "$(GPSP_DIR)" --stage "$(GPSP_STAGE_DIR)"
+
+$(GPSP_RAW_LIB): $(GPSP_STAGE_STAMP)
+	@printf '[ gpSP GBA ] checking incremental staged PS2 dynarec core\n'
+	+@PATH="$(PS2DEV)/ee/bin:$(PS2DEV)/bin:$(PS2SDK)/bin:$$PATH" $(MAKE) --no-print-directory -C "$(GPSP_STAGE_DIR)" platform=ps2 PS2DEV="$(PS2DEV)" PS2SDK="$(PS2SDK)" all
+
+$(GPSP_LIB): $(GPSP_RAW_LIB) $(GPSP_NAMESPACE_TOOL)
+	@printf '[ gpSP GBA ] namespacing embedded core\n'
+	@mkdir -p "$(GPSP_BUILD_DIR)"
+	@$(GPSP_PYTHON) "$(GPSP_NAMESPACE_TOOL)" --nm "$(GPSP_NM)" --objcopy "$(GPSP_OBJCOPY)" --ranlib "$(GPSP_RANLIB)" --raw "$(GPSP_RAW_LIB)" --output "$(GPSP_LIB)"
+
+.PHONY: gpsp-core gpsp-clean
+gpsp-core: $(GPSP_LIB)
+	@echo "[ gpSP GBA ] core ready: $(GPSP_LIB)"
+	@$(GPSP_NM) -g --defined-only "$(GPSP_LIB)" | grep -E 'GPSP_retro_(init|load_game|run|serialize)' | head -20
+
+gpsp-clean:
+	@rm -rf "$(GPSP_BUILD_DIR)" "$(GPSP_STAGE_DIR)"
+
+# Keep make clean from leaving gpSP's raw archive/object files in the submodule.
+clean: gpsp-clean
+
 # AURORA_SGB_GBHOST_V0_3_RULES
 #
 # AURORA_SGB_GAMBATTE_BACKEND_V1_1_20260907
@@ -1151,8 +1204,8 @@ $(GAMBATTE_LIB): $(GAMBATTE_STAGE_STAMP)
 	+@PATH="$(PS2DEV)/ee/bin:$(PS2DEV)/bin:$(PS2SDK)/bin:$$PATH" $(MAKE) --no-print-directory -C "$(GAMBATTE_STAGE_DIR)" -f Makefile.libretro platform=ps2 all
 
 # AURORA_FCEUMM_FDS_V0_5_RUNTIME_LINK
-$(TARGET): $(OBJS) $(PICODRIVE_LIB) $(QUICKNES_LIB) $(PCE_LIB) $(FCEUMM_FDS_LIB) $(GAMBATTE_LIB) | $(OBJ_DIR)
-	$(call RUN_LINK,$@,$(EE_CXX) $(LTO_LINK_FLAGS) -Xlinker --gc-sections -Xlinker -Map -Xlinker "$(OBJ_DIR)/SNESticle.map" -o "$@" $(OBJS) "$(PICODRIVE_LIB)" "$(QUICKNES_LIB)" "$(PCE_LIB)" "$(FCEUMM_FDS_LIB)" "$(GAMBATTE_LIB)" $(LIBDIRS) $(LIBS))
+$(TARGET): $(OBJS) $(PICODRIVE_LIB) $(QUICKNES_LIB) $(PCE_LIB) $(FCEUMM_FDS_LIB) $(GAMBATTE_LIB) $(GPSP_LIB) | $(OBJ_DIR)
+	$(call RUN_LINK,$@,$(EE_CXX) $(LTO_LINK_FLAGS) -Xlinker --gc-sections -Xlinker -Map -Xlinker "$(OBJ_DIR)/SNESticle.map" -o "$@" $(OBJS) "$(PICODRIVE_LIB)" "$(QUICKNES_LIB)" "$(PCE_LIB)" "$(FCEUMM_FDS_LIB)" "$(GAMBATTE_LIB)" "$(GPSP_LIB)" $(LIBDIRS) $(LIBS))
 
 $(TARGET_STRIPPED): $(TARGET)
 	@cp -f "$(TARGET)" "$@"

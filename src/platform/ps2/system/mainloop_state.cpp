@@ -107,6 +107,7 @@ static const Char *_MainLoopSramGetSystemDirectoryName()
     if (_pSystem == _pNes)  return "NES";
     if (_pSystem == _pSega) return "SEGA";
     if (_pSystem == _pPce)  return "PCE";
+    if (_pSystem == _pGba)  return "GBA"; /* AURORA_GPSP_GBA_V2_TFA_BLEND_20260911 */
     return "SNES";
 }
 
@@ -1519,6 +1520,99 @@ static Bool _MainLoopSaveBSXMemoryPackTo(MainLoopSramDeviceE eDevice)
     return TRUE;
 }
 
+/* AURORA_GPSP_GBA_V2_TFA_BLEND_20260911
+ * One physical Turbo File Advance shared by the two supported GBA cartridges.
+ * 2 MiB = banks 00-7F internal flash + 80-FF inserted 1 MiB card. */
+#define MAINLOOP_GBA_TFA_BYTES 0x200000U
+
+static void _MainLoopGBATFABuildPath(Char *pPath, Int32 nPathBytes,
+                                     const Char *pRoot)
+{
+    snprintf(pPath, nPathBytes, "%s/GBA/ASCII Turbo File Advance.tfa", pRoot);
+}
+
+static Bool _MainLoopLoadGBATFAFrom(MainLoopSramDeviceE eDevice)
+{
+    const Char *pRoot = _MainLoopSramRoot(eDevice);
+    Uint8 *pData;
+    Char Path[1024];
+    struct stat st;
+    FILE *fp;
+    size_t got;
+
+    if (!_pGba || !_pGba->HasTurboFileAdvance()) return TRUE;
+    if (eDevice == MAINLOOP_SRAMDEVICE_USB && !_MainLoopSramUsbReady()) return FALSE;
+    pData = _pGba->GetTurboFileAdvanceData();
+    if (!pData || _pGba->GetTurboFileAdvanceBytes() != MAINLOOP_GBA_TFA_BYTES)
+        return FALSE;
+    _MainLoopGBATFABuildPath(Path, sizeof(Path), pRoot);
+    if (stat(Path, &st) != 0 || S_ISDIR(st.st_mode) ||
+        (Uint32)st.st_size != MAINLOOP_GBA_TFA_BYTES)
+        return FALSE;
+    fp = fopen(Path, "rb");
+    if (!fp) return FALSE;
+    got = fread(pData, 1, MAINLOOP_GBA_TFA_BYTES, fp);
+    fclose(fp);
+    if (got != MAINLOOP_GBA_TFA_BYTES) return FALSE;
+    _pGba->ClearTurboFileAdvanceDirty();
+    ConPrint("ASCII Turbo File Advance loaded: %s\n", Path);
+    return TRUE;
+}
+
+static void _MainLoopLoadGBATFA(void)
+{
+    Bool loaded = FALSE;
+    if (_pSystem != _pGba || !_pGba || !_pGba->HasTurboFileAdvance()) return;
+
+    if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_USB)
+        loaded = _MainLoopSramUsbReady()
+            ? _MainLoopLoadGBATFAFrom(MAINLOOP_SRAMDEVICE_USB) : FALSE;
+    else if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_MEMCARD)
+        loaded = _MainLoopLoadGBATFAFrom(MAINLOOP_SRAMDEVICE_MEMCARD);
+    else
+    {
+        if (_MainLoopSramUsbReady())
+            loaded = _MainLoopLoadGBATFAFrom(MAINLOOP_SRAMDEVICE_USB);
+        if (!loaded)
+            loaded = _MainLoopLoadGBATFAFrom(MAINLOOP_SRAMDEVICE_MEMCARD);
+    }
+
+    if (!loaded)
+    {
+        (void)_pGba->AttachTurboFileAdvance(NULL, 0);
+        ConPrint("ASCII Turbo File Advance: fresh blank 2 MiB backing\n");
+    }
+    _pGba->ClearTurboFileAdvanceDirty();
+}
+
+static Bool _MainLoopSaveGBATFATo(MainLoopSramDeviceE eDevice)
+{
+    const Char *pRoot;
+    Bool bMemCard;
+    Uint8 *pData;
+    Char Path[1024];
+
+    if (_pSystem != _pGba || !_pGba || !_pGba->HasTurboFileAdvance() ||
+        !_pGba->TurboFileAdvanceDirty())
+        return TRUE;
+    if (eDevice == MAINLOOP_SRAMDEVICE_USB && !_MainLoopSramUsbReady())
+        return FALSE;
+
+    pRoot = _MainLoopSramRoot(eDevice);
+    bMemCard = eDevice == MAINLOOP_SRAMDEVICE_MEMCARD ? TRUE : FALSE;
+    pData = _pGba->GetTurboFileAdvanceData();
+    if (!pData || _pGba->GetTurboFileAdvanceBytes() != MAINLOOP_GBA_TFA_BYTES ||
+        !_MainLoopSramEnsureSystemDirectory(pRoot, bMemCard))
+        return FALSE;
+
+    _MainLoopGBATFABuildPath(Path, sizeof(Path), pRoot);
+    if (!_MainLoopSramWriteFile(Path, pData, MAINLOOP_GBA_TFA_BYTES))
+        return FALSE;
+    _pGba->ClearTurboFileAdvanceDirty();
+    ConPrint("ASCII Turbo File Advance saved: %s\n", Path);
+    return TRUE;
+}
+
 /* AURORA_QN_TURBOFILE_SAVE_V2_20260828
  * The original ASCII Turbo File is one 8 KiB expansion-port memory unit,
  * shared by compatible Famicom software. Keep one physical-style file in
@@ -1799,6 +1893,9 @@ Bool _MainLoopHasSRAM()
         return _pSnes->GetSuperGameBoySavedataBytes() > 0 ? TRUE : FALSE;
     if (_pSystem == _pGb && _pGb)
         return (_pGb->GetSavedataBytes() > 0 || _pGb->HasTurboFile()) ? TRUE : FALSE; /* AURORA_GB_ASCII_TURBO_FILE_R8_20260909 */
+    if (_pSystem == _pGba && _pGba &&
+        (_pGba->GetSRAMBytes() > 0 || _pGba->HasTurboFileAdvance()))
+        return TRUE; /* AURORA_GPSP_GBA_V2_TFA_BLEND_20260911 */
     if (_pSystem->GetSRAMBytes() > 0)
         return TRUE;
     if (_pSystem == _pSnes && _pSnes && _pSnes->HasBSXMemoryPack())
@@ -1916,6 +2013,14 @@ static Bool _MainLoopSaveSRAMTo(MainLoopSramDeviceE eDevice, Bool bSync)
         bAny = TRUE;
         if (!_MainLoopSaveSwcCartSRAMTo(eDevice))
             bOK = FALSE;
+    }
+
+    /* AURORA_GPSP_GBA_V2_TFA_BLEND_20260911 */
+    if (_pSystem == _pGba && _pGba &&
+        _pGba->HasTurboFileAdvance() && _pGba->TurboFileAdvanceDirty())
+    {
+        bAny = TRUE;
+        if (!_MainLoopSaveGBATFATo(eDevice)) bOK = FALSE;
     }
 
     /* AURORA_QN_TURBOFILE_SAVE_V2_20260828 */
@@ -2131,6 +2236,10 @@ void _MainLoopLoadSRAM()
             (bLegacy || (bMcFallback && _MainLoopSramUsbReady()));
     }
 
+    /* AURORA_GPSP_GBA_V2_TFA_BLEND_20260911 */
+    if (_pSystem == _pGba)
+        _MainLoopLoadGBATFA();
+
     /* AURORA_QN_TURBOFILE_SAVE_V2_20260828: loading an existing
      * TurboFile.sav never creates one and never marks it dirty. */
 if (_pSystem == _pNes)
@@ -2190,6 +2299,8 @@ Bool _MainLoopForceCheckSRAM()
         _MainLoop_SRAMUpdated = TRUE;
     if (_pSystem == _pGb && _pGb && (_pGb->SavedataDirty() || _pGb->TurboFileDirty()))
         _MainLoop_SRAMUpdated = TRUE; /* AURORA_GB_ASCII_TURBO_FILE_R8_20260909 */
+    if (_pSystem == _pGba && _pGba && _pGba->TurboFileAdvanceDirty())
+        _MainLoop_SRAMUpdated = TRUE; /* AURORA_GPSP_GBA_V2_TFA_BLEND_20260911 */
 
     /* AURORA_SWC_CART_SRAM_MEMORY_FINAL_V5_3_20260901
      * Game Pak SRAM writes mark themselves dirty immediately; no full second
@@ -2369,6 +2480,7 @@ Bool _MainLoopCheckSRAM()
 #define MAINLOOP_STATE_SYSTEM_PCECD     8 /* AURORA_CD_STATE_V1_SAFE_20260903 */
 #define MAINLOOP_STATE_SYSTEM_SGB       9 /* AURORA_SGB_RUNTIME_V0_4_20260904 */
 #define MAINLOOP_STATE_SYSTEM_GB       10 /* AURORA_GAMBATTE_STANDALONE_V2_20260908 */
+#define MAINLOOP_STATE_SYSTEM_GBA      11 /* AURORA_GPSP_GBA_V13_SAFE_PERF_20260911 */
 #define MAINLOOP_STATE_RAW_BYTES \
     (sizeof(SnesStateT) > sizeof(NesStateT) \
         ? sizeof(SnesStateT) \
@@ -2494,7 +2606,7 @@ public:
         : m_bActive((_pSystem == _pSega || _pSystem == _pPce ||
                      _pSystem == _pFds || /* AURORA_FCEUMM_FDS_V0_6_STATE */
                      _MainLoopStateIsSwc() || _MainLoopStateIsSgb() ||
-                     _pSystem == _pGb) ? TRUE : FALSE)
+                     _pSystem == _pGb || _pSystem == _pGba) ? TRUE : FALSE) /* AURORA_GPSP_GBA_V13_SAFE_PERF_20260911 */
     {
     }
 
@@ -2531,7 +2643,7 @@ static Uint8 *_MainLoopStateEnsureSegaStateData(Uint32 nBytes)
 static Uint32 _MainLoopStateCompressedLimit(Uint32 nRawBytes)
 {
     if (_pSystem != _pSega && _pSystem != _pPce &&
-        _pSystem != _pFds && _pSystem != _pGb && /* AURORA_GAMBATTE_STANDALONE_V2_20260908 */
+        _pSystem != _pFds && _pSystem != _pGb && _pSystem != _pGba && /* AURORA_GPSP_GBA_V13_SAFE_PERF_20260911 */
         !_MainLoopStateIsSwc() && !_MainLoopStateIsSgb())
         return (Uint32)sizeof(_MainLoop_StateCompressed);
 
@@ -2543,7 +2655,7 @@ static Uint32 _MainLoopStateCompressedLimit(Uint32 nRawBytes)
 static Uint8 *_MainLoopStateGetCompressedBuffer(Uint32 nNeed, Uint32 *pCapacity)
 {
     if (_pSystem != _pSega && _pSystem != _pPce &&
-        _pSystem != _pFds && _pSystem != _pGb && /* AURORA_GAMBATTE_STANDALONE_V2_20260908 */
+        _pSystem != _pFds && _pSystem != _pGb && _pSystem != _pGba && /* AURORA_GPSP_GBA_V13_SAFE_PERF_20260911 */
         !_MainLoopStateIsSwc() && !_MainLoopStateIsSgb())
     {
         if (pCapacity) *pCapacity = (Uint32)sizeof(_MainLoop_StateCompressed);
@@ -2583,6 +2695,7 @@ static Uint32 _MainLoopStateGetSystemId()
     if (_MainLoopStateIsSwc()) return MAINLOOP_STATE_SYSTEM_SWC;
     if (_MainLoopStateIsSgb()) return MAINLOOP_STATE_SYSTEM_SGB;
     if (_pSystem == _pGb) return MAINLOOP_STATE_SYSTEM_GB; /* AURORA_GAMBATTE_STANDALONE_V2_20260908 */
+    if (_pSystem == _pGba) return MAINLOOP_STATE_SYSTEM_GBA; /* AURORA_GPSP_GBA_V13_SAFE_PERF_20260911 */
     return MAINLOOP_STATE_SYSTEM_SNES;
 }
 
@@ -2597,6 +2710,11 @@ static Uint32 _MainLoopStateGetPayloadBytes()
     {
         Int32 nBytes = _pGb ? _pGb->GetStateSize() : 0;
         return nBytes > 0 ? (Uint32)nBytes : 0; /* AURORA_GAMBATTE_STANDALONE_V2_20260908 */
+    }
+    if (_pSystem == _pGba)
+    {
+        Int32 nBytes = _pGba ? _pGba->GetStateSize() : 0;
+        return nBytes > 0 ? (Uint32)nBytes : 0; /* AURORA_GPSP_GBA_V13_SAFE_PERF_20260911 */
     }
     if (_MainLoopStateIsSwc())
     {
@@ -2648,6 +2766,8 @@ static Uint8 *_MainLoopStateGetPayloadData()
         return _MainLoopStateEnsureSegaStateData(_MainLoopStateGetPayloadBytes());
     if (_pSystem == _pGb)
         return _MainLoopStateEnsureSegaStateData(_MainLoopStateGetPayloadBytes()); /* AURORA_GAMBATTE_STANDALONE_V2_20260908 */
+    if (_pSystem == _pGba)
+        return _MainLoopStateEnsureSegaStateData(_MainLoopStateGetPayloadBytes()); /* AURORA_GPSP_GBA_V13_SAFE_PERF_20260911 */
     if (_MainLoopStateIsSwc())
         return _MainLoopStateEnsureSegaStateData(
             _MainLoopStateGetPayloadBytes());
@@ -3334,6 +3454,14 @@ static Bool _MainLoopStateCheckAvailability(Char *pReason, Int32 nReasonBytes)
         if (!_pGb || !_pGb->IsGameLoaded() || _pGb->GetStateSize() <= 0)
         {
             snprintf(pReason, nReasonBytes, "Gambatte Game Boy state unavailable.");
+            return FALSE;
+        }
+    }
+    else if (_pSystem == _pGba)
+    {
+        if (!_pGba || !_pGba->IsGameLoaded() || _pGba->GetStateSize() <= 0)
+        {
+            snprintf(pReason, nReasonBytes, "gpSP Game Boy Advance state unavailable.");
             return FALSE;
         }
     }
@@ -4726,6 +4854,14 @@ Bool _MainLoopLoadState()
                     _pGb->RestoreStateChecked(pGbStateData, (Int32)nGbStateBytes);
                 if (bRestoreOK) _MainLoop_SRAMUpdated = TRUE; /* AURORA_GAMBATTE_STANDALONE_V2_20260908 */
             }
+            else if (_pSystem == _pGba)
+            {
+                Uint8 *pGbaStateData = _MainLoopStateGetPayloadData();
+                Uint32 nGbaStateBytes = _MainLoopStateGetPayloadBytes();
+                bRestoreOK = pGbaStateData && nGbaStateBytes && _pGba &&
+                    _pGba->RestoreStateChecked(pGbaStateData, (Int32)nGbaStateBytes);
+                if (bRestoreOK) _MainLoop_SRAMUpdated = TRUE; /* AURORA_GPSP_GBA_V13_SAFE_PERF_20260911 */
+            }
             else if (_pSystem == _pNes)
                 bRestoreOK = _pNes->RestoreState(&_NesState);
             else if (_pSystem == _pFds)
@@ -4913,6 +5049,14 @@ Bool _MainLoopSaveState()
         if (!_pGb->SaveStateChecked(pStateData, (Int32)nStateBytes))
         {
             _MainLoopStateSetMessage("Could not snapshot the Gambatte Game Boy state.");
+            return FALSE;
+        }
+    }
+    else if (_pSystem == _pGba)
+    {
+        if (!_pGba->SaveStateChecked(pStateData, (Int32)nStateBytes))
+        {
+            _MainLoopStateSetMessage("Could not snapshot the gpSP Game Boy Advance state.");
             return FALSE;
         }
     }

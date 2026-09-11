@@ -80,3 +80,17 @@ PC Engine CD is exposed through path-only `.cue` loading and a user-provided `sy
 
 The embedded Game Boy backend used by Super Game Boy support is **Gambatte**, authored by **Sinamas** and contributors. Aurora provides the SNES/ICD2 bridge and SGB-specific integration.
 
+
+
+<!-- AURORA_GPSP_GBA_V1_20260911 -->
+### gpSP
+
+The experimental Game Boy Advance integration uses the pinned `itsveenee/gpsp`
+submodule and its PS2 dynarec target.
+
+- **gameplaySP / gpSP original author:** Exophase
+- **Later gpSP/libretro work:** libretro and gpSP contributors
+- **Aurora PS2 adapter, controls, presentation and integration:** Vinícius Nunes (`@itsveenee`)
+
+The mirrored license is `LICENSES/gpSP-GPL-2.0.txt`; original source notices in
+the submodule remain authoritative.

@@ -58,3 +58,26 @@ Aurora also contains or integrates InfoNES, miniz, libxmp-lite, PS2SDK-related l
 
 Gambatte is authored by **Sinamas** and contributors and is distributed under the **GNU GPL version 2**. Aurora integrates the pinned `itsveenee/gambatte-libretro` submodule at `src/third_party/gambatte` for the Game Boy CPU/PPU/APU/MBC side of the Super Game Boy bridge. Aurora continues to emulate the SNES and ICD2 side. A license mirror is included at `LICENSES/Gambatte-GPL-2.0.txt`.
 
+
+
+<!-- AURORA_GPSP_GBA_V1_20260911 -->
+### gpSP (Game Boy Advance)
+
+Aurora integrates the pinned `itsveenee/gpsp` Git submodule at
+`src/third_party/gpsp`. gpSP/gameplaySP was originally developed by **Exophase**
+and has subsequent work from libretro contributors and other maintainers. The
+PS2 build uses gpSP's existing `platform=ps2` MIPS/R5900 dynamic recompiler and
+is linked into Aurora as a namespaced static core.
+
+The component is distributed under the GNU GPL version 2 or later as described
+by its source headers and `COPYING`. The exact `COPYING` from the pinned
+submodule is mirrored at `LICENSES/gpSP-GPL-2.0.txt`; source-file notices in the
+submodule remain authoritative.
+
+Aurora does not distribute Nintendo GBA firmware. If the user supplies
+`gba_bios.bin` in `SNESticle/SYSTEM`, gpSP's normal auto-BIOS path can use it;
+otherwise the core falls back to its bundled open replacement BIOS. Aurora's
+staged PS2 build caps gpSP's resident ROM page cache at 8 MiB; this is not a ROM
+size limit, because larger cartridges use gpSP's existing file-backed 32 KiB
+LRU paging path. Direct `.gba`/`.agb` path loading therefore also avoids a
+second full-ROM copy in Aurora.

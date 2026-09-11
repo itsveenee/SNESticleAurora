@@ -27,6 +27,7 @@
 #include "pcesystem.h"
 #include "pcerom.h"
 #include "gb/system/gambattesystem.h" /* AURORA_GAMBATTE_STANDALONE_V2_20260908 */
+#include "gba/system/gpspsystem.h" /* AURORA_GPSP_GBA_V1_20260911 */
 #include "emusys.h"
 #include "emumovie.h"
 #include "rendersurface.h"
@@ -123,6 +124,7 @@ extern SegaRom        *_pSegaRom;
 extern PceSystem      *_pPce;
 extern PceRom         *_pPceRom;
 extern GambatteSystem *_pGb; /* AURORA_GAMBATTE_STANDALONE_V2_20260908 */
+extern GpSPSystem     *_pGba; /* AURORA_GPSP_GBA_V1_20260911 */
 
 /* ---- ROM / framebuffer / audio buffers ---------------------------- */
 
@@ -214,6 +216,7 @@ enum
 	MAINLOOP_ENTRYTYPE_SNESWCDISK   , /* AURORA_SWC_FLOPPY_V1_20260831: raw floppy .img */
 	MAINLOOP_ENTRYTYPE_SNESWCBIOS   , /* AURORA_SWC_FLOPPY_V5_20260831: swc.rom */
 	MAINLOOP_ENTRYTYPE_GBROM       , /* AURORA_SGB_ICD2_V0_2_20260904: reserved; runtime still gated */
+	MAINLOOP_ENTRYTYPE_GBAROM      , /* AURORA_GPSP_GBA_V1_20260911 */
 	MAINLOOP_ENTRYTYPE_NUM
 };
 

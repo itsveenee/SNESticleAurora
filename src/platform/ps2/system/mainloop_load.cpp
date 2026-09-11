@@ -807,6 +807,17 @@ void _MainLoopUnloadRom()
         ConPrint("GB savedata unload flush: %s\n", bSaved ? "saved" : "FAILED");
     }
 
+    /* AURORA_GPSP_GBA_V1_20260911
+     * gpSP exposes one fixed 128 KiB save-RAM window. Persist it before core
+     * teardown, following the standalone Gambatte lifetime boundary. */
+    if (_pSystem == _pGba && _pGba && _pGba->IsGameLoaded() &&
+        _pGba->GetSRAMBytes() > 0)
+    {
+        _MainLoop_SRAMUpdated = TRUE;
+        Bool bSaved = _MainLoopSaveSRAM(TRUE);
+        ConPrint("GBA savedata unload flush: %s\n", bSaved ? "saved" : "FAILED");
+    }
+
     /* AURORA_SWC_CART_SRAM_MEMORY_FINAL_V5_3_20260901
      * The flush above calls _MainLoopForceCheckSRAM/_MainLoopSaveSRAM while
      * the cart backing and cartridge filename still exist. Detach only now. */
@@ -867,6 +878,7 @@ _MainLoopSwcCartSRAMDetach();
 	if (_pPce) _pPce->SetRom(NULL);
 	if (_pPceRom) _pPceRom->Unload();
 	if (_pGb) _pGb->UnloadGame(); /* AURORA_GAMBATTE_STANDALONE_V2_20260908 */
+	if (_pGba) _pGba->UnloadGame(); /* AURORA_GPSP_GBA_V1_20260911 */
 
     if (s_PceCdrdaoTempCue[0])
     {
@@ -1386,18 +1398,118 @@ static Bool _MainLoopExecuteDisc(const char *pMappedPath,
     }
 
     _MainLoop_fOutputIntensity = 1.0f;
+    /* AURORA_CD_BIOS_SYSTEM_RESOLVE_V15_20260911
+     * Keep SystemDirectory as the writable frontend work directory.
+     * Resolve a second directory only for CD firmware lookup.
+     */
+    Char FirmwareSystemDirectory[512];
+    Char CandidateSystemDirectory[512];
+
+    if (snprintf(FirmwareSystemDirectory,
+                 sizeof(FirmwareSystemDirectory),
+                 "%s", SystemDirectory) >=
+        (int)sizeof(FirmwareSystemDirectory))
+    {
+        MainLoopModalPrintf(60 * 4, "ERROR: SYSTEM path is too long");
+        return FALSE;
+    }
+
+    CandidateSystemDirectory[0] = 0;
+
+    if (eDisc > 0)
+    {
+        static const Char *const kSegaCdSystemFiles[] = {
+            "bios_CD_U.bin",
+            "bios_CD_E.bin",
+            "bios_CD_J.bin",
+            "bios_CD_U.zip",
+            "bios_CD_E.zip",
+            "bios_CD_J.zip",
+
+            "us_scd2_9306.bin",
+            "SegaCDBIOS9303.bin",
+            "us_scd1_9210.bin",
+            "eu_mcd2_9306.bin",
+            "eu_mcd2_9303.bin",
+            "eu_mcd1_9210.bin",
+            "jp_mcd2_921222.bin",
+            "jp_mcd1_9112.bin",
+            "jp_mcd1_9111.bin",
+
+            "us_scd2_9306.zip",
+            "SegaCDBIOS9303.zip",
+            "us_scd1_9210.zip",
+            "eu_mcd2_9306.zip",
+            "eu_mcd2_9303.zip",
+            "eu_mcd1_9210.zip",
+            "jp_mcd2_921222.zip",
+            "jp_mcd1_9112.zip",
+            "jp_mcd1_9111.zip"
+        };
+
+        for (Uint32 i = 0;
+             i < sizeof(kSegaCdSystemFiles) /
+                 sizeof(kSegaCdSystemFiles[0]);
+             ++i)
+        {
+            CandidateSystemDirectory[0] = 0;
+
+            if (!MainLoopFindSystemFileDirectory(
+                    CandidateSystemDirectory,
+                    (Int32)sizeof(CandidateSystemDirectory),
+                    kSegaCdSystemFiles[i]))
+                continue;
+
+            if (snprintf(FirmwareSystemDirectory,
+                         sizeof(FirmwareSystemDirectory),
+                         "%s", CandidateSystemDirectory) >=
+                (int)sizeof(FirmwareSystemDirectory))
+            {
+                MainLoopModalPrintf(
+                    60 * 4, "ERROR: Sega CD SYSTEM path is too long");
+                return FALSE;
+            }
+
+            ConPrint("Sega CD firmware SYSTEM: %s (%s)\n",
+                     FirmwareSystemDirectory,
+                     kSegaCdSystemFiles[i]);
+            break;
+        }
+    }
+    else
+    {
+        if (MainLoopFindSystemFileDirectory(
+                CandidateSystemDirectory,
+                (Int32)sizeof(CandidateSystemDirectory),
+                "syscard3.pce"))
+        {
+            if (snprintf(FirmwareSystemDirectory,
+                         sizeof(FirmwareSystemDirectory),
+                         "%s", CandidateSystemDirectory) >=
+                (int)sizeof(FirmwareSystemDirectory))
+            {
+                MainLoopModalPrintf(
+                    60 * 4, "ERROR: PCE CD SYSTEM path is too long");
+                return FALSE;
+            }
+
+            ConPrint("PCE CD firmware SYSTEM: %s (syscard3.pce)\n",
+                     FirmwareSystemDirectory);
+        }
+    }
+
     if (eDisc > 0)
     {
         pSystem = _pSega;
         PicoDriveBridge_SetRegion((int)g_SnesForceRegion);
         bLoaded = _pSega && _pSega->LoadDisc(
-            pMappedPath, SystemDirectory);
+            pMappedPath, FirmwareSystemDirectory);
     }
     else
     {
         pSystem = _pPce;
         bLoaded = _pPce && _pPce->LoadDisc(
-            pPceLoadPath, SystemDirectory);
+            pPceLoadPath, FirmwareSystemDirectory);
     }
 
     if (!bLoaded || !pSystem ||
@@ -3631,6 +3743,59 @@ static Bool _MainLoopBootSuperGameBoy(const Uint8 *pGbData, Uint32 nGbBytes,
     return TRUE;
 }
 
+/* AURORA_GPSP_GBA_V1_20260911
+ * gpSP is path-based on PS2. Keep .gba/.agb on storage and let its existing
+ * 1 MiB-block cartridge loader own ROM RAM; never allocate Aurora's generic
+ * cartridge buffer as a second copy. */
+static Bool _MainLoopExecuteGbaPath(const char *pMappedPath,
+                                    const char *pOriginalPath,
+                                    Bool bLoadSRAM)
+{
+    Char SystemDirectory[512];
+
+    if (!pMappedPath || !*pMappedPath || !pOriginalPath || !*pOriginalPath || !_pGba)
+        return FALSE;
+
+    if (!MainLoopEnsureGameplayRasterWidth(256))
+    {
+        MainLoopModalPrintf(60 * 3, "ERROR: cannot configure GBA video raster");
+        return FALSE;
+    }
+
+    if (!MainLoopEnsureSystemDirectory(SystemDirectory, (Int32)sizeof(SystemDirectory)))
+    {
+        MainLoopModalPrintf(60 * 4, "ERROR: cannot create SNESticle/SYSTEM");
+        return FALSE;
+    }
+
+    _MainLoop_fOutputIntensity = 1.0f;
+    if (!_pGba->LoadGame(pMappedPath, SystemDirectory) || !_pGba->IsGameLoaded())
+    {
+        _pGba->UnloadGame();
+        MainLoopModalPrintf(60 * 5,
+            "ERROR: gpSP could not run this GBA image"); /* AURORA_GPSP_GBA_V13_SAFE_PERF_20260911: ROMs larger than cache use gpSP paging */
+        return FALSE;
+    }
+
+    _pSystem = _pGba;
+    _MainLoopGetName(_RomName, pOriginalPath);
+    snprintf(_RomPath, sizeof(_RomPath), "%s", pOriginalPath);
+    MainLoopStateOnRomChanged();
+    _MainLoopSetSampleRate(_pGba->GetSampleRate());
+    if (bLoadSRAM)
+        _MainLoopLoadSRAM();
+
+    if (_fbTexture[0]) _fbTexture[0]->Clear();
+    if (_fbTexture[1]) _fbTexture[1]->Clear();
+    if (_fbTexture[0]) TextureUpload(&_OutTex, _fbTexture[0]->GetLinePtr(0));
+
+    ConPrint("GBA Loaded via gpSP: %s [audio=%u Hz, viewport=240x160/native-square, bios=auto+boot, upload=explicit, blend=on, cc=on, safefs=latched-core-skip/resync, input=mask, jit=4M/512K, rtc=system, turboL=R2+L1, turboR=R2+L2, TFA=%s, crc=%08X]\n",
+             pMappedPath, (unsigned)_pGba->GetSampleRate(),
+             _pGba->HasTurboFileAdvance() ? "on" : "off",
+             (unsigned)_pGba->GetGameCRC()); /* AURORA_GPSP_GBA_V13_SAFE_PERF_20260911  | AURORA_GPSP_GBA_V14_VISIBLE_BIOS_SQUARE_20260911 */
+    return TRUE;
+}
+
 Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
 {
     PathExtTypeE eType, eSourceType;
@@ -3787,6 +3952,10 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
     _MainLoopResetHistory();
 #endif
     _MainLoopResetInputChecksums();
+
+    /* AURORA_GPSP_GBA_V1_20260911: direct full-path launch, before generic ROM allocation. */
+    if (eType == MAINLOOP_ENTRYTYPE_GBAROM)
+        return _MainLoopExecuteGbaPath(pFileName, OriginalPath, bLoadSRAM);
 
     /* AURORA_SUPER_MAGIC_DRIVE_V1_20260902 */
     if (eType == MAINLOOP_ENTRYTYPE_SEGAROM && _MainLoopIsSmdBiosPath(pFileName))

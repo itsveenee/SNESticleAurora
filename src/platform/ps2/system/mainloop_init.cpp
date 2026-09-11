@@ -434,6 +434,7 @@ Bool MainLoopInit()
 	ScrPrintf("PicoDrive: notaz / irixxxx / contributors");
 	ScrPrintf("Beetle PCE Fast: Mednafen / libretro contributors");
 	ScrPrintf("Gambatte: Sinamas / contributors");
+	ScrPrintf("gpSP: Exophase / libretro contributors"); /* AURORA_GPSP_GBA_V1_20260911 */
 	ScrPrintf("Licenses/notices: repository LICENSES/");
 	ScrPrintf("Copyright (c) 1997-2004 Icer Addis");
 
@@ -564,6 +565,9 @@ TextureUpload(&_OutTex, _fbTexture[0]->GetLinePtr(0));
 	/* AURORA_GAMBATTE_STANDALONE_V2_20260908 */
 	_pGb = new GambatteSystem();
 	_pGb->Reset();
+	/* AURORA_GPSP_GBA_V1_20260911 */
+	_pGba = new GpSPSystem();
+	_pGba->Reset();
 	PathExtAdd(MAINLOOP_ENTRYTYPE_SNESROM, (char *)"sfc");
 	PathExtAdd(MAINLOOP_ENTRYTYPE_SNESROM, (char *)"smc");
 	PathExtAdd(MAINLOOP_ENTRYTYPE_SNESROM, (char *)"fig");
@@ -575,6 +579,9 @@ TextureUpload(&_OutTex, _fbTexture[0]->GetLinePtr(0));
     /* AURORA_SGB_RUNTIME_V0_4_20260904 */
     PathExtAdd(MAINLOOP_ENTRYTYPE_GBROM, (char *)"gb");
     PathExtAdd(MAINLOOP_ENTRYTYPE_GBROM, (char *)"gbc");
+    /* AURORA_GPSP_GBA_V1_20260911: path-only; no ZIP duplication yet. */
+    PathExtAdd(MAINLOOP_ENTRYTYPE_GBAROM, (char *)"gba");
+    PathExtAdd(MAINLOOP_ENTRYTYPE_GBAROM, (char *)"agb");
 	/* AURORA_SWC_FLOPPY_V1_20260831
 	 * AURORA_SWC_D88_ONLY_V5_20260901:
 	 * copier floppy media is D88-only; IMG/raw is intentionally retired. */
@@ -650,6 +657,10 @@ TextureUpload(&_OutTex, _fbTexture[0]->GetLinePtr(0));
 		Uint32 uNesStateBytes   = (Uint32)_pNes->GetStateSize();
 		if (uNesStateBytes > uMovieStateBytes)
 			uMovieStateBytes = uNesStateBytes;
+		/* AURORA_GPSP_GBA_V1_20260911 */
+		Uint32 uGbaStateBytes   = _pGba ? (Uint32)_pGba->GetStateSize() : 0U;
+		if (uGbaStateBytes > uMovieStateBytes)
+			uMovieStateBytes = uGbaStateBytes;
 		s_pMovieClip = new Emu::MovieClip(uMovieStateBytes, 60 * 60 * 60);
 	}
 

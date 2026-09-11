@@ -13,6 +13,8 @@ PC Engine / TurboGrafx-16 emulation through **Beetle PC Engine Fast** is based o
 
 Game Boy and Color emulation use **Gambatte**, an open-source Game Boy / Game Boy Color emulator originally developed by **Sinamas**, with subsequent development and maintenance by **additional contributors**. Firmware must be user-supplied in `SNESticle/SYSTEM`. See THIRD_PARTY.md and LICENSES/Gambatte-GPL-2.0.txt for attribution, licensing information, and additional details.
 
+Game Boy Advance emulation uses the pinned **gpSP** fork at `src/third_party/gpsp`, based on gameplaySP by **Exophase** and later libretro contributors. Aurora embeds its existing PS2 dynarec target behind an `Emu::System` adapter: `.gba`/`.agb` are loaded by path, controls follow the standalone Gambatte layout (Cross=A, Square=B, Circle=Turbo A, Triangle=Turbo B, L1/R1=L/R), and the complete 240×160 image is aspect-fitted to the PS2 gameplay surface with black borders. Firmware must be user-supplied in `SNESticle/SYSTEM`. See [THIRD_PARTY.md](THIRD_PARTY.md) and `LICENSES/gpSP-GPL-2.0.txt`.
+
 SNESticle Aurora code covered by the GPL remains under GNU GPLv2; separately licensed third-party components remain under their own terms. **Code license and project branding are separate.** The applicable software licenses grant rights in the code; they **do not grant permission to use the SNESticle Aurora name** or the project-specific **Aurora** identity/branding for an unofficial fork, modified build, redistributed binary, or derivative project. Unless separately authorized by **@itsveenee**, use a distinct project/product name and distinct branding. Factual attribution such as “based on SNESticle Aurora” remains welcome. See [BRANDING.md](BRANDING.md).
 
 Project lineage and attribution are documented in [CREDITS.md](CREDITS.md). See LICENSE, [BRANDING.md](BRANDING.md), and the third-party license files for licensing details.
@@ -47,12 +49,13 @@ Emulation:
 * Mega Drive / Genesis + Sega Master System / Mark III + Game Gear + 32X + Sega CD emulation with PicoDrive
 * PC Engine / TurboGrafx-16 HuCard and PC Engine CD emulation with Beetle PCE Fast
 * Game Boy + Color emulation with Gambatte
+* Game Boy Advance emulation with gpSP
 * Fixes and improvements for the 240p display modes, improved screen positioning and overscan settings for each system and graphical resolution/modes.
 * Dedicated turbo buttons for NES, GB, GBC, PCE, GG and SMS games
 * Turbo button toggle (hold R2+ANY BUTTON) for SNES and MD games
 * In-game soft reset (L2+SELECT)
 * SNES and MD mouse emulation
-* ASCII Turbo File for Famicom, Super Famicom and Game Boy (accessory for many ASCII games)
+* ASCII Turbo File for Famicom, Super Famicom, Game Boy and Game Boy Advance (accessory for many ASCII games)
 * Battle Box for Famicom (accessory for Armadillo)
 * Arkanoid Pad for Famicom (accessory for Arkanoid and Arkanoid II)
 * Famicom Microphone (L2+START)

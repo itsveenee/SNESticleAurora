@@ -456,12 +456,17 @@ struct GambatteSystem::Impl
     Uint8 cgbBootRom[AURORA_GB_CGB_BOOT_BYTES];
     gambatte::video_pixel_t screen[160U * 144U];
     gambatte::uint_least32_t audioScratch[AURORA_GB_AUDIO_SCRATCH];
+    /* AURORA_GAMBATTE_TARGET_INIT_V13_20260911
+     * Host-only bookkeeping; never serialized into emulation state. */
+    mutable CRenderSurface *clearedTarget0;
+    mutable CRenderSurface *clearedTarget1;
 
     Impl()
         : loaded(FALSE), mode(STANDALONE_CGB),
           hasCgbBootRom(FALSE), romBytes(0), romCRC(0),
           clockCredit(0), turboFrame(0),
-          audioSumL(0), audioSumR(0), audioPhase(0), biosHostFast(FALSE)
+          audioSumL(0), audioSumR(0), audioPhase(0), biosHostFast(FALSE),
+          clearedTarget0(NULL), clearedTarget1(NULL)
     {
         memset(biosAudio, 0, sizeof(biosAudio));
         memset(&sgb, 0, sizeof(sgb));
@@ -1234,6 +1239,39 @@ static inline Uint32 AuroraGbRgb32ToSurface(Uint32 rgb, Bool cgbFiveBit)
     return 0xff000000U | (b << 16) | (g << 8) | r;
 }
 
+/* AURORA_GAMBATTE_TARGET_INIT_V13_20260911
+ * Aurora alternates two shared 256x240 software surfaces. Gambatte updates
+ * only 160x144 pixels, so a newly encountered target must have its margins
+ * initialized before the complete surface is uploaded to GS. The cost is paid
+ * once per target per loaded handheld session, not once per frame. */
+static void AuroraGbEnsureTargetBlack(const GambatteSystem::Impl *p,
+                                      CRenderSurface *pTarget)
+{
+    Int32 y, x;
+    if (!p || !pTarget)
+        return;
+    if (p->clearedTarget0 == pTarget || p->clearedTarget1 == pTarget)
+        return;
+
+    for (y = 0; y < 240; ++y)
+    {
+        Uint32 *dst = (Uint32 *)pTarget->GetLinePtr(y);
+        for (x = 0; x < 256; ++x)
+            dst[x] = 0xff000000U;
+    }
+
+    if (!p->clearedTarget0)
+        p->clearedTarget0 = pTarget;
+    else if (!p->clearedTarget1)
+        p->clearedTarget1 = pTarget;
+    else
+    {
+        /* Defensive fallback if a future frontend rotates >2 surfaces. */
+        p->clearedTarget0 = p->clearedTarget1;
+        p->clearedTarget1 = pTarget;
+    }
+}
+
 static void AuroraGbRender(const GambatteSystem::Impl *p,
                            CRenderSurface *pTarget)
 {
@@ -1252,6 +1290,9 @@ static void AuroraGbRender(const GambatteSystem::Impl *p,
     if (!p || !pTarget ||
         pTarget->GetWidth() < 256U || pTarget->GetHeight() < 240U)
         return;
+
+    if (p->mode == GambatteSystem::STANDALONE_CGB)
+        AuroraGbEnsureTargetBlack(p, pTarget);
 
     /* MASK_EN=1 freezes the previous host image. */
     if (sgbDynamic && p->sgb.maskMode == 1U)
@@ -1438,6 +1479,16 @@ void GambatteSystem::UnloadGame()
 Bool GambatteSystem::IsGameLoaded() const
 {
     return (m_p && m_p->loaded) ? TRUE : FALSE;
+}
+
+/* AURORA_GAMBATTE_SQUARE_ASPECT_V13_20260911
+ * The standalone CGB path is also Aurora's normal GB/GBC handheld path.
+ * Its LCD pixels are square. Keep dynamic SGB out: SGB presentation belongs
+ * to the SNES/TV pixel-aspect domain rather than the handheld LCD domain. */
+Bool GambatteSystem::UsesSquarePixelPresentation() const
+{
+    return (m_p && m_p->loaded &&
+            m_p->mode == STANDALONE_CGB) ? TRUE : FALSE;
 }
 
 Uint32 GambatteSystem::GetGameCRC() const

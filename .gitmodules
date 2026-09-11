@@ -19,3 +19,7 @@
 	path = src/third_party/gambatte
 	url = https://github.com/itsveenee/gambatte-libretro.git
 	branch = master
+[submodule "src/third_party/gpsp"]
+	path = src/third_party/gpsp
+	url = https://github.com/itsveenee/gpsp.git
+	branch = master

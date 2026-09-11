@@ -23,6 +23,7 @@
 /* AURORA_FCEUMM_FDS_PERF_DIRECT_T8_V3_20260827 */
 #include "nes/fceumm/fceumm_fds_bridge.h"
 #include "pce/beetle/pce_bridge.h"
+#include "gb/system/gambattesystem.h" /* AURORA_GAMBATTE_SQUARE_ASPECT_V13_20260911 */
 
 /* AURORA_PS2_PERF_V4_20260824 */
 #include "types.h"
@@ -472,8 +473,19 @@ void MainLoopRender()
 
 
 
+        /* AURORA_GPSP_GBA_V14_NATIVE_SQUARE_20260911
+         * Both standalone GB/GBC and GBA LCDs use square source pixels.
+         * Reuse v13's presentation-only policy: no core framebuffer
+         * resampling, no effect on dynamic SGB, menus or other systems. */
+        const Bool bSquareHandheldGameplay =
+            (!_bMenu && !_MainLoop_BlackScreen &&
+             ((_pSystem == _pGb && _pGb &&
+               _pGb->UsesSquarePixelPresentation()) ||
+              (_pSystem == _pGba))) ? TRUE : FALSE;
+        GSK_SetGbSquarePixelPresentation(bSquareHandheldGameplay ? 1 : 0);
+
         /*
-         * NES/SNES 240p: keep the framebuffer strictly 256x240 (1 source
+         * NES/SNES/8-bit-console 240p: keep the framebuffer strictly 256x240 (1 source
          * pixel = 1 framebuffer pixel) and correct horizontal size at
          * the PCRTC level instead. This avoids uneven pixel widths
          * caused by scaling 256 pixels into a smaller PolyRect.
@@ -555,8 +567,13 @@ void MainLoopRender()
             g_GskVideoMode == GSK_VIDMODE_240P)) ||
           ((_pSystem == _pPce) &&
            PceBridge_CanDirectGsVideo()))) ? TRUE : FALSE);
+    /* AURORA_GPSP_GBA_V14_NATIVE_SQUARE_20260911
+     * Interlaced 2x2 handheld presentation leaves physical side bars, so use
+     * the existing complete framebuffer clear instead of full-width fast-clear. */
     GSK_SetGameplayFastClear(
-        (!_bMenu && _pSystem && !_MainLoop_BlackScreen) ? TRUE : FALSE);
+        (!_bMenu && _pSystem && !_MainLoop_BlackScreen &&
+         !(GSK_GetActiveVideoMode() != GSK_VIDMODE_240P &&
+           bSquareHandheldGameplay)) ? TRUE : FALSE);
     GSK_ResetFrame();
 
     // render frame
@@ -649,6 +666,15 @@ void MainLoopRender()
         }
         else
         {
+            /* AURORA_GPSP_GBA_V14_NATIVE_SQUARE_20260911
+             * Scope the 480i/1080i 2x2 transform to the handheld game image;
+             * overlays/status/modal geometry immediately returns to normal. */
+            const Bool bHandheldSquareDraw =
+                (GSK_GetActiveVideoMode() != GSK_VIDMODE_240P &&
+                 bSquareHandheldGameplay) ? TRUE : FALSE;
+            if (bHandheldSquareDraw)
+                GSK_SetGbSquarePixelDraw(1);
+
             PolyBlend(FALSE);
             PolyTexture(&_OutTex);
             PolyUV(0,0,256,240);
@@ -681,12 +707,20 @@ void MainLoopRender()
                  * Native SNES/SGB outer presentation remains at Y=8. */
                 PolyRect(0.0f, 8.0f, 256.0f, 240.0f);
             }
+            else if (_pSystem == _pGba)
+            {
+                /* AURORA_GPSP_GBA_V14_NATIVE_SQUARE_20260911 */
+                PolyRect(0.0f, 0.0f, 256.0f, 240.0f);
+            }
             else
             {
     PolyRect(0.0f, 4.0f, 256.0f, 240.0f);
             }
     
             PolyBlend(TRUE);
+
+            if (bHandheldSquareDraw)
+                GSK_SetGbSquarePixelDraw(0);
         }
 
         /* AURORA_QN_LIGHTGUN_OVERLAY_V7_20260829
