@@ -12,7 +12,7 @@ import re
 import shutil
 from pathlib import Path
 
-VERSION = "AURORA_GPSP_GBA_V13_SAFE_PERF_20260911_STAGE_1"  # AURORA_GPSP_GBA_V13_SAFE_PERF_20260911
+VERSION = "AURORA_GPSP_GBA_V14_SPRITE_PERF_20260911_STAGE_1"  # AURORA_GPSP_GBA_V14_SPRITE_PERF_20260911
 
 TFA_H = r'''#ifndef AURORA_TFA_H
 #define AURORA_TFA_H
@@ -316,7 +316,7 @@ def main():
         raise SystemExit(f"invalid gpSP source tree: {src}")
 
     digest = tree_hash(src, me)
-    stamp = stage / ".aurora-gpsp-stage-v13"
+    stamp = stage / ".aurora-gpsp-stage-v14"
     if stamp.is_file() and stamp.read_text().strip() == digest and \
        (stage / "aurora_tfa.c").is_file():
         print(f"[ gpSP stage ] up-to-date: {stage}")
@@ -868,8 +868,579 @@ def main():
                 head + arr + "};" + suffix)
         lut.write_text(luts, encoding="utf-8", newline="\n")
 
+
+    # AURORA_GPSP_GBA_V14_SPRITE_PERF_20260911
+    # Renderer-only optimization pass.  The cache is refreshed exclusively
+    # inside order_obj(), i.e. at the exact same OAM_UPDATED boundary gpSP
+    # already uses to rebuild per-scanline OBJ lists.  No GBA timing, sprite
+    # limits, window semantics, blending rules or dynarec behavior are changed.
+    vid = stage / "video.cc"
+    vs = vid.read_text(encoding="utf-8")
+    v14_mark = "AURORA_GPSP_GBA_V14_SPRITE_PERF_20260911"
+
+    def v14_replace(text, old, new, label, count=1):
+        if old not in text:
+            raise SystemExit("gpSP V14 anchor missing (%s)" % label)
+        return text.replace(old, new, count)
+
+    def v14_region(text, start_mark, end_mark, replacement, label):
+        a = text.find(start_mark)
+        if a < 0:
+            raise SystemExit("gpSP V14 region start missing (%s)" % label)
+        b = text.find(end_mark, a)
+        if b < 0:
+            raise SystemExit("gpSP V14 region end missing (%s)" % label)
+        if text.find(start_mark, a + len(start_mark)) >= 0:
+            raise SystemExit("gpSP V14 region start is not unique (%s)" % label)
+        return text[:a] + replacement + "\n\n" + text[b:]
+
+    if v14_mark not in vs:
+        # 1) Compact decoded-OBJ cache.  obj_w/obj_h remain the *base* GBA
+        # dimensions; affine double-size is still applied exactly where the
+        # original renderer applied it.  Affine matrix words live in OAM too,
+        # therefore the existing OAM_UPDATED contract also makes caching them
+        # safe (all CPU/DMA writes to OAM set that flag).
+        old = """typedef struct {
+  s32 obj_x, obj_y;
+  s32 obj_w, obj_h;
+  u32 attr1, attr2;
+  bool is_double;
+} t_sprite;
+"""
+        new = """typedef struct {
+  s16 obj_x, obj_y;
+  s16 aff_dx, aff_dy, aff_dmx, aff_dmy;
+  u16 attr0, attr1, attr2;
+  u8 obj_w, obj_h;
+} t_sprite;
+
+/* AURORA_GPSP_GBA_V14_SPRITE_PERF_20260911
+ * Decoded once whenever order_obj() observes OAM_UPDATED, then reused by
+ * every scanline.  20 bytes x 128 = 2.5 KiB, avoiding repeated endian swaps,
+ * shape/size table lookups, X sign-extension and affine-matrix loads. */
+static t_sprite obj_cache[128];
+"""
+        vs = v14_replace(vs, old, new, "compact OBJ cache type")
+
+        # Small hot-loop cleanup: make palette invariance explicit.  GCC often
+        # hoists this already, but doing it in source guarantees the sprite
+        # inner loops contain no repeated palette-base formation.
+        old = """  } else {
+    // Only 32 bits (8 pixels * 4 bits)
+    for (u32 i = start; i < end; i++, dest_ptr++) {
+      u32 selb = hflip ? (3-i/2) : i/2;
+      u32 seln = hflip ? ((i & 1) ^ 1) : (i & 1);
+      u8 pval = (tile_ptr[selb] >> (seln * 4)) & 0xF;
+      const u16 *subpal = &pal[palette];
+"""
+        new = """  } else {
+    // Only 32 bits (8 pixels * 4 bits)
+    const u16 *subpal = &pal[palette];
+    for (u32 i = start; i < end; i++, dest_ptr++) {
+      u32 selb = hflip ? (3-i/2) : i/2;
+      u32 seln = hflip ? ((i & 1) ^ 1) : (i & 1);
+      u8 pval = (tile_ptr[selb] >> (seln * 4)) & 0xF;
+"""
+        vs = v14_replace(vs, old, new, "partial OBJ tile subpalette")
+
+        old = """  } else {
+    u32 tilepix = eswap32(*(u32*)tile_ptr);
+    if (tilepix) {   // Can skip all pixels if the row is just transparent
+      for (u32 i = 0; i < 8; i++, dest_ptr++) {
+        u8 pval = (hflip ? (tilepix >> ((7-i)*4)) : (tilepix >> (i*4))) & 0xF;
+        const u16 *subpal = &pal[palette];
+"""
+        new = """  } else {
+    u32 tilepix = eswap32(*(u32*)tile_ptr);
+    const u16 *subpal = &pal[palette];
+    if (tilepix) {   // Can skip all pixels if the row is just transparent
+      for (u32 i = 0; i < 8; i++, dest_ptr++) {
+        u8 pval = (hflip ? (tilepix >> ((7-i)*4)) : (tilepix >> (i*4))) & 0xF;
+"""
+        vs = v14_replace(vs, old, new, "full OBJ tile subpalette")
+
+        old = """  u32 px_attr = px_comb | palette | 0x100;  // Combine flags + high palette bit
+
+  u8 pval = 0;
+  u32 mctr = 0;
+"""
+        new = """  u32 px_attr = px_comb | palette | 0x100;  // Combine flags + high palette bit
+  const u16 *subpal = &pal[palette];
+
+  u8 pval = 0;
+  u32 mctr = 0;
+"""
+        vs = v14_replace(vs, old, new, "mosaic OBJ subpalette", 1)
+        old = """    // Write the pixel value as required
+    const u16 *subpal = &pal[palette];
+    if (pval) {
+"""
+        new = """    // Write the pixel value as required
+    if (pval) {
+"""
+        vs = v14_replace(vs, old, new, "mosaic OBJ inner subpalette", 1)
+
+        # 2) Affine OBJ: preserve the full rotation path, but the dy==0
+        # specialization has a scanline-constant source Y.  Hoist Y tile-row
+        # address formation out of the pixel loop and consume affine values
+        # already decoded by order_obj().
+        affine_start = """template <typename stype, rendtype rdtype, bool mosaic, bool is8bpp, bool rotate>
+static void render_affine_object("""
+        affine_end = "// Renders a single sprite on the current scanline."
+        affine_new = r"""template <typename stype, rendtype rdtype, bool mosaic, bool is8bpp, bool rotate>
+static void render_affine_object(
+  const t_sprite *obji,
+  u32 start, u32 end, stype *dst_ptr, u32 mosv, u32 mosh,
+  u32 base_tile, u32 pxcomb, u16 palette, const u16 *palptr,
+  s32 vcount, bool obj1dmap
+) {
+  // Tile size in bytes for each mode
+  const u32 tile_bsize = is8bpp ? tile_size_8bpp : tile_size_4bpp;
+  const u32 tile_bwidth = is8bpp ? tile_width_8bpp : tile_width_4bpp;
+
+  // Affine parameters are decoded once from OAM by order_obj().
+  const s32 dx  = obji->aff_dx;
+  const s32 dy  = obji->aff_dy;
+  const s32 dmx = obji->aff_dmx;
+  const s32 dmy = obji->aff_dmy;
+  const bool is_double = (obji->attr0 & 0x0200) != 0;
+
+  // Object dimensions and boundaries
+  const u32 obj_dimw = obji->obj_w;
+  const u32 obj_dimh = obji->obj_h;
+  s32 middle_x = is_double ? obji->obj_w : (obji->obj_w / 2);
+  const s32 middle_y = is_double ? obji->obj_h : (obji->obj_h / 2);
+  const s32 obj_width  = is_double ? obji->obj_w * 2 : obji->obj_w;
+  const s32 obj_height = is_double ? obji->obj_h * 2 : obji->obj_h;
+
+  if (mosaic)
+    vcount -= vcount % mosv;
+  const s32 y_delta = vcount - (obji->obj_y + middle_y);
+
+  if (obji->obj_x < (signed)start)
+    middle_x -= (start - obji->obj_x);
+  s32 source_x = (obj_dimw << 7) + (y_delta * dmx) - (middle_x * dx);
+  s32 source_y = (obj_dimh << 7) + (y_delta * dmy) - (middle_x * dy);
+
+  // Retain upstream's early rejection.
+  if (!rotate && ((u32)(source_y >> 8)) >= (u32)obj_height)
+    return;
+
+  const u32 d_start = MAX((signed)start, obji->obj_x);
+  const u32 d_end   = MIN((signed)end,   obji->obj_x + obj_width);
+  u32 cnt = d_end - d_start;
+  dst_ptr += d_start;
+
+  const u32 tile_pitch = obj1dmap ? (obj_dimw / 8) * tile_bsize : 1024;
+  const u32 px_attr = pxcomb | palette | 0x100;
+
+  // In the no-rotation specialization source_y never changes.  The original
+  // loop therefore recomputed an identical tile-row term for every pixel.
+  u32 fixed_pixel_y = 0;
+  u32 fixed_y_tile_off = 0;
+  if (!rotate) {
+    fixed_pixel_y = (u32)(source_y >> 8);
+    // This is equivalent to the original per-pixel source bounds check:
+    // with dy==0 an out-of-range Y can never become valid later in the row.
+    if (fixed_pixel_y >= obj_dimh)
+      return;
+    fixed_y_tile_off =
+      ((fixed_pixel_y >> 3) * tile_pitch) +
+      ((fixed_pixel_y & 0x7) * tile_bwidth);
+  }
+
+  // Skip output pixels until their source position enters the sprite.
+  while (cnt) {
+    const u32 pixel_x = (u32)(source_x >> 8);
+    if (!rotate) {
+      if (pixel_x < obj_dimw)
+        break;
+    } else {
+      const u32 pixel_y = (u32)(source_y >> 8);
+      if (pixel_x < obj_dimw && pixel_y < obj_dimh)
+        break;
+    }
+
+    dst_ptr++;
+    source_x += dx;
+    if (rotate)
+      source_y += dy;
+    cnt--;
+  }
+
+  u8 pixval = 0;
+  u32 mctr = 0;
+  for (u32 i = 0; i < cnt; i++) {
+    const u32 pixel_x = (u32)(source_x >> 8);
+    const u32 pixel_y = rotate ? (u32)(source_y >> 8) : fixed_pixel_y;
+
+    if (pixel_x >= obj_dimw || (rotate && pixel_y >= obj_dimh))
+      return;
+
+    if (!mosaic || !mctr) {
+      const u32 y_tile_off = rotate
+        ? ((pixel_y >> 3) * tile_pitch) + ((pixel_y & 0x7) * tile_bwidth)
+        : fixed_y_tile_off;
+
+      if (is8bpp) {
+        const u32 tile_off =
+          base_tile +
+          y_tile_off +
+          ((pixel_x >> 3) * tile_bsize) +
+          (pixel_x & 0x7);
+
+        pixval = vram[0x10000 + (tile_off & 0x7FFF)];
+      } else {
+        const u32 tile_off =
+          base_tile +
+          y_tile_off +
+          ((pixel_x >> 3) * tile_bsize) +
+          ((pixel_x >> 1) & 0x3);
+
+        const u8 pixpair = vram[0x10000 + (tile_off & 0x7FFF)];
+        pixval = (pixel_x & 1) ? (pixpair >> 4) : (pixpair & 0xF);
+      }
+      mctr = mosh;
+    }
+    if (mosaic)
+      mctr--;
+
+    if (pixval) {
+      if (rdtype == FULLCOLOR)
+        *dst_ptr = palptr[pixval | palette];
+      else if (rdtype == INDXCOLOR)
+        *dst_ptr = pixval | px_attr;
+      else if (rdtype == STCKCOLOR) {
+        if (*dst_ptr & 0x100)
+          *dst_ptr = pixval | px_attr | ((*dst_ptr) & 0xFFFF0000);
+        else
+          *dst_ptr = pixval | px_attr | ((*dst_ptr) << 16);
+      }
+      else if (rdtype == PIXCOPY)
+        *dst_ptr = dst_ptr[240];
+    }
+
+    dst_ptr++;
+    source_x += dx;
+    if (rotate)
+      source_y += dy;
+  }
+}"""
+        vs = v14_region(vs, affine_start, affine_end, affine_new, "affine OBJ renderer")
+
+        # 3) Sprite dispatcher: VCOUNT, DISPCNT OBJ mapping and MOSAIC are
+        # scanline invariants.  Receive them from render_scanline_objs instead
+        # of rereading global ioreg state once (or more) for every object.
+        sprite_start = """template <typename stype, rendtype rdtype, bool is8bpp, bool mosaic>
+inline static void render_sprite("""
+        sprite_end = "// Renders objects on a scanline for a given priority."
+        sprite_new = r"""template <typename stype, rendtype rdtype, bool is8bpp, bool mosaic>
+inline static void render_sprite(
+  const t_sprite *obji, u32 start, u32 end, stype *scanline,
+  u32 pxcomb, const u16* palptr, s32 vcount, bool obj1dmap, u32 mosaic_reg
+) {
+  const bool is_affine = (obji->attr0 & 0x0100) != 0;
+  const u32 msk = is8bpp && !obj1dmap ? 0x3FE : 0x3FF;
+  const u32 base_tile = (obji->attr2 & msk) * 32;
+
+  const u32 mosv = (mosaic ? (mosaic_reg >> 12) & 0xF : 0) + 1;
+  const u32 mosh = (mosaic ? (mosaic_reg >>  8) & 0xF : 0) + 1;
+
+  // Objects use the higher palette part in 4bpp mode.
+  const u16 pal = is8bpp ? 0 : ((obji->attr2 >> 8) & 0xF0);
+
+  if (is_affine) {
+    if (obji->aff_dy == 0)
+      render_affine_object<stype, rdtype, mosaic, is8bpp, false>(
+        obji, start, end, scanline, mosv, mosh,
+        base_tile, pxcomb, pal, palptr, vcount, obj1dmap);
+    else
+      render_affine_object<stype, rdtype, mosaic, is8bpp, true>(
+        obji, start, end, scanline, mosv, mosh,
+        base_tile, pxcomb, pal, palptr, vcount, obj1dmap);
+  } else {
+    if (obji->obj_x >= (signed)end || obji->obj_x + obji->obj_w <= (signed)start)
+      return;
+
+    const bool hflip = (obji->attr1 & 0x1000) != 0;
+    const bool vflip = (obji->attr1 & 0x2000) != 0;
+
+    u32 voffset = vflip ? obji->obj_y + obji->obj_h - vcount - 1
+                        : vcount - obji->obj_y;
+    if (mosaic)
+      voffset -= voffset % mosv;
+
+    const u32 tile_bsize  = is8bpp ? tile_size_8bpp : tile_size_4bpp;
+    const u32 tile_bwidth = is8bpp ? tile_width_8bpp : tile_width_4bpp;
+    const u32 obj_pitch = obj1dmap ? (obji->obj_w / 8) * tile_bsize : 1024;
+    const u32 hflip_off = hflip ? ((obji->obj_w / 8) - 1) * tile_bsize : 0;
+
+    const u32 tile_offset =
+      base_tile +
+      (voffset / 8) * obj_pitch +
+      (voffset % 8) * tile_bwidth +
+      hflip_off;
+
+    const s32 obj_x_offset = obji->obj_x - (s32)start;
+    const u32 clipped_width =
+      obj_x_offset >= 0 ? obji->obj_w : obji->obj_w + obj_x_offset;
+    const u32 max_range =
+      obj_x_offset >= 0 ? end - obji->obj_x : end - start;
+    const u32 max_draw = MIN(max_range, clipped_width);
+
+    if (mosaic && mosh > 1) {
+      if (hflip)
+        render_object_mosaic<stype, rdtype, is8bpp, true>(
+          obj_x_offset, max_draw, &scanline[start], tile_offset,
+          mosh, pxcomb, pal, palptr);
+      else
+        render_object_mosaic<stype, rdtype, is8bpp, false>(
+          obj_x_offset, max_draw, &scanline[start], tile_offset,
+          mosh, pxcomb, pal, palptr);
+    } else {
+      if (hflip)
+        render_object<stype, rdtype, is8bpp, true>(
+          obj_x_offset, max_draw, &scanline[start], tile_offset,
+          pxcomb, pal, palptr);
+      else
+        render_object<stype, rdtype, is8bpp, false>(
+          obj_x_offset, max_draw, &scanline[start], tile_offset,
+          pxcomb, pal, palptr);
+    }
+  }
+}"""
+        vs = v14_region(vs, sprite_start, sprite_end, sprite_new, "OBJ dispatcher")
+
+        # 4) Per-priority scanline pass: consume decoded OBJ metadata directly.
+        # color_flags(4), MOSAIC, OBJ mapping and WINOUT do not change while
+        # update_scanline() is executing, so read once per pass rather than per
+        # sprite.  Window segmentation is deliberately left untouched.
+        scan_start = """template <typename stype, rendtype rdtype>
+void render_scanline_objs("""
+        scan_end = "// Goes through the object list in the OAM"
+        scan_new = r"""template <typename stype, rendtype rdtype>
+void render_scanline_objs(
+  u32 priority, u32 start, u32 end, void *raw_ptr, const u16* palptr
+) {
+  stype *scanline = (stype*)raw_ptr;
+  const s32 vcount = read_ioreg(REG_VCOUNT);
+  const u32 obj_color_flags = color_flags(4);
+  const u32 mosaic_reg = read_ioreg(REG_MOSAIC);
+  const bool obj1dmap = (read_ioreg(REG_DISPCNT) & 0x40) != 0;
+  const u32 obj_enable =
+    (rdtype == PIXCOPY) ? (read_ioreg(REG_WINOUT) >> 8) : 0;
+
+  const u32 objcnt = obj_priority_count[priority][vcount];
+  const u8 *objlist = obj_priority_list[priority][vcount];
+
+  // Render all visible objects for this priority, back to front.
+  for (s32 objn = (s32)objcnt - 1; objn >= 0; objn--) {
+    const u32 objoff = objlist[objn];
+    const t_sprite *obji = &obj_cache[objoff];
+    const u16 obj_attr0 = obji->attr0;
+    const bool is_affine = (obj_attr0 & 0x0100) != 0;
+    const bool is_trans =
+      ((obj_attr0 >> 10) & 0x3) == OBJ_MOD_SEMITRAN;
+    const bool is_double = (obj_attr0 & 0x0200) != 0;
+
+    const s32 obj_maxw =
+      (is_affine && is_double) ? obji->obj_w * 2 : obji->obj_w;
+
+    if (obji->obj_x >= (signed)end ||
+        obji->obj_x + obj_maxw <= (signed)start)
+      continue;
+
+    const bool forcebld = is_trans && rdtype != FULLCOLOR;
+
+    if (rdtype == PIXCOPY) {
+      const u32 sec_start = MAX((signed)start, obji->obj_x);
+      const u32 sec_end   = MIN((signed)end, obji->obj_x + obj_maxw);
+      u16 *tmp_ptr = (u16*)&scanline[GBA_SCREEN_PITCH];
+      render_scanline_conditional(sec_start, sec_end, tmp_ptr, obj_enable);
+    }
+
+    const u32 pxcomb = (forcebld ? 0x800 : 0) | obj_color_flags;
+    const bool emosaic = (obj_attr0 & 0x1000) != 0;
+    const bool is_8bpp = (obj_attr0 & 0x2000) != 0;
+    const bool mosaic_active = emosaic && (mosaic_reg & 0xFF00);
+
+    if (mosaic_active) {
+      if (is_8bpp)
+        render_sprite<stype, rdtype, true, true>(
+          obji, start, end, scanline, pxcomb, palptr,
+          vcount, obj1dmap, mosaic_reg);
+      else
+        render_sprite<stype, rdtype, false, true>(
+          obji, start, end, scanline, pxcomb, palptr,
+          vcount, obj1dmap, mosaic_reg);
+    } else {
+      if (is_8bpp)
+        render_sprite<stype, rdtype, true, false>(
+          obji, start, end, scanline, pxcomb, palptr,
+          vcount, obj1dmap, mosaic_reg);
+      else
+        render_sprite<stype, rdtype, false, false>(
+          obji, start, end, scanline, pxcomb, palptr,
+          vcount, obj1dmap, mosaic_reg);
+    }
+  }
+}"""
+        vs = v14_region(vs, scan_start, scan_end, scan_new, "OBJ scanline pass")
+
+        # 5) order_obj remains the sole invalidation/rebuild point, but now it
+        # stores the already-decoded values it was computing anyway.  The
+        # hardware cycle-limit logic and row lists are intentionally byte-for-
+        # byte equivalent in structure to upstream.
+        order_start = "static void order_obj(u32 video_mode)\n"
+        order_end = "u32 layer_order[16];"
+        order_new = r"""static void order_obj(u32 video_mode)
+{
+  u32 obj_num;
+  u32 row;
+  t_oam *oam_base = (t_oam*)oam_ram;
+  u16 rend_cycles[160];
+
+  const bool hblank_free = read_ioreg(REG_DISPCNT) & 0x20;
+  const u16 max_rend_cycles = !sprite_limit ? REND_CYC_MAX :
+                               hblank_free  ? REND_CYC_REDUCED :
+                                              REND_CYC_SCANLINE;
+
+  memset(obj_priority_count, 0, sizeof(obj_priority_count));
+  memset(obj_alpha_count, 0, sizeof(obj_alpha_count));
+  memset(rend_cycles, 0, sizeof(rend_cycles));
+
+  for (obj_num = 0; obj_num < 128; obj_num++)
+  {
+    t_oam *oam_ptr = &oam_base[obj_num];
+    const u16 obj_attr0 = eswap16(oam_ptr->attr0);
+
+    // Bit 9 disables regular sprites (that is, non-affine ones).
+    if ((obj_attr0 & 0x0300) == 0x0200)
+      continue;
+
+    const u16 obj_shape = obj_attr0 >> 14;
+    const u32 obj_mode = (obj_attr0 >> 10) & 0x03;
+
+    if ((obj_shape == 0x3) || (obj_mode == OBJ_MOD_INVALID))
+      continue;
+
+    const u16 obj_attr2 = eswap16(oam_ptr->attr2);
+
+    // On bitmap modes, objs 0-511 are not usable.
+    if ((video_mode >= 3) && (!(obj_attr2 & 0x200)))
+      continue;
+
+    const u16 obj_attr1 = eswap16(oam_ptr->attr1);
+    const u16 obj_size = obj_attr1 >> 14;
+    const s32 obj_base_height = obj_dim_table[obj_shape][obj_size][1];
+    const s32 obj_base_width  = obj_dim_table[obj_shape][obj_size][0];
+    s32 obj_height = obj_base_height;
+    s32 obj_width  = obj_base_width;
+    s32 obj_y = obj_attr0 & 0xFF;
+
+    if (obj_y > 160)
+      obj_y -= 256;
+
+    if (obj_attr0 & 0x0200)
+    {
+      obj_height *= 2;
+      obj_width *= 2;
+    }
+
+    if (((obj_y + obj_height) > 0) && (obj_y < 160))
+    {
+      const s32 obj_x = (s32)(obj_attr1 << 23) >> 23;
+
+      if (((obj_x + obj_width) > 0) && (obj_x < 240))
+      {
+        const bool is_affine = (obj_attr0 & 0x0100) != 0;
+        t_sprite *cached = &obj_cache[obj_num];
+
+        cached->obj_x = (s16)obj_x;
+        cached->obj_y = (s16)obj_y;
+        cached->obj_w = (u8)obj_base_width;
+        cached->obj_h = (u8)obj_base_height;
+        cached->attr0 = obj_attr0;
+        cached->attr1 = obj_attr1;
+        cached->attr2 = obj_attr2;
+
+        if (is_affine) {
+          const u32 pnum = (obj_attr1 >> 9) & 0x1F;
+          const t_affp *affp_base = (const t_affp*)oam_ram;
+          const t_affp *affp = &affp_base[pnum];
+          cached->aff_dx  = (s16)eswap16(affp->dx);
+          cached->aff_dmx = (s16)eswap16(affp->dmx);
+          cached->aff_dy  = (s16)eswap16(affp->dy);
+          cached->aff_dmy = (s16)eswap16(affp->dmy);
+        } else {
+          cached->aff_dx = cached->aff_dmx =
+          cached->aff_dy = cached->aff_dmy = 0;
+        }
+
+        u32 obj_priority = (obj_attr2 >> 10) & 0x03;
+        const u32 starty = MAX(obj_y, 0);
+        const u32 endy   = MIN(obj_y + obj_height, 160);
+        const u16 cyccnt = is_affine ? (10 + obj_width * 2) : obj_width;
+
+        switch (obj_mode) {
+        case OBJ_MOD_SEMITRAN:
+          for (row = starty; row < endy; row++)
+          {
+            if (rend_cycles[row] < max_rend_cycles) {
+              const u32 cur_cnt = obj_priority_count[obj_priority][row];
+              obj_priority_list[obj_priority][row][cur_cnt] = obj_num;
+              obj_priority_count[obj_priority][row] = cur_cnt + 1;
+              rend_cycles[row] += cyccnt;
+              obj_alpha_count[row] = 1;
+            }
+          }
+          break;
+
+        case OBJ_MOD_WINDOW:
+          obj_priority = 4;
+          /* fallthrough */
+        case OBJ_MOD_NORMAL:
+          for (row = starty; row < endy; row++)
+          {
+            if (rend_cycles[row] < max_rend_cycles) {
+              const u32 cur_cnt = obj_priority_count[obj_priority][row];
+              obj_priority_list[obj_priority][row][cur_cnt] = obj_num;
+              obj_priority_count[obj_priority][row] = cur_cnt + 1;
+              rend_cycles[row] += cyccnt;
+            }
+          }
+          break;
+        };
+      }
+    }
+  }
+}"""
+        vs = v14_region(vs, order_start, order_end, order_new, "OBJ ordering/cache rebuild")
+
+        # Audit the transformed source before committing it to the stage.
+        required = (
+            "static t_sprite obj_cache[128];",
+            "const u32 obj_color_flags = color_flags(4);",
+            "fixed_y_tile_off",
+            "cached->aff_dy",
+            "vcount, obj1dmap, mosaic_reg",
+        )
+        for token in required:
+            if token not in vs:
+                raise SystemExit("gpSP V14 post-patch audit failed: missing %r" % token)
+
+        forbidden = (
+            "const t_affp *affp = &affp_base[pnum];\n\n    if (affp->dy == 0)",
+            "s32 vcount = read_ioreg(REG_VCOUNT);\n  bool obj1dmap = read_ioreg(REG_DISPCNT) & 0x40;",
+        )
+        for token in forbidden:
+            if token in vs:
+                raise SystemExit("gpSP V14 post-patch audit failed: stale hot-path code remains")
+
+        vid.write_text(vs, encoding="utf-8", newline="\n")
+
     stamp.write_text(digest + "\n", encoding="utf-8")
-    print(f"[ gpSP stage ] prepared TFA + PS2 safe perf + Safe Frameskip resync + Color Correction + 8 MiB ROM cache + L/R turbo: {stage}")
+    print(f"[ gpSP stage ] prepared TFA + PS2 safe perf + Safe Frameskip resync + Color Correction + 8 MiB ROM cache + L/R turbo + V14 sprite perf: {stage}")
 
 
 if __name__ == "__main__":

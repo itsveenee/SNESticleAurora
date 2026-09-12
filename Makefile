@@ -122,7 +122,8 @@ GPSP_DIR ?= $(CURDIR)/src/third_party/gpsp
 # frame-mix fix are injected only into this build-tree staging copy.
 GPSP_STAGE_DIR ?= $(CURDIR)/build/gpsp-src
 # AURORA_GPSP_GBA_V13_SAFE_PERF_20260911
-GPSP_STAGE_STAMP := $(GPSP_STAGE_DIR)/.aurora-gpsp-stage-v13
+# AURORA_GPSP_GBA_V14_SPRITE_PERF_20260911
+GPSP_STAGE_STAMP := $(GPSP_STAGE_DIR)/.aurora-gpsp-stage-v14
 GPSP_RAW_LIB ?= $(GPSP_STAGE_DIR)/gpsp_libretro_ps2.a
 GPSP_BUILD_DIR ?= $(CURDIR)/build/gpsp
 GPSP_LIB ?= $(GPSP_BUILD_DIR)/gpsp_libretro_ps2.a
