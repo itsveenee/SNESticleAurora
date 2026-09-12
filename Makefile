@@ -346,7 +346,8 @@ CXXFLAGS += -DLIBXMP_CORE_PLAYER
 # sem numero ou APP_VERSION=x.y.z para testar uma versao futura.
 # __DATE__/__TIME__ pegariam UTC (3h adiantado no Brasil); por isso a
 # data/hora vem do Makefile com TZ fixo de Brasilia.
-APP_VERSION ?= 1.0.0
+# AURORA_V22_APP_VERSION_1_0_1_20260912
+APP_VERSION ?= 1.0.1
 ifeq ($(strip $(APP_VERSION)),)
 VER_SUFFIX      :=
 APP_VERSION_DEF :=

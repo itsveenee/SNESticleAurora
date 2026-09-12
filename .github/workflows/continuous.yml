@@ -70,9 +70,13 @@ jobs:
           grep -q 'aurora_mix_history_valid' tools/prepare_gpsp_aurora_sources.py
           grep -q 'aurora_set_frontend_skip' tools/prepare_gpsp_aurora_sources.py
           grep -q 'ROM_BUFFER_SIZE=4' tools/prepare_gpsp_aurora_sources.py
-          grep -Fq 'ROM_TRANSLATION_CACHE_SIZE (1024 * 1024 * 4)' tools/prepare_gpsp_aurora_sources.py
-          grep -q 'SyncDCache(baseaddr, endptr)' tools/prepare_gpsp_aurora_sources.py
+          grep -q 'AURORA_GPSP_GBA_V21_MEMORY_TFA_DYNAREC_20260912' tools/prepare_gpsp_aurora_sources.py
+          grep -Fq 'ROM_TRANSLATION_CACHE_SIZE (1024 * 1024 * 2)' tools/prepare_gpsp_aurora_sources.py
+          grep -q 'AURORA_GPSP_GBA_V21_DYNAREC_FULL_CACHE_SYNC_20260912' tools/prepare_gpsp_aurora_sources.py
+          ! grep -Fq 'ROM_TRANSLATION_CACHE_SIZE (1024 * 1024 * 4)' tools/prepare_gpsp_aurora_sources.py
+          ! grep -q 'SyncDCache(baseaddr, endptr)' tools/prepare_gpsp_aurora_sources.py
           grep -q '0x7BDE7BDEU' tools/prepare_gpsp_aurora_sources.py
+          # AURORA_GPSP_GBA_V21_CI_POLICY_20260912
           test -f LICENSES/gpSP-GPL-2.0.txt
 
 

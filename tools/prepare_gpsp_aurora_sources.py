@@ -12,7 +12,7 @@ import re
 import shutil
 from pathlib import Path
 
-VERSION = "AURORA_GPSP_GBA_V15_ACCURACY_PERF_20260912_STAGE_1"  # AURORA_GPSP_GBA_V15_ACCURACY_PERF_20260912
+VERSION = "AURORA_GPSP_GBA_V21_MEMORY_TFA_DYNAREC_20260912_STAGE_1"  # AURORA_GPSP_GBA_V21_MEMORY_TFA_DYNAREC_20260912
 
 TFA_H = r'''#ifndef AURORA_TFA_H
 #define AURORA_TFA_H
@@ -510,11 +510,11 @@ def main():
     # Safe PS2 performance pass. These changes do not alter GBA timing,
     # serial/TFA semantics, save data, RTC or frame count.
 
-    # 1) Rebalance the fixed JIT caches. Upstream SMALL_TRANSLATION_CACHE gives
-    # PS2 only 2 MiB ROM + 384 KiB RAM translated code. Aurora simultaneously
-    # reduced gpSP's dynamic ROM page-cache ceiling by 8 MiB, so a conservative
-    # 4 MiB + 512 KiB JIT still leaves the integrated build below the V1/V2
-    # worst-case memory envelope while reducing full-cache flush/retranslation.
+    # 1) V21 memory recovery. These MIPS JIT buffers live in the linked ELF
+    # even while another emulator core is active. Keep PS2 at upstream SMALL:
+    # 2 MiB ROM + 384 KiB RAM. V13's 4 MiB + 512 KiB permanently consumed
+    # another 2176 KiB and matches the cross-core "not enough memory" regression.
+    # Prefer occasional gpSP JIT turnover over starving GBC/MD/PCE/CD loaders.
     cfg = stage / "gpsp_config.h"
     cs = cfg.read_text(encoding="utf-8")
     jit_old = ("#if defined(SMALL_TRANSLATION_CACHE)\n"
@@ -526,8 +526,8 @@ def main():
                "#endif")
     jit_new = ("/* AURORA_GPSP_GBA_V13_CORE_SAFE_PERF_20260911 */\n"
                "#if defined(PS2)\n"
-               "  #define ROM_TRANSLATION_CACHE_SIZE (1024 * 1024 * 4)\n"
-               "  #define RAM_TRANSLATION_CACHE_SIZE (1024 * 512)\n"
+               "  #define ROM_TRANSLATION_CACHE_SIZE (1024 * 1024 * 2)\n"
+               "  #define RAM_TRANSLATION_CACHE_SIZE (1024 * 384)\n"
                "#elif defined(SMALL_TRANSLATION_CACHE)\n"
                "  #define ROM_TRANSLATION_CACHE_SIZE (1024 * 1024 * 2)\n"
                "  #define RAM_TRANSLATION_CACHE_SIZE (1024 * 384)\n"
@@ -541,10 +541,11 @@ def main():
         cs = cs.replace(jit_old, jit_new, 1)
         cfg.write_text(cs, encoding="utf-8", newline="\n")
 
-    # 2) gpSP's PS2 dynarec used FlushCache(0) for every newly emitted code
-    # range. PS2SDK exposes SyncDCache(start,end), so write back only the bytes
-    # that grew. Keep FlushCache(2) exactly as upstream: instruction-cache
-    # invalidation remains global, preserving the conservative JIT contract.
+    # 2) V21 dynarec correctness. The MIPS emitter can backpatch code that was
+    # emitted before the current [baseaddr,endptr) tail. A range-only D-cache
+    # writeback can therefore leave a modified older cache line dirty while the
+    # full I-cache invalidation exposes stale memory. Preserve upstream PS2's
+    # full D-cache writeback + full I-cache invalidate.
     cpu = stage / "cpu_threaded.c"
     cps = cpu.read_text(encoding="utf-8")
     sync_old = ("#elif defined(PS2)\n"
@@ -554,10 +555,11 @@ def main():
                 "  }")
     sync_new = ("#elif defined(PS2)\n"
                 "  void platform_cache_sync(void *baseaddr, void *endptr) {\n"
-                "    /* AURORA_GPSP_GBA_V13_CORE_SAFE_PERF_20260911 */\n"
-                "    if (baseaddr < endptr)\n"
-                "      SyncDCache(baseaddr, endptr); /* range D-cache writeback */\n"
-                "    FlushCache(2);                  /* keep full I-cache invalidate */\n"
+                "    /* AURORA_GPSP_GBA_V21_DYNAREC_FULL_CACHE_SYNC_20260912 */\n"
+                "    (void)baseaddr;\n"
+                "    (void)endptr;\n"
+                "    FlushCache(0);   /* full D-cache writeback */\n"
+                "    FlushCache(2);   /* full I-cache invalidate */\n"
                 "  }")
     if sync_new not in cps:
         if sync_old not in cps:
@@ -1572,8 +1574,52 @@ static inline u8 lookup_pix_8bpp_cached(
             raise SystemExit("gpSP V15 affine post-patch audit failed")
         vid.write_text(vs, encoding="utf-8", newline="\n")
 
+
+    # ------------------------------------------------------------------
+    # V21: large-ROM pager correctness. TFA SIO remains owned by V15.
+    # ------------------------------------------------------------------
+    mem = stage / "gba_memory.c"
+    ms = mem.read_text(encoding="utf-8")
+    pager_mark = "AURORA_GPSP_GBA_V21_PAGER_IO_20260912"
+    if pager_mark not in ms:
+        page_old = (
+            "  filestream_seek(gamepak_file_large, file_index * (32 * 1024), SEEK_SET);\n"
+            "  {\n"
+            "    u32 read_len = (u32)filestream_read(gamepak_file_large, swap_location, (32 * 1024));\n"
+            "    if (read_len < (32 * 1024))\n"
+            "      memset(swap_location + read_len, 0xFF, (32 * 1024) - read_len);\n"
+            "  }\n"
+        )
+        page_new = (
+            "  /* " + pager_mark + "\n"
+            "   * Large carts are demand-paged in 32 KiB units. A failed seek or\n"
+            "   * negative read must never be cast to u32 and mistaken for a full\n"
+            "   * page; map deterministic open-cart data instead. */\n"
+            "  if (!gamepak_file_large ||\n"
+            "      filestream_seek(gamepak_file_large,\n"
+            "                      (int64_t)file_index * (32 * 1024), SEEK_SET) < 0)\n"
+            "  {\n"
+            "    memset(swap_location, 0xFF, (32 * 1024));\n"
+            "  }\n"
+            "  else\n"
+            "  {\n"
+            "    int64_t got = filestream_read(gamepak_file_large,\n"
+            "                                  swap_location, (32 * 1024));\n"
+            "    if (got <= 0)\n"
+            "      memset(swap_location, 0xFF, (32 * 1024));\n"
+            "    else if (got < (32 * 1024))\n"
+            "      memset(swap_location + (u32)got, 0xFF,\n"
+            "             (32 * 1024) - (u32)got);\n"
+            "  }\n"
+        )
+        if page_old not in ms:
+            raise SystemExit("gpSP V21 32 KiB ROM pager anchor missing")
+        ms = ms.replace(page_old, page_new, 1)
+        mem.write_text(ms, encoding="utf-8", newline="\n")
+
+
     stamp.write_text(digest + "\n", encoding="utf-8")
-    print(f"[ gpSP stage ] prepared TFA + PS2 safe perf + Safe Frameskip resync + Color Correction + 4 MiB ROM cache + L/R turbo + V14 sprite perf + V15 TFA/affine: {stage}")
+    print(f"[ gpSP stage ] V21: SMALL JIT memory + 4 MiB paged ROM + TFA pre-reserve (V15 SIO) + pager I/O + full PS2 JIT cache sync: {stage}")
 
 
 if __name__ == "__main__":

@@ -589,6 +589,27 @@ Bool GpSPSystem::LoadGame(const Char *pPath, const Char *pSystemDirectory)
              pSystemDirectory);
     s_GpSPHost = m_p;
 
+    /* AURORA_GPSP_GBA_V21_TFA_PREALLOC_20260912
+     * Reserve the accessory before gpSP retro_init(). retro_init()
+     * allocates the ROM LRU in 1 MiB chunks; allocating TFA later can
+     * fail after the LRU has consumed the last contiguous 2 MiB.
+     * Normal games still pay zero TFA RAM cost. */
+    {
+        Uint32 crc = 0;
+        if (AuroraGpSPCRC32File(pPath, &crc))
+            m_p->romCRC = crc;
+        if (AuroraGpSPTurboFileAdvanceCRC(m_p->romCRC))
+        {
+            m_p->tfaData =
+                new (std::nothrow) Uint8[AURORA_GBA_TFA_BYTES];
+            if (m_p->tfaData)
+                memset(m_p->tfaData, 0xff, AURORA_GBA_TFA_BYTES);
+            else
+                printf("[gpSP] Turbo File Advance disabled: "
+                       "2 MiB pre-allocation failed\n");
+        }
+    }
+
     GPSP_retro_set_environment(AuroraGpSPEnvironment);
     GPSP_retro_set_video_refresh(AuroraGpSPVideo);
     GPSP_retro_set_audio_sample(AuroraGpSPAudioSample);
@@ -598,6 +619,9 @@ Bool GpSPSystem::LoadGame(const Char *pPath, const Char *pSystemDirectory)
     GPSP_retro_init();
     m_p->initialized = TRUE;
     GPSP_retro_set_controller_port_device(0, RETRO_DEVICE_JOYPAD);
+    GPSP_aurora_tfa_set_storage(
+        m_p->tfaData,
+        m_p->tfaData ? AURORA_GBA_TFA_BYTES : 0U); /* AURORA_GPSP_GBA_V21_TFA_PREALLOC_20260912 */
 
     memset(&info, 0, sizeof(info));
     info.path = pPath;
@@ -609,30 +633,7 @@ Bool GpSPSystem::LoadGame(const Char *pPath, const Char *pSystemDirectory)
 
     m_p->loaded = TRUE;
 
-    /* CRC is calculated once, after gpSP has successfully loaded the path.
-     * Accessory RAM is allocated only for the two known clean dumps, so normal
-     * GBA games pay neither the 2 MiB RAM cost nor any serial-protocol work. */
-    {
-        Uint32 crc = 0;
-        if (AuroraGpSPCRC32File(pPath, &crc))
-            m_p->romCRC = crc;
-        if (AuroraGpSPTurboFileAdvanceCRC(m_p->romCRC))
-        {
-            m_p->tfaData = new (std::nothrow) Uint8[AURORA_GBA_TFA_BYTES];
-            if (m_p->tfaData)
-            {
-                memset(m_p->tfaData, 0xff, AURORA_GBA_TFA_BYTES);
-                GPSP_aurora_tfa_set_storage(m_p->tfaData, AURORA_GBA_TFA_BYTES);
-            }
-            else
-            {
-                printf("[gpSP] Turbo File Advance disabled: 2 MiB allocation failed\n");
-                GPSP_aurora_tfa_set_storage(NULL, 0);
-            }
-        }
-        else
-            GPSP_aurora_tfa_set_storage(NULL, 0);
-    }
+    /* AURORA_GPSP_GBA_V21_TFA_PREALLOC_20260912: CRC/storage were reserved before core init. */
 
     memset(&av, 0, sizeof(av));
     GPSP_retro_get_system_av_info(&av);

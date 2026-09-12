@@ -49,7 +49,7 @@ Bool MainLoopReinitVideoMode(Int32 mode);
 /* ------------------------------------------------------------------ */
 
 #define VIDEOCFG_MAGIC   0x53564944u   /* 'SVID' */
-#define VIDEOCFG_VERSION 48 /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909: GBC/SGB1/SGB2 selector */
+#define VIDEOCFG_VERSION 49 /* AURORA_V22_VIDEOCFG49_GGZOOM_OFF_20260912: same layout; GG Zoom hidden and forced Off */
 /* AURORA_CFG_MODE7_FULL_ONCE_V1_6_20260905: 44 -> 45; same-layout migration, Mode7 Full once. */
 /* AURORA_CD_MUSIC_REDBOOK_V3_20260830: v43 appends shared SCD/PCE CD Red Book toggle; old configs default On. */
 /* AURORA_PCE_SCALING_LIGHTGUN_TOGGLE_V2_20260830: v42 appends Light Gun; old configs default On. */
@@ -474,7 +474,7 @@ void VideoSettingsSave(void)
 	cfg.reserved38 = 0;
 	/* AURORA_SAFE_FRAMESKIP_GG_ZOOM_V2_2: v39 append-only fields. */
 	cfg.safeframeskip = MainLoopSafeFrameskipGetLevel();
-	cfg.ggzoom = PicoDriveBridge_GetGgZoom() ? 1 : 0;
+	cfg.ggzoom = 0; /* AURORA_V22_VIDEOCFG49_GGZOOM_OFF_20260912: hidden option is persisted Off */
 	cfg.lightgun = QuicknesBridge_GetLightGunEnabled() ? 1 : 0;
 	cfg.cdmusic = g_CdMusicEnabled ? 1 : 0; /* AURORA_CD_MUSIC_REDBOOK_V3_20260830 */
 	cfg.sgbinvert = MainLoopSgbInvertGetEnabled() ? 1 : 0; /* AURORA_CONFIG_STRICT_SGB_INVERT_CLOCK_V1_20260905 */
@@ -529,6 +529,18 @@ void VideoSettingsLoad(void)
 		if (header.version == VIDEOCFG_VERSION)
 		{
 			loaded = MemCardReadFile(path, (Uint8 *)&cfg, sizeof(cfg));
+		}
+		else if (header.version == 48)
+		{
+			/* AURORA_V22_VIDEOCFG49_GGZOOM_OFF_20260912
+			 * v48 is byte-identical; preserve all preferences except the
+			 * now-hidden GG Zoom setting, which migrates to Off. */
+			loaded = MemCardReadFile(path, (Uint8 *)&cfg, sizeof(cfg));
+			if (loaded)
+			{
+				cfg.ggzoom = 0;
+				cfg.version = VIDEOCFG_VERSION;
+			}
 		}
 		else if (header.version == 47)
 		{
@@ -882,8 +894,8 @@ if (loaded && header.version != VIDEOCFG_VERSION)
 		if (header.version >= 39 && header.version <= VIDEOCFG_VERSION &&
 		    cfg.safeframeskip >= 0 && cfg.safeframeskip <= 9)
 			MainLoopSafeFrameskipSetLevel(cfg.safeframeskip);
-		if (cfg.ggzoom == 0 || cfg.ggzoom == 1)
-			PicoDriveBridge_SetGgZoom(cfg.ggzoom != 0);
+		/* AURORA_V22_VIDEOCFG49_GGZOOM_OFF_20260912: retain field compatibility, but hidden policy is always Off. */
+		PicoDriveBridge_SetGgZoom(false);
 		if (cfg.lightgun == 0 || cfg.lightgun == 1)
 			QuicknesBridge_SetLightGunEnabled(cfg.lightgun != 0);
 		if (cfg.cdmusic == 0 || cfg.cdmusic == 1)
@@ -1274,8 +1286,10 @@ void CVideoScreen::Draw()
 	_VideoRow(vy, 5, m_iSelect, "Cover Art", CoverIsEnabled() ? "On" : "Off"); vy += 12;
 	_VideoRow(vy, 6, m_iSelect, "SMS VDP border",
 	          PicoDriveBridge_GetSmsColorBorder() ? "On" : "Off"); vy += 12;
+#if 0 /* AURORA_V22_VERSION_GGZOOM_HIDDEN_20260912: hidden, implementation intentionally retained */
 	_VideoRow(vy, 7, m_iSelect, "GG Zoom",
 	          PicoDriveBridge_GetGgZoom() ? "On" : "Off"); vy += 12;
+#endif
 	_VideoRow(vy, 8, m_iSelect, "Safe Frameskip",
 	          _VideoSafeFrameskipStatus()); vy += 12;
 
@@ -1431,6 +1445,7 @@ void CVideoScreen::Input(Uint32 buttons, Uint32 trigger)
 		{
 			m_iSelect--;
 			if (m_iSelect < lo) m_iSelect = hi;
+			if (m_iSelect == 7) m_iSelect = 6; /* AURORA_V22_VERSION_GGZOOM_HIDDEN_20260912 */
 			/* Keep retired index 36 unreachable without renumbering 37. */
 			if (m_iSelect == 36) m_iSelect = 35;
 			if (m_iSelect == 15) m_iSelect = 14; /* AURORA_SWC_FLOPPY_V5_20260831 */
@@ -1440,6 +1455,7 @@ void CVideoScreen::Input(Uint32 buttons, Uint32 trigger)
 		{
 			m_iSelect++;
 			if (m_iSelect > hi) m_iSelect = lo;
+			if (m_iSelect == 7) m_iSelect = 8; /* AURORA_V22_VERSION_GGZOOM_HIDDEN_20260912 */
 			if (m_iSelect == 36) m_iSelect = 37;
 			if (m_iSelect == 15) m_iSelect = 16; /* AURORA_SWC_FLOPPY_V5_20260831 */
 			if (m_iSelect >= 28 && m_iSelect <= 30) m_iSelect = 20; /* AURORA_V12_SELF_AUDIT_GBC_FX1_20260910 */
