@@ -644,11 +644,15 @@ Bool MainLoopProcess()
                     bSafeSkip ? NULL : pSurface, pMixBuffer, eMode);
                 PROF_LEAVE("GbaExecuteFrame");
 
-                if (!bSafeSkip)
+                /* AURORA_GPSP_GBA_V16_DIRECT_GS_CT16_20260912
+                 * Normal 240x160 gpSP frames stay 16-bit and are uploaded by
+                 * MainLoopRender. Keep the old RGBA texture upload only for
+                 * defensive/future geometry fallbacks. */
+                if (!bSafeSkip && !_pGba->CanDirectGsVideo())
                 {
-                    PROF_ENTER("GbaTexUpload");
+                    PROF_ENTER("GbaTexUploadFallback");
                     TextureUpload(&_OutTex, pSurface->GetLinePtr(0));
-                    PROF_LEAVE("GbaTexUpload");
+                    PROF_LEAVE("GbaTexUploadFallback");
                 }
             }
             else

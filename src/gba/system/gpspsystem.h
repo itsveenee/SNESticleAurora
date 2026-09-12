@@ -46,6 +46,13 @@ public:
     virtual const char *GetString(Emu::System::StringE eString);
     virtual Uint32 GetSampleRate();
 
+    /* AURORA_GPSP_GBA_V16_DIRECT_GS_CT16_20260912
+     * Normal gpSP PS2 video is already 0BGR1555, the GS' native CT16
+     * channel ordering. Let the frontend upload it directly instead of
+     * expanding 38,400 pixels to Aurora RGBA32 first. */
+    Bool CanDirectGsVideo() const;
+    Bool DrawDirectGs(Uint32 auroraOutBaseTBP, Float32 intensity);
+
     /* AURORA_GPSP_GBA_V2_TFA_BLEND_20260911 */
     Bool HasTurboFileAdvance() const;
     Uint8 *GetTurboFileAdvanceData();

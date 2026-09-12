@@ -12,6 +12,8 @@
 #include "snio.h"
 
 extern "C" {
+#include "gs.h"
+#include "gpprim.h"
 #include "libretro.h"
 
 /* These names are produced by tools/namespace_gpsp_archive.py. */
@@ -56,6 +58,12 @@ struct GpSPSystem::Impl
     Uint32 sampleRate;
     CRenderSurface *target;
     CMixBuffer *mix;
+    /* AURORA_GPSP_GBA_V16_DIRECT_GS_CT16_20260912 */
+    const void *directVideoData;
+    unsigned directVideoW;
+    unsigned directVideoH;
+    size_t directVideoPitch;
+    Bool directVideoValid;
     Char systemDirectory[1024];
     /* AURORA_GPSP_GBA_V2_TFA_BLEND_20260911 */
     Uint8 *tfaData;
@@ -64,7 +72,10 @@ struct GpSPSystem::Impl
     Impl()
         : initialized(FALSE), loaded(FALSE), pad(0),
           turboShoulderL(FALSE), turboShoulderR(FALSE), sampleRate(32768),
-          target(NULL), mix(NULL), tfaData(NULL), romCRC(0)
+          target(NULL), mix(NULL),
+          directVideoData(NULL), directVideoW(0), directVideoH(0),
+          directVideoPitch(0), directVideoValid(FALSE),
+          tfaData(NULL), romCRC(0)
     {
         systemDirectory[0] = 0;
     }
@@ -281,9 +292,37 @@ static void AuroraGpSPVideo(const void *data, unsigned width,
     const unsigned offX = (256U - nativeW) / 2U; /* 8 + 8 */
     const unsigned offY = (240U - nativeH) / 2U; /* 40 + 40 */
 
-    if (!p || !data || !p->target || !width || !height || !pitch)
-        return; /* NULL callback/target = Safe Frameskip; retain prior texture. */
+    if (!p || !data || !width || !height || !pitch)
+        return;
 
+    /* AURORA_GPSP_GBA_V16_DIRECT_GS_CT16_20260912
+     * gpSP's PS2 build uses USE_XBGR1555_FORMAT. That buffer is already
+     * 0BGR1555: R=0..4, G=5..9, B=10..14, which is exactly the RGB channel
+     * ordering consumed by GS PSMCT16. For the normal 240x160 geometry keep
+     * the libretro framebuffer pointer and let MainLoopRender upload it
+     * directly. No 16->32 expansion and no 256x240 RGBA staging surface.
+     *
+     * The pointer only has to live until the next retro_run(), and Aurora
+     * draws immediately after ExecuteFrame. Safe Frameskip passes target=NULL
+     * and therefore never publishes a new direct frame.
+     */
+    if (p->target &&
+        width == nativeW && height == nativeH &&
+        pitch >= nativeW * 2U && (pitch & 1U) == 0U &&
+        (pitch >> 1) <= 512U)
+    {
+        p->directVideoData = data;
+        p->directVideoW = width;
+        p->directVideoH = height;
+        p->directVideoPitch = pitch;
+        p->directVideoValid = TRUE;
+        return;
+    }
+
+    if (!p->target)
+        return; /* Safe Frameskip: retain the previously resident GS image. */
+
+    p->directVideoValid = FALSE;
     dstSurf = p->target;
     if (dstSurf->GetWidth() < 256U || dstSurf->GetHeight() < 240U)
         return;
@@ -347,6 +386,82 @@ static void AuroraGpSPVideo(const void *data, unsigned width,
             dst[x] = AuroraGpSPPs2PixelToSurface(src[sx]);
         }
     }
+}
+
+/* AURORA_GPSP_GBA_V16_DIRECT_GS_CT16_20260912 */
+Bool GpSPSystem::CanDirectGsVideo() const
+{
+    if (!m_p || !m_p->loaded || !m_p->directVideoValid ||
+        !m_p->directVideoData)
+        return FALSE;
+
+    if (m_p->directVideoW != 240U || m_p->directVideoH != 160U ||
+        m_p->directVideoPitch < 240U * 2U ||
+        (m_p->directVideoPitch & 1U) != 0U ||
+        (m_p->directVideoPitch >> 1) > 512U)
+        return FALSE;
+
+    return TRUE;
+}
+
+Bool GpSPSystem::DrawDirectGs(Uint32 auroraOutBaseTBP, Float32 intensity)
+{
+    unsigned pitchPixels;
+    unsigned texTBW;
+    unsigned texLog2;
+    Uint32 black;
+    Uint32 mod;
+    Uint32 modColor;
+
+    if (!auroraOutBaseTBP || !CanDirectGsVideo())
+        return FALSE;
+
+    pitchPixels = (unsigned)(m_p->directVideoPitch >> 1);
+    texTBW = (pitchPixels + 63U) & ~63U;
+
+    texLog2 = 5U;
+    while ((1U << texLog2) < pitchPixels && texLog2 < 9U)
+        ++texLog2;
+
+    /* Upload only the gpSP 16-bit backing rows. With the ordinary
+     * 240-pixel pitch this is 240*160*2 = 76,800 bytes instead of the
+     * old 256*256*4 = 262,144-byte RGBA texture upload. */
+    GPPrimUploadTexture(
+        (int)auroraOutBaseTBP, (int)texTBW,
+        0, 0, GS_PSMCT16,
+        (void *)m_p->directVideoData,
+        (int)pitchPixels, 160);
+
+    GPPrimSetTex(
+        auroraOutBaseTBP, texTBW, texLog2, 8,
+        GS_PSMCT16, 0, 0, GS_PSMCT16, 0);
+
+    /* Match the old 256x240 staging surface exactly:
+     * 8-pixel black bars left/right, 40 lines top/bottom, 240x160 image.
+     * GPPrimTexRect uses Aurora's active logical->physical transform, so
+     * GSK_SetGbSquarePixelDraw() still gives exact 2x2 pixels in 480i/1080i.
+     */
+    black = 0x80000000U;
+    GPPrimRect(0, 0, black,
+               256U << 4, 240U << 4, black,
+               0, 0);
+
+    if (intensity < 0.0f) intensity = 0.0f;
+    if (intensity > 1.0f) intensity = 1.0f;
+    mod = (Uint32)(128.0f * intensity + 0.5f);
+    if (mod > 128U) mod = 128U;
+    modColor = 0x80000000U | (mod << 16) | (mod << 8) | mod;
+
+    /* Half-texel UVs mirror Aurora's proven direct-GS paths and keep
+     * NEAREST sampling on texel centres. */
+    GPPrimTexRect(
+        8U << 4, 40U << 4,
+        8U, 8U,
+        (8U + 240U) << 4, (40U + 160U) << 4,
+        (240U << 4) + 8U, (160U << 4) + 8U,
+        0, modColor, 0);
+
+    return TRUE;
 }
 
 static size_t AuroraGpSPAudioBatch(const int16_t *data, size_t frames)
@@ -548,6 +663,11 @@ void GpSPSystem::UnloadGame()
     m_p->target = NULL;
     m_p->mix = NULL;
     m_p->pad = 0;
+    m_p->directVideoData = NULL;
+    m_p->directVideoW = 0;
+    m_p->directVideoH = 0;
+    m_p->directVideoPitch = 0;
+    m_p->directVideoValid = FALSE; /* AURORA_GPSP_GBA_V16_DIRECT_GS_CT16_20260912 */
     if (m_p->loaded)
     {
         GPSP_retro_unload_game();
@@ -581,6 +701,7 @@ void GpSPSystem::Reset()
     s_GpSPHost = m_p;
     GPSP_retro_reset();
     if (m_p->tfaData) GPSP_aurora_tfa_reset_protocol(); /* AURORA_GPSP_GBA_V2_TFA_BLEND_20260911 */
+    m_p->directVideoValid = FALSE; /* AURORA_GPSP_GBA_V16_DIRECT_GS_CT16_20260912 */
     m_uLine = 0;
     m_uFrame = 0;
 }
@@ -611,6 +732,13 @@ void GpSPSystem::ExecuteFrame(Emu::SysInputT *pInput,
     m_p->target = pTarget;
     m_p->mix = pMixBuf;
     s_GpSPHost = m_p;
+
+    /* AURORA_GPSP_GBA_V16_DIRECT_GS_CT16_20260912
+     * A visible host tick must receive a fresh video callback. A skipped tick
+     * deliberately leaves the prior GS image resident and does not invalidate
+     * the last direct pointer merely for bookkeeping. */
+    if (pTarget)
+        m_p->directVideoValid = FALSE;
 
     /* AURORA_GPSP_GBA_V13_SAFE_FRAMESKIP_BRIDGE_20260911: Aurora Safe Frameskip passes a NULL target.
      * Tell gpSP to skip only scanline/video work; retro_run still advances

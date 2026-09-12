@@ -24,6 +24,7 @@
 #include "nes/fceumm/fceumm_fds_bridge.h"
 #include "pce/beetle/pce_bridge.h"
 #include "gb/system/gambattesystem.h" /* AURORA_GAMBATTE_SQUARE_ASPECT_V13_20260911 */
+#include "gba/system/gpspsystem.h" /* AURORA_GPSP_GBA_V16_DIRECT_GS_CT16_20260912 */
 
 /* AURORA_PS2_PERF_V4_20260824 */
 #include "types.h"
@@ -566,7 +567,10 @@ void MainLoopRender()
            (PicoDriveBridge_IsMegaDriveVideo() ||
             g_GskVideoMode == GSK_VIDMODE_240P)) ||
           ((_pSystem == _pPce) &&
-           PceBridge_CanDirectGsVideo()))) ? TRUE : FALSE);
+           PceBridge_CanDirectGsVideo()) ||
+          ((_pSystem == _pGba) && _pGba &&
+           _pGba->CanDirectGsVideo() &&
+           GSK_GetActiveVideoMode() == GSK_VIDMODE_240P))) ? TRUE : FALSE); /* AURORA_GPSP_GBA_V16_DIRECT_GS_CT16_20260912 */
     /* AURORA_GPSP_GBA_V14_NATIVE_SQUARE_20260911
      * Interlaced 2x2 handheld presentation leaves physical side bars, so use
      * the existing complete framebuffer clear instead of full-width fast-clear. */
@@ -657,6 +661,25 @@ void MainLoopRender()
             /* AURORA_PCE_EXPERIMENTAL_V10_DIRECT_GS */
             PceBridge_DrawDirectGs(
                 _MainLoop_uOutTexTBP, fColor);
+        }
+        else if (_pSystem == _pGba && _pGba &&
+                 _pGba->CanDirectGsVideo())
+        {
+            /* AURORA_GPSP_GBA_V16_DIRECT_GS_CT16_20260912
+             * GPPrimTexRect uses the same transform as PolyRect. Scope the
+             * interlaced exact-2x handheld transform around the direct draw,
+             * then restore normal UI/status geometry immediately. */
+            const Bool bGbaSquareDraw =
+                (GSK_GetActiveVideoMode() != GSK_VIDMODE_240P &&
+                 bSquareHandheldGameplay) ? TRUE : FALSE;
+
+            if (bGbaSquareDraw)
+                GSK_SetGbSquarePixelDraw(1);
+
+            _pGba->DrawDirectGs(_MainLoop_uOutTexTBP, fColor);
+
+            if (bGbaSquareDraw)
+                GSK_SetGbSquarePixelDraw(0);
         }
         else if (_pSystem == _pSega &&
                  PicoDriveBridge_CanDirectGsVideo())

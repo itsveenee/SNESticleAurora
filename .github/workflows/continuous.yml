@@ -56,6 +56,9 @@ jobs:
           grep -q 'AURORA_GPSP_GBA_V13_SAFE_PERF_20260911' src/platform/ps2/system/mainloop_state.cpp
           grep -q 'AURORA_GPSP_GBA_V14_SPRITE_PERF_20260911' tools/prepare_gpsp_aurora_sources.py
           grep -q 'AURORA_GPSP_GBA_V15_ACCURACY_PERF_20260912' tools/prepare_gpsp_aurora_sources.py
+          grep -q 'AURORA_GPSP_GBA_V16_DIRECT_GS_CT16_20260912' src/gba/system/gpspsystem.cpp
+          grep -q 'AURORA_GPSP_GBA_V16_DIRECT_GS_CT16_20260912' src/platform/ps2/system/mainloop_process.cpp
+          grep -q 'AURORA_GPSP_GBA_V16_DIRECT_GS_CT16_20260912' src/platform/ps2/system/mainloop_render.cpp
           grep -q 'AURORA_GPSP_GBA_V13_BITMASK_TURBO_INPUT_20260911' src/gba/system/gpspsystem.cpp
           grep -q 'AURORA_GPSP_GBA_V13_SHOULDER_TURBO_CORE_20260911' tools/prepare_gpsp_aurora_sources.py
           grep -q 'AURORA_GPSP_GBA_V13_CORE_SAFE_PERF_20260911' tools/prepare_gpsp_aurora_sources.py
