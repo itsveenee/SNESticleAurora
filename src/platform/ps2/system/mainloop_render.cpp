@@ -309,7 +309,7 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
      * limited by max_skip. Here the menu level IS max_skip. */
     /* AURORA_V13: tolerate ordinary scheduling jitter; catch up only
      * once host debt exceeds 1.25 learned VBlank periods. */
-    if ((Int64)diff * 4 < -(Int64)target * 5)
+    if (diff < -target)
     {
         if (s_SafeFrameskipConsecutive < (Uint32)s_SafeFrameskipLevel)
         {
