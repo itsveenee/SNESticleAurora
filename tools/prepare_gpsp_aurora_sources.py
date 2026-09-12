@@ -12,7 +12,7 @@ import re
 import shutil
 from pathlib import Path
 
-VERSION = "AURORA_GPSP_GBA_V14_SPRITE_PERF_20260911_STAGE_1"  # AURORA_GPSP_GBA_V14_SPRITE_PERF_20260911
+VERSION = "AURORA_GPSP_GBA_V15_ACCURACY_PERF_20260912_STAGE_1"  # AURORA_GPSP_GBA_V15_ACCURACY_PERF_20260912
 
 TFA_H = r'''#ifndef AURORA_TFA_H
 #define AURORA_TFA_H
@@ -316,7 +316,7 @@ def main():
         raise SystemExit(f"invalid gpSP source tree: {src}")
 
     digest = tree_hash(src, me)
-    stamp = stage / ".aurora-gpsp-stage-v14"
+    stamp = stage / ".aurora-gpsp-stage-v15"
     if stamp.is_file() and stamp.read_text().strip() == digest and \
        (stage / "aurora_tfa.c").is_file():
         print(f"[ gpSP stage ] up-to-date: {stage}")
@@ -392,12 +392,13 @@ def main():
 
     # AURORA_GPSP_GBA_V13_STAGE_SAFE_PERF_20260911
     # ROM_BUFFER_SIZE is a resident LRU cache, not a ROM-size limit. Keep
-    # 8 MiB on PS2 and let gpSP page larger carts in 32 KiB blocks from the
-    # still-open ROM file. This reserves heap for Aurora/video/TFA/states.
+    # 4 MiB on PS2 and let gpSP page larger carts in 32 KiB blocks from the
+    # still-open ROM file. The extra 4 MiB of headroom matters on the 32 MiB
+    # EE, especially for TFA titles and transition-heavy games.
     mfps2 = stage / "Makefile"
     ms = mfps2.read_text(encoding="utf-8")
     cache_old = "-DPS2 -DUSE_XBGR1555_FORMAT -DSMALL_TRANSLATION_CACHE -DROM_BUFFER_SIZE=16"
-    cache_new = "-DPS2 -DUSE_XBGR1555_FORMAT -DSMALL_TRANSLATION_CACHE -DROM_BUFFER_SIZE=8"
+    cache_new = "-DPS2 -DUSE_XBGR1555_FORMAT -DSMALL_TRANSLATION_CACHE -DROM_BUFFER_SIZE=4"
     if cache_new not in ms:
         if cache_old not in ms:
             raise SystemExit("gpSP PS2 ROM cache anchor missing")
@@ -1439,8 +1440,140 @@ void render_scanline_objs(
 
         vid.write_text(vs, encoding="utf-8", newline="\n")
 
+    # AURORA_GPSP_GBA_V15_ACCURACY_PERF_20260912
+    # Accuracy + performance pass:
+    #   - TFA external-clock completion must not inherit gpSP's RFU/GBP SI handshake.
+    #   - Cache the last affine BG tile pointer inside one scanline.
+
+    # 1) Turbo File Advance SIO completion.
+    ser = stage / "serial.c"
+    ss = ser.read_text(encoding="utf-8")
+    v15_tfa_mark = "AURORA_GPSP_GBA_V15_TFA_EXTERNAL_CLOCK_20260912"
+
+    if v15_tfa_mark not in ss:
+        tfa_start_old = """      if ((newval & 0x0080) && !(newval & 0x0001) &&
+          !(newval & 0x1000) && !serial_irq_cycles) {
+        u8 in = aurora_tfa_transfer((u8)(read_ioreg(REG_SIODATA8) & 0xffU));
+"""
+        tfa_start_new = """      if ((newval & 0x0080) && !(newval & 0x0001) &&
+          !(newval & 0x1000) && !serial_irq_cycles) {
+        /* AURORA_GPSP_GBA_V15_TFA_EXTERNAL_CLOCK_20260912
+         * TFA is a Normal-8 external-clock device. SI must not inherit the
+         * RFU/GBP busy handshake between byte transfers. */
+        newval &= ~0x0004U;
+        u8 in = aurora_tfa_transfer((u8)(read_ioreg(REG_SIODATA8) & 0xffU));
+"""
+        if tfa_start_old not in ss:
+            raise SystemExit("gpSP V15 TFA start anchor missing")
+        ss = ss.replace(tfa_start_old, tfa_start_new, 1)
+
+        normal_done_old = """    case SERIAL_MODE_NORMAL:
+      // Clear the send bit, signal data is ready.
+      // Set the device busy bit, to perform the weird SO/SI handshake.
+      write_ioreg(REG_SIOCNT, (read_ioreg(REG_SIOCNT) & ~0x80) | 0x04);
+      // Return if IRQs are enabled.
+      return read_ioreg(REG_SIOCNT) & 0x4000;
+"""
+        normal_done_new = """    case SERIAL_MODE_NORMAL:
+      /* AURORA_GPSP_GBA_V15_TFA_EXTERNAL_CLOCK_20260912
+       * The generic path below intentionally raises SI for RFU/GBP's
+       * SO/SI handshake. Turbo File Advance does not use that handshake:
+       * complete the externally-clocked byte by clearing START and stale SI. */
+      if (aurora_tfa_active())
+        write_ioreg(REG_SIOCNT,
+                    read_ioreg(REG_SIOCNT) & ~(0x0080U | 0x0004U));
+      else {
+        // Clear the send bit, signal data is ready.
+        // Set the device busy bit, to perform the weird SO/SI handshake.
+        write_ioreg(REG_SIOCNT, (read_ioreg(REG_SIOCNT) & ~0x80) | 0x04);
+      }
+      // Return if IRQs are enabled.
+      return read_ioreg(REG_SIOCNT) & 0x4000;
+"""
+        if normal_done_old not in ss:
+            raise SystemExit("gpSP V15 Normal-SIO completion anchor missing")
+        ss = ss.replace(normal_done_old, normal_done_new, 1)
+
+        if ss.count(v15_tfa_mark) < 2:
+            raise SystemExit("gpSP V15 TFA post-patch audit failed")
+        ser.write_text(ss, encoding="utf-8", newline="\n")
+
+    # 2) Affine BG last-tile cache.
+    vid = stage / "video.cc"
+    vs = vid.read_text(encoding="utf-8")
+    v15_aff_mark = "AURORA_GPSP_GBA_V15_AFFINE_TILE_CACHE_20260912"
+
+    if v15_aff_mark not in vs:
+        helper_anchor = """static inline u8 lookup_pix_8bpp(
+  u32 px, u32 py, const u8 *tile_base, const u8 *map_base, u32 map_size
+) {
+  // Pitch represents the log2(number of tiles per row) (from 16 to 128)
+  u32 map_pitch = map_size + 4;
+  // Given coords (px,py) in the background space, find the tile.
+  u32 mapoff = (px / 8) + ((py / 8) << map_pitch);
+  // Each tile is 8x8, so 64 bytes each.
+  const u8 *tile_ptr = &tile_base[map_base[mapoff] * tile_size_8bpp];
+  // Read the 8bit color within the tile.
+  return tile_ptr[(px % 8) + ((py % 8) * 8)];
+}
+"""
+        helper_new = helper_anchor + """
+/* AURORA_GPSP_GBA_V15_AFFINE_TILE_CACHE_20260912
+ * The renderer is not interleaved with CPU/DMA while this scanline call runs,
+ * so repeated samples from one 8x8 affine tile can safely reuse its pointer. */
+static inline u8 lookup_pix_8bpp_cached(
+  u32 px, u32 py, const u8 *tile_base, const u8 *map_base, u32 map_pitch,
+  u32 *cached_mapoff, const u8 **cached_tile
+) {
+  const u32 mapoff = (px >> 3) + ((py >> 3) << map_pitch);
+  const u8 *tile_ptr = *cached_tile;
+
+  if (mapoff != *cached_mapoff) {
+    *cached_mapoff = mapoff;
+    tile_ptr = &tile_base[((u32)map_base[mapoff]) << 6];
+    *cached_tile = tile_ptr;
+  }
+
+  return tile_ptr[(px & 7U) + ((py & 7U) << 3)];
+}
+"""
+        if helper_anchor not in vs:
+            raise SystemExit("gpSP V15 affine helper anchor missing")
+        vs = vs.replace(helper_anchor, helper_new, 1)
+
+        cache_anchor = """  // Maps are squared, four sizes available (128x128 to 1024x1024)
+  u32 width_height = 128 << map_size;
+
+  // Horizontal mosaic effect.
+"""
+        cache_new = """  // Maps are squared, four sizes available (128x128 to 1024x1024)
+  u32 width_height = 128 << map_size;
+
+  /* AURORA_GPSP_GBA_V15_AFFINE_TILE_CACHE_20260912 */
+  const u32 map_pitch = map_size + 4;
+  u32 cached_mapoff = ~0U;
+  const u8 *cached_tile = NULL;
+
+  // Horizontal mosaic effect.
+"""
+        if cache_anchor not in vs:
+            raise SystemExit("gpSP V15 affine cache-state anchor missing")
+        vs = vs.replace(cache_anchor, cache_new, 1)
+
+        old_call = "lookup_pix_8bpp(pix_x, pix_y, tile_base, map_base, map_size)"
+        new_call = ("lookup_pix_8bpp_cached(pix_x, pix_y, tile_base, map_base, "
+                    "map_pitch, &cached_mapoff, &cached_tile)")
+        n_calls = vs.count(old_call)
+        if n_calls != 4:
+            raise SystemExit("gpSP V15 affine-call audit failed: expected 4, found %d" % n_calls)
+        vs = vs.replace(old_call, new_call)
+
+        if vs.count(v15_aff_mark) < 2 or vs.count(new_call) != 4:
+            raise SystemExit("gpSP V15 affine post-patch audit failed")
+        vid.write_text(vs, encoding="utf-8", newline="\n")
+
     stamp.write_text(digest + "\n", encoding="utf-8")
-    print(f"[ gpSP stage ] prepared TFA + PS2 safe perf + Safe Frameskip resync + Color Correction + 8 MiB ROM cache + L/R turbo + V14 sprite perf: {stage}")
+    print(f"[ gpSP stage ] prepared TFA + PS2 safe perf + Safe Frameskip resync + Color Correction + 4 MiB ROM cache + L/R turbo + V14 sprite perf + V15 TFA/affine: {stage}")
 
 
 if __name__ == "__main__":
