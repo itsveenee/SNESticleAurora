@@ -46,6 +46,7 @@ void MainLoopAudioUiResume(void);
 /* AURORA_FINAL_V1_1_UI_CD_STORAGE_BARRIER_20260901
  * Shared by normal menu and isolated state-storage actions. */
 Bool MainLoopCdUiQuiesce(void);
+Bool MainLoopCdUiReady(void); /* AURORA_SSF2_PCE_MENU_FIX_V2_20260913_PCE_MENU_ASYNC */
 void MainLoopCdUiResume(void);
 
 /* AURORA_FINAL_V1_3_NORMAL_MENU_BGM_SESSION_20260901 */

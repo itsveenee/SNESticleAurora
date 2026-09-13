@@ -68,6 +68,9 @@ QUICKNES_NATIVE_INC := $(QUICKNES_DIR)/nes_emu
 PICODRIVE_DIR ?= $(CURDIR)/src/third_party/picodrive
 PICODRIVE_LIB ?= $(PICODRIVE_DIR)/picodrive_libretro_ps2.a
 PICODRIVE_INC := $(PICODRIVE_DIR)/platform/libretro/libretro-common/include
+# AURORA_SSF2_PCE_MENU_FIX_V2_20260913_BUILD_PREPARE
+PICODRIVE_PREPARE_SSF2_TOOL := $(CURDIR)/tools/prepare_picodrive_compact_ssf2.py
+PICODRIVE_PREPARE_PYTHON ?= python3
 
 # AURORA_PCE_EXPERIMENTAL_V1
 PCE_DIR ?= $(CURDIR)/src/third_party/beetle-pce-fast
@@ -75,7 +78,10 @@ PCE_RAW_LIB ?= $(PCE_DIR)/mednafen_pce_fast_libretro_ps2_raw.a
 PCE_LIB ?= $(PCE_DIR)/beetle_pce_fast_libretro_ps2.a
 PCE_PS2_MAKEFILE := $(CURDIR)/tools/Makefile.beetle-pce-fast-ps2
 PCE_NAMESPACE_TOOL := $(CURDIR)/tools/namespace_pce_archive.py
+# AURORA_PS2_THREE_BUG_FIX_V1_20260912_PCE_PREPARE_BUILD
+PCE_PREPARE_TOOL := $(CURDIR)/tools/prepare_pce_aurora_sources.py
 PCE_PYTHON ?= python3
+PCE_MENU_V2_PREPARE_TOOL := $(CURDIR)/tools/prepare_pce_menu_async_v2.py
 PCE_NM ?= $(shell if command -v mips64r5900el-ps2-elf-nm >/dev/null 2>&1; then command -v mips64r5900el-ps2-elf-nm; elif [ -x "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-nm" ]; then echo "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-nm"; else echo nm; fi)
 PCE_OBJCOPY ?= $(shell if command -v mips64r5900el-ps2-elf-objcopy >/dev/null 2>&1; then command -v mips64r5900el-ps2-elf-objcopy; elif [ -x "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-objcopy" ]; then echo "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-objcopy"; else echo objcopy; fi)
 PCE_RANLIB ?= $(shell if command -v mips64r5900el-ps2-elf-ranlib >/dev/null 2>&1; then command -v mips64r5900el-ps2-elf-ranlib; elif [ -x "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-ranlib" ]; then echo "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-ranlib"; else echo ranlib; fi)
@@ -1083,7 +1089,8 @@ $(QUICKNES_LIB): FORCE_QUICKNES
 .PHONY: FORCE_PICODRIVE
 FORCE_PICODRIVE:
 
-$(PICODRIVE_LIB): FORCE_PICODRIVE
+$(PICODRIVE_LIB): FORCE_PICODRIVE $(PICODRIVE_PREPARE_SSF2_TOOL)
+	@$(PICODRIVE_PREPARE_PYTHON) "$(PICODRIVE_PREPARE_SSF2_TOOL)" --source "$(PICODRIVE_DIR)"
 	@printf '[ PicoDrive ] building PS2 static core\n'
 	@$(MAKE) -C "$(PICODRIVE_DIR)" -f Makefile.libretro \
 		platform=ps2 CC="$(EE_CC) $(PICODRIVE_PS2_SAFE_FLAGS) $(PICODRIVE_OPLL_NS_FLAGS)" AR="$(PICODRIVE_AR)" PS2DEV="$(PS2DEV)" PS2SDK="$(PS2SDK)" use_libchdr=0 STATIC_LINKING=0 STATIC_LINKING_LINK=1 all
@@ -1097,9 +1104,11 @@ $(PICODRIVE_LIB): FORCE_PICODRIVE
 .PHONY: FORCE_PCE_INCREMENTAL
 FORCE_PCE_INCREMENTAL:
 
-$(PCE_RAW_LIB): FORCE_PCE_INCREMENTAL $(PCE_PS2_MAKEFILE)
+$(PCE_RAW_LIB): FORCE_PCE_INCREMENTAL $(PCE_PS2_MAKEFILE) $(PCE_PREPARE_TOOL) $(PCE_MENU_V2_PREPARE_TOOL)
 	@printf '[ Beetle PCE Fast ] checking incremental PS2 core\n'
 	@test -f "$(PCE_DIR)/Makefile" || { echo "ERROR: missing $(PCE_DIR)"; exit 1; }
+	@$(PCE_PYTHON) "$(PCE_PREPARE_TOOL)" --source "$(PCE_DIR)"
+	@$(PCE_PYTHON) "$(PCE_MENU_V2_PREPARE_TOOL)" --source "$(PCE_DIR)"
 	+@PATH="$(PS2DEV)/ee/bin:$(PS2DEV)/bin:$(PS2SDK)/bin:$$PATH" $(MAKE) --no-print-directory -C "$(PCE_DIR)" -f "$(PCE_PS2_MAKEFILE)" CC="$(EE_CC)" CXX="$(EE_CXX)" AR="$(EE_AR)" all
 
 $(PCE_LIB): $(PCE_RAW_LIB) $(PCE_NAMESPACE_TOOL)

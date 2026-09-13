@@ -59,6 +59,8 @@ int PCE_AuroraPrefetchCdAudio(void);
 void PCE_AuroraSetCdMusicEnabled(int enabled);
 int PCE_AuroraCdMusicEnabled(void);
 /* AURORA_PCE_CD_MENU_IO_QUIESCE_V1_20260901 */
+int PCE_AuroraCdAsyncPause(unsigned int timeout_ms); /* AURORA_PS2_THREE_BUG_FIX_V1_20260912_PCE_SOFT_PAUSE_BRIDGE */
+int PCE_AuroraCdAsyncPauseReady(void); /* AURORA_SSF2_PCE_MENU_FIX_V2_20260913_PCE_ACK_POLL_BRIDGE */
 int PCE_AuroraCdAsyncQuiesce(unsigned int timeout_ms);
 void PCE_AuroraCdAsyncResume(void);
 }
@@ -582,9 +584,37 @@ bool PceBridge_LoadDisc(const char *path, const char *systemPath)
 }
 
 
+/* AURORA_SSF2_PCECD_LAZY_GPSP_JIT_V1_20260912_PCE_TEARDOWN
+ * A CD worker may still be finishing an 8 KiB read when the frontend asks
+ * Beetle to unload/swap content.  Teardown is different from opening the
+ * menu: it must not resume and free the old disc underneath an in-flight
+ * read.  Keep requesting the core's real quiesce barrier until it acknowledges
+ * idle, unload, then release the pause for the next content. */
+static void pceQuiesceDiscForTeardown(void)
+{
+    unsigned waits = 0;
+    if (!s_Initialized || !s_GameLoaded || !s_DiscLoaded)
+        return;
+
+    while (!PCE_AuroraCdAsyncQuiesce(250U))
+    {
+        ++waits;
+        if (waits == 4U || (waits > 4U && (waits & 15U) == 0U))
+            printf("[PCE/CD] waiting for async worker before teardown (%u)\n", waits);
+    }
+}
+
 void PceBridge_UnloadGame(void)
 {
-    if (s_Initialized && s_GameLoaded) PCE_retro_unload_game();
+    const bool wasDisc = s_Initialized && s_GameLoaded && s_DiscLoaded;
+    if (s_Initialized && s_GameLoaded)
+    {
+        if (wasDisc)
+            pceQuiesceDiscForTeardown();
+        PCE_retro_unload_game();
+        if (wasDisc)
+            PCE_AuroraCdAsyncResume();
+    }
     s_GameLoaded=false;s_DiscLoaded=false;s_AuroraLimiterLevel=s_AuroraLimiterMode=-1;s_pInput=NULL;s_pMix=NULL;s_pSramData=NULL;s_SramBytes=0;s_VideoData=NULL;s_VideoW=s_VideoH=0;s_VideoPitch=0;s_HaveVideo=false;s_ContentData=NULL;s_ContentBytes=0;
     s_SkipVideoNext=false;s_SkipVideoActive=false;s_PceDirectPixelsValid=false;
 }
@@ -599,21 +629,21 @@ const char *PceBridge_GetDiscPath(void)
     return PceBridge_IsDiscLoaded() ? s_ContentName : NULL;
 }
 
-/* AURORA_PCE_CD_MENU_IO_QUIESCE_V1_20260901
- * PCE-CD only. HuCard timing and isolated quick-state UI are unchanged.
- * 250 ms is a safety ceiling; normally ack follows the current 8 KiB read
- * and returns almost immediately. */
+/* AURORA_SSF2_PCE_MENU_FIX_V2_20260913_PCE_ACK_POLL_BRIDGE
+ * Normal-menu entry must not wait on storage. Arm the pause request and let
+ * the frontend publish the menu immediately. Filesystem work in the menu is
+ * separately gated on PceBridge_DiscIOPaused(). Hard teardown still waits. */
 bool PceBridge_QuiesceDiscIO(void)
 {
-    if (!s_GameLoaded || !s_DiscLoaded)
-        return true;
+    if (!s_GameLoaded || !s_DiscLoaded) return true;
+    (void)PCE_AuroraCdAsyncPause(0U);
+    return true;
+}
 
-    if (PCE_AuroraCdAsyncQuiesce(250U))
-        return true;
-
-    PCE_AuroraCdAsyncResume();
-    printf("[PCE/CD] async worker quiesce timeout; menu deferred\n");
-    return false;
+bool PceBridge_DiscIOPaused(void)
+{
+    if (!s_GameLoaded || !s_DiscLoaded) return true;
+    return PCE_AuroraCdAsyncPauseReady() != 0;
 }
 
 void PceBridge_ResumeDiscIO(void)

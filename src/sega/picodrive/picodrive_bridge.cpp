@@ -347,7 +347,17 @@ static bool pdEnvironment(unsigned cmd, void *data)
                 var->value = "SG-1000";
             }
             else if (!strcmp(var->key, "picodrive_drc"))
-                var->value = "enabled";
+            {
+                /* AURORA_PS2_THREE_BUG_FIX_V1_20260912_32X_SH2_INTERPRETER
+                 * PicoDrive's MIPS SH2 dynarec is a MIPS32-family path while
+                 * the PS2 EE is R5900.  A bad generated SH2 block is a hard
+                 * console freeze, not a recoverable emulation error.  Use the
+                 * interpreter on Aurora/PS2 for 32X until the R5900 DRC is
+                 * audited instruction-by-instruction.  This option is read by
+                 * the SH2 DRC path; normal MD/Sega-CD 68000 execution is not
+                 * switched to another core here. */
+                var->value = "disabled";
+            }
             else if (!strcmp(var->key, "picodrive_frameskip"))
                 var->value = "disabled";
             else if (!strcmp(var->key, "picodrive_sprlim"))
@@ -1036,39 +1046,52 @@ void PicoDriveBridge_Shutdown(void)
  * round logical bytes to 4, power-of-two banking, 512 KiB alignment, then
  * add four bytes when execution protection would otherwise cross the end.
  * This result is never smaller than the SMS rule for the same byte count. */
-size_t PicoDriveBridge_RequiredRomCapacity(size_t nBytes)
+/* AURORA_SSF2_PCE_MENU_FIX_V2_20260913_SSF2_PARENT
+ * SSF2 is a real 5 MiB cart. The mapper addresses existing 512 KiB banks;
+ * the generic next-power-of-two backing is not required for this image. */
+static size_t pdGenericRequiredRomCapacity(size_t nBytes)
 {
     size_t size, alloc;
-
-    if (nBytes == 0 || nBytes > 0x7FFFFFFCU)
-        return 0;
-
+    if (nBytes == 0 || nBytes > 0x7FFFFFFCU) return 0;
     size = (nBytes + 3U) & ~(size_t)3U;
     alloc = 1U;
     while (alloc < size)
     {
-        if (alloc > ((size_t)-1) / 2U)
-            return 0;
+        if (alloc > ((size_t)-1) / 2U) return 0;
         alloc <<= 1;
     }
-
     alloc = (alloc + 0x7FFFFU) & ~(size_t)0x7FFFFU;
-    if (alloc < size)
-        return 0;
+    if (alloc < size) return 0;
     if (alloc - size < 4U)
     {
-        if (alloc > ((size_t)-1) - 4U)
-            return 0;
+        if (alloc > ((size_t)-1) - 4U) return 0;
         alloc += 4U;
     }
     return alloc;
 }
 
+static bool pdIsCompactSsf2Image(const void *pData, size_t nBytes)
+{
+    static const char title[] = "SUPER STREET FIGHTER2 The New Challengers";
+    const Uint8 *p = (const Uint8 *)pData;
+    return p && nBytes == 0x500000U &&
+           memcmp(p + 0x150, title, sizeof(title) - 1) == 0;
+}
+
+size_t PicoDriveBridge_RequiredRomCapacity(size_t nBytes)
+{
+    /* Called before the file is read. LoadGame validates the title before
+     * allowing the compact buffer to be borrowed. */
+    if (nBytes == 0x500000U) return 0x500040U;
+    return pdGenericRequiredRomCapacity(nBytes);
+}
+
 bool PicoDriveBridge_LoadGame(const void *pData, size_t nBytes,
                               size_t nCapacity, const char *pName)
 {
-    const size_t requiredCapacity =
-        PicoDriveBridge_RequiredRomCapacity(nBytes);
+    const bool compactSsf2 = pdIsCompactSsf2Image(pData, nBytes);
+    const size_t requiredCapacity = compactSsf2
+        ? (size_t)0x500040U : pdGenericRequiredRomCapacity(nBytes);
 
     if (!pData || !nBytes || !requiredCapacity ||
         nCapacity < requiredCapacity || nCapacity > 0xFFFFFFFFU ||

@@ -125,6 +125,9 @@ void _MenuRuntimeUpdate(void)
 {
 	if (!_bMenu || !s_sramSavePending)
 		return;
+	/* PCE-CD: don't overlap the final pre-menu async read with SRAM I/O. */
+	if (!MainLoopCdUiReady())
+		return;
 	if (s_sramSaveDelay > 0)
 	{
 		s_sramSaveDelay--;
@@ -222,6 +225,16 @@ Bool MainLoopCdUiQuiesce(void)
     }
 
     return TRUE;
+}
+
+/* AURORA_SSF2_PCE_MENU_FIX_V2_20260913_PCE_MENU_ASYNC
+ * PCE-CD pause completion is asynchronous. UI drawing/navigation is safe
+ * immediately; filesystem work waits for this readiness poll. */
+Bool MainLoopCdUiReady(void)
+{
+    if (s_CdUiPceHeld)
+        return PceBridge_DiscIOPaused() ? TRUE : FALSE;
+    return TRUE; /* Sega CD barrier remains synchronous. */
 }
 
 void MainLoopCdUiResume(void)

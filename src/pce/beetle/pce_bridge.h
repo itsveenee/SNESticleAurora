@@ -17,6 +17,7 @@ bool PceBridge_IsDiscLoaded(void);
 const char *PceBridge_GetDiscPath(void);
 /* AURORA_PCE_CD_MENU_IO_QUIESCE_V1_20260901 */
 bool PceBridge_QuiesceDiscIO(void);
+bool PceBridge_DiscIOPaused(void); /* AURORA_SSF2_PCE_MENU_FIX_V2_20260913_PCE_ACK_POLL_BRIDGE */
 void PceBridge_ResumeDiscIO(void);
 void PceBridge_UnloadGame(void);
 void PceBridge_Reset(void);

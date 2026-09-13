@@ -12,7 +12,7 @@ import re
 import shutil
 from pathlib import Path
 
-VERSION = "AURORA_GPSP_GBA_V21_MEMORY_TFA_DYNAREC_20260912_STAGE_1"  # AURORA_GPSP_GBA_V21_MEMORY_TFA_DYNAREC_20260912
+VERSION = "AURORA_SSF2_PCECD_LAZY_GPSP_JIT_V1_20260912_STAGE_1"  # AURORA_GPSP_GBA_V21_MEMORY_TFA_DYNAREC_20260912
 
 TFA_H = r'''#ifndef AURORA_TFA_H
 #define AURORA_TFA_H
@@ -404,6 +404,78 @@ def main():
             raise SystemExit("gpSP PS2 ROM cache anchor missing")
         ms = ms.replace(cache_old, cache_new, 1)
         mfps2.write_text(ms, encoding="utf-8", newline="\n")
+
+    # AURORA_SSF2_PCECD_LAZY_GPSP_JIT_V1_20260912_LAZY_ALLOC_STAGE
+    # gpSP's MIPS translation caches used to be emitted as permanent .bss in
+    # the final Aurora ELF. That reserves 2 MiB + 384 KiB even while MD/PCE
+    # are running. Enable gpSP's existing lazy MMAP_JIT_CACHE lifetime on PS2:
+    # allocate at retro_init(), release at retro_deinit(). Cache sizes and the
+    # dynarec itself stay unchanged while GBA is active.
+    ms = mfps2.read_text(encoding="utf-8")
+    mmap_old = ("\tHAVE_DYNAREC = 1\n"
+                "\tCPU_ARCH := mips\n"
+                "\tSTATIC_LINKING = 1\n")
+    mmap_new = ("\tHAVE_DYNAREC = 1\n"
+                "\tMMAP_JIT_CACHE = 1 # AURORA_SSF2_PCECD_LAZY_GPSP_JIT_V1_20260912_LAZY_ALLOC_STAGE\n"
+                "\tCPU_ARCH := mips\n"
+                "\tSTATIC_LINKING = 1\n")
+    if mmap_new not in ms:
+        if mmap_old not in ms:
+            raise SystemExit("gpSP PS2 MMAP_JIT_CACHE anchor missing")
+        ms = ms.replace(mmap_old, mmap_new, 1)
+        mfps2.write_text(ms, encoding="utf-8", newline="\n")
+
+    mm = stage / "memmap.c"
+    mms = mm.read_text(encoding="utf-8")
+
+    # Upstream's dormant MIPS mmap branch has a stale third parameter in the
+    # validator declaration although _VALIDATE_BLOCK_FN supplies two. It was
+    # invisible while PS2 used static .bss; make it compile before enabling it.
+    sig_old = "bool validate_addr_section_mips(void *ptr, unsigned size, unsigned max_offset_mb) {"
+    sig_new = "bool validate_addr_section_mips(void *ptr, unsigned size) { /* AURORA_SSF2_PCECD_LAZY_GPSP_JIT_V1_20260912_LAZY_ALLOC_STAGE */"
+    if sig_new not in mms:
+        if sig_old not in mms:
+            raise SystemExit("gpSP MIPS JIT validator anchor missing")
+        mms = mms.replace(sig_old, sig_new, 1)
+
+    ps2_backend_mark = "AURORA_SSF2_PCECD_LAZY_GPSP_JIT_V1_20260912_LAZY_ALLOC_STAGE_PS2_ALLOC"
+    if ps2_backend_mark not in mms:
+        posix_anchor = "\n#else\n\n\t#include <sys/mman.h>\n"
+        ps2_backend = r'''
+#elif defined(PS2)
+
+    /* AURORA_SSF2_PCECD_LAZY_GPSP_JIT_V1_20260912_LAZY_ALLOC_STAGE_PS2_ALLOC
+     * EE RAM is executable; cache coherency is handled by platform_cache_sync.
+     * Keep one 64-byte-aligned contiguous block so the existing gpSP split
+     * (ROM cache followed by RAM cache) remains unchanged. */
+    #include <malloc.h>
+    #include <stdlib.h>
+
+    void *map_jit_block(unsigned size) {
+        void *p = memalign(64, size);
+        if (!p)
+            return 0;
+        if (!_VALIDATE_BLOCK_FN(p, size)) {
+            free(p);
+            return 0;
+        }
+        return p;
+    }
+
+    void unmap_jit_block(void *bufptr, unsigned size) {
+        (void)size;
+        free(bufptr);
+    }
+
+#else
+
+	#include <sys/mman.h>
+'''
+        if mms.count(posix_anchor) != 1:
+            raise SystemExit("gpSP memmap POSIX backend anchor missing/ambiguous")
+        mms = mms.replace(posix_anchor, ps2_backend, 1)
+
+    mm.write_text(mms, encoding="utf-8", newline="\n")
 
     # AURORA_GPSP_GBA_V13_SHOULDER_TURBO_CORE_20260911
     # Aurora maps the two physical PS2 chords to private virtual L3/R3 signals.

@@ -4077,7 +4077,19 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
             return FALSE;
     }
 
-    /* Resolve 240p physical raster before final ROM RAM is committed. */
+    /* AURORA_MEMORY_RASTER_REGRESSION_FIX_V3_20260913_ROM_BEFORE_RASTER
+     * Memory-regression fix: decide the target raster first, but do NOT
+     * rebuild gsKit before the largest EE allocation of this load.
+     *
+     * After gpSP/GBA enlarged the resident ELF, rebuilding 256->320/512
+     * before reserving a 5 MiB+ cartridge could fragment/consume the last
+     * sufficiently large contiguous heap block. SSF2 then failed here with
+     * "not enough memory for ROM" even after its backing was reduced from
+     * 8 MiB to ~5 MiB.
+     *
+     * Reserve the ROM while the old UI raster is still intact. Only after
+     * that succeeds may gsKit change raster. On raster failure the existing
+     * abort helper frees the ROM before restoring 256. */
     {
         Int32 rasterWidth = 256;
 
@@ -4144,32 +4156,32 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
                 rasterWidth = 320;
         }
 
-        if (!MainLoopEnsureGameplayRasterWidth(rasterWidth))
+        /* Allocate exact frontend backing policy for this cartridge. */
         {
-            if (rasterWidth != 256)
-                MainLoopEnsureGameplayRasterWidth(256);
-            MainLoopModalPrintf(60 * 3,
-                "ERROR: cannot configure video raster");
-            return FALSE;
+            size_t required;
+            if (eType == MAINLOOP_ENTRYTYPE_SEGAROM)
+                required = PicoDriveBridge_RequiredRomCapacity(
+                    (size_t)nExpectedRomBytes);
+            else
+                required = (size_t)nExpectedRomBytes + 1024U;
+
+            if (required < (size_t)nExpectedRomBytes ||
+                required > 0xFFFFFFFFU ||
+                !_MainLoopAllocRomBuffer((Uint32)required))
+            {
+                _MainLoopAbortPreCoreLoad();
+                MainLoopModalPrintf(60 * 3,
+                    "ERROR: not enough memory for ROM");
+                return FALSE;
+            }
         }
-    }
 
-    /* Allocate exact frontend backing policy for this cartridge. */
-    {
-        size_t required;
-        if (eType == MAINLOOP_ENTRYTYPE_SEGAROM)
-            required = PicoDriveBridge_RequiredRomCapacity(
-                (size_t)nExpectedRomBytes);
-        else
-            required = (size_t)nExpectedRomBytes + 1024U;
-
-        if (required < (size_t)nExpectedRomBytes ||
-            required > 0xFFFFFFFFU ||
-            !_MainLoopAllocRomBuffer((Uint32)required))
+        /* Commit video only after the large ROM backing is secured. */
+        if (!MainLoopEnsureGameplayRasterWidth(rasterWidth))
         {
             _MainLoopAbortPreCoreLoad();
             MainLoopModalPrintf(60 * 3,
-                "ERROR: not enough memory for ROM");
+                "ERROR: cannot configure video raster");
             return FALSE;
         }
     }

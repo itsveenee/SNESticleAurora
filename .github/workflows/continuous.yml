@@ -35,6 +35,7 @@ jobs:
           test -f src/third_party/fceumm-fds/Copying
           test -f src/third_party/fceumm-fds/src/fds.c
           test -f tools/Makefile.beetle-pce-fast-ps2
+          test -f tools/prepare_pce_aurora_sources.py # AURORA_PS2_THREE_BUG_FIX_V1_20260912_CI
           test -f tools/Makefile.fceumm-fds-ps2
           test -f tools/prepare_fceumm_fds_sources.py
           test -f tools/namespace_fceumm_fds_archive.py
@@ -77,6 +78,14 @@ jobs:
           ! grep -q 'SyncDCache(baseaddr, endptr)' tools/prepare_gpsp_aurora_sources.py
           grep -q '0x7BDE7BDEU' tools/prepare_gpsp_aurora_sources.py
           # AURORA_GPSP_GBA_V21_CI_POLICY_20260912
+          grep -q 'AURORA_SSF2_PCECD_LAZY_GPSP_JIT_V1_20260912_LAZY_ALLOC_STAGE' tools/prepare_gpsp_aurora_sources.py
+          grep -q 'AURORA_SSF2_PCECD_LAZY_GPSP_JIT_V1_20260912_PCE_TEARDOWN' src/pce/beetle/pce_bridge.cpp
+          # AURORA_SSF2_PCECD_LAZY_GPSP_JIT_V1_20260912_CI
+          grep -q 'AURORA_PS2_THREE_BUG_FIX_V1_20260912_PCE_SOFT_PAUSE_CORE' tools/prepare_pce_aurora_sources.py
+          grep -q 'AURORA_PS2_THREE_BUG_FIX_V1_20260912_PCE_SOFT_PAUSE_BRIDGE' src/pce/beetle/pce_bridge.cpp
+          grep -q 'AURORA_PS2_THREE_BUG_FIX_V1_20260912_SSF2_CAPACITY' src/sega/system/segarom.cpp
+          grep -q 'AURORA_PS2_THREE_BUG_FIX_V1_20260912_32X_SH2_INTERPRETER' src/sega/picodrive/picodrive_bridge.cpp
+          grep -q 'AURORA_PS2_THREE_BUG_FIX_V1_20260912_PCE_PREPARE_BUILD' Makefile
           test -f LICENSES/gpSP-GPL-2.0.txt
 
 

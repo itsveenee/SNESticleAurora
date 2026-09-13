@@ -5,6 +5,7 @@
 
 #include "segarom.h"
 #include "dataio.h"
+#include "../picodrive/picodrive_bridge.h" /* AURORA_PS2_THREE_BUG_FIX_V1_20260912_SSF2_CAPACITY */
 
 static Char *s_SegaExts[] =
 {
@@ -67,14 +68,23 @@ Emu::Rom::LoadErrorE SegaRom::LoadRom(
     if (uTotal == 0)
         return LOADERROR_BADROMSIZE;
 
+    /* AURORA_PS2_THREE_BUG_FIX_V1_20260912_SSF2_CAPACITY
+     * PicoDrive may need writable banking/protection padding beyond the file
+     * length (5 MiB SSF2 -> 8 MiB).  Select/reuse a buffer by the core's
+     * required capacity, not merely by uTotal. */
+    const size_t uRequired =
+        PicoDriveBridge_RequiredRomCapacity((size_t)uTotal);
+    if (!uRequired || uRequired > 0xFFFFFFFFU)
+        return LOADERROR_OUTOFSPACE;
+
     Uint8 *pBuf = NULL;
-    if (pBuffer && nBufferBytes >= uTotal)
+    if (pBuffer && (size_t)nBufferBytes >= uRequired)
     {
         pBuf = pBuffer;
     }
     else
     {
-        m_pRomMem = (Uint8 *)malloc(uTotal);
+        m_pRomMem = (Uint8 *)malloc(uRequired);
         if (!m_pRomMem)
             return LOADERROR_OUTOFSPACE;
         pBuf = m_pRomMem;
@@ -90,7 +100,7 @@ Emu::Rom::LoadErrorE SegaRom::LoadRom(
     m_pRomData = pBuf;
     m_uRomBytes = uTotal;
     m_uRomCapacity =
-        (pBuffer && pBuf == pBuffer) ? nBufferBytes : uTotal;
+        (pBuffer && pBuf == pBuffer) ? nBufferBytes : (Uint32)uRequired;
     m_bLoaded = TRUE;
 
     printf("[SegaRom] loaded %u bytes\n", (unsigned)m_uRomBytes);
