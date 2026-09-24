@@ -30,10 +30,6 @@ Direct-page 16-bit wrap fixed by SAFE ACCURACY BATCH 2.
 //#define SNSPC_SUBCYCLES(_nCycles)			pCpu->Cycles-= ((_nCycles)*SNSPC_CYCLE) >> pCpu->uCycleShift;
 #define SNSPC_SUBCYCLES(_nCycles)			nCycles-= ((_nCycles)*SNSPC_CYCLE);
 
-/* AURORA_CPU_SPC_HOST_WORK_REDUCTION_V2_20260920
- * V2: host-work-only SPC700/APUIO optimization. I/O overlap always falls
- * back to the original side-effecting helper path. */
-
 /* AURORA_SAFE_CODE_PERF_V1_SPC
  * The 8-bit fetch/read/write wrappers below were pure forwarding layers.
  * Keep cycle publication and trap handling exactly where they already are,
@@ -86,41 +82,21 @@ Direct-page 16-bit wrap fixed by SAFE ACCURACY BATCH 2.
  * Keep ordinary SNSPC_READ16/SNSPC_WRITE16 unchanged for absolute
  * addressing; these helpers are used only by DP addressing modes.
  */
-#define SNSPC_READDP16(_Addr, _x) do {                               \
-    Uint32 _snspc_dp_addr = (_Addr);                                 \
-    Uint32 _snspc_dp_hi = r_DP | ((_snspc_dp_addr + 1) & 0xFF);     \
-    if (((_snspc_dp_addr - 0xF0u) >= 0x10u) &&                       \
-        ((_snspc_dp_hi   - 0xF0u) >= 0x10u))                         \
-    {                                                                 \
-        (_x)  = (Uint32)pCpu->Mem[_snspc_dp_addr];                   \
-        (_x) |= (Uint32)pCpu->Mem[_snspc_dp_hi] << 8;                \
-    }                                                                 \
-    else                                                              \
-    {                                                                 \
-        (_x)  = __SNSPCRead8(pCpu, _snspc_dp_addr, nCycles);         \
-        (_x) |= (Uint32)__SNSPCRead8(                                \
-                    pCpu, _snspc_dp_hi, nCycles) << 8;               \
-    }                                                                 \
+#define SNSPC_READDP16(_Addr, _x) do {                              \
+    Uint32 _snspc_dp_addr = (_Addr);                                \
+    Uint32 _snspc_dp_hi = r_DP | ((_snspc_dp_addr + 1) & 0xFF);    \
+    (_x)  = __SNSPCRead8(pCpu, _snspc_dp_addr, nCycles);            \
+    (_x) |= ((Uint32)__SNSPCRead8(pCpu, _snspc_dp_hi, nCycles)) << 8; \
 } while (0)
 
 #define SNSPC_WRITEDP16(_Addr, _Data) do {                           \
     Uint32 _snspc_dp_addr = (_Addr);                                 \
     Uint32 _snspc_dp_hi = r_DP | ((_snspc_dp_addr + 1) & 0xFF);     \
     Uint32 _snspc_dp_data = (_Data);                                 \
-    if (((_snspc_dp_addr - 0xF0u) >= 0x10u) &&                       \
-        ((_snspc_dp_hi   - 0xF0u) >= 0x10u))                         \
-    {                                                                 \
-        pCpu->Mem[_snspc_dp_addr] = (Uint8)_snspc_dp_data;           \
-        pCpu->Mem[_snspc_dp_hi] =                                   \
-            (Uint8)(_snspc_dp_data >> 8);                            \
-    }                                                                 \
-    else                                                              \
-    {                                                                 \
-        __SNSPCWrite8(pCpu, _snspc_dp_addr,                          \
-                      (Uint8)_snspc_dp_data, nCycles);               \
-        __SNSPCWrite8(pCpu, _snspc_dp_hi,                            \
-                      (Uint8)(_snspc_dp_data >> 8), nCycles);        \
-    }                                                                 \
+    __SNSPCWrite8(pCpu, _snspc_dp_addr,                              \
+                  (Uint8)_snspc_dp_data, nCycles);                   \
+    __SNSPCWrite8(pCpu, _snspc_dp_hi,                               \
+                  (Uint8)(_snspc_dp_data >> 8), nCycles);           \
 } while (0)
 
 
@@ -156,7 +132,7 @@ Direct-page 16-bit wrap fixed by SAFE ACCURACY BATCH 2.
 #define SNSPC_SETFLAG_N16(_x) fN = (_x) << 0;
 #define SNSPC_SETFLAG_C(_x)  fC = (_x) & 1;
 #define SNSPC_SETFLAGI_C(_x)  fC = (_x) & 1;
-#define SNSPC_GETFLAG_C(_x)  _x = fC;
+#define SNSPC_GETFLAG_C(_x)  _x = fC & 1;
 
 #define SNSPC_SETFLAG_V() fHV |= SNSPC_FLAG_V;
 #define SNSPC_CLRFLAG_V() fHV &= ~SNSPC_FLAG_V;
@@ -188,8 +164,8 @@ Direct-page 16-bit wrap fixed by SAFE ACCURACY BATCH 2.
 
 #define SNSPC_PACKFLAGS()								\
 	r_P &= ~(SNSPC_FLAG_C | SNSPC_FLAG_Z | SNSPC_FLAG_N | SNSPC_FLAG_H | SNSPC_FLAG_V);	\
-	r_P |= fC;\
-	r_P |= fHV;\
+	r_P |= fC & SNSPC_FLAG_C;												\
+	r_P |= fHV & (SNSPC_FLAG_H | SNSPC_FLAG_V);				\
 	r_P |= (fN >> 8) & SNSPC_FLAG_N;								\
 	if (!(fZ&0xFFFF)) r_P|=SNSPC_FLAG_Z;		
 
@@ -260,7 +236,7 @@ Direct-page 16-bit wrap fixed by SAFE ACCURACY BATCH 2.
 #define SNSPC_ADC8(_Dest,_Src) do {                                  \
     Uint32 _Target = (_Dest) & 0xFFu;                                \
     Uint32 _Source = (_Src) & 0xFFu;                                 \
-    Uint32 _Result = _Target + _Source + fC;                  \
+    Uint32 _Result = _Target + _Source + (fC & 1u);                  \
     Uint32 _H = (_Target ^ _Source ^ _Result) & 0x10u;               \
     Uint32 _V = (~(_Target ^ _Source) & (_Target ^ _Result)) & 0x80u; \
     fHV = (_H >> 1) | (_V >> 1);                                    \
@@ -375,64 +351,37 @@ static __inline Uint8 __SNSPCRead8(
 static __inline Uint16 _SNSPCRead16(
 	SNSpcT *pCpu, Uint32 Addr, Int32 nPublishedCycles)
 {
-	Uint32 uAddr = Addr & 0xFFFFu;
-	Uint32 uNext = (uAddr + 1u) & 0xFFFFu;
 	Uint32 uData;
-
-	/* V2: if the two-byte bus access cannot overlap $00F0-$00FF, both reads
-	 * are ordinary visible APURAM/ROM-array reads. This also preserves the
-	 * $FFFF->$0000 wrap exactly. */
-	if ((uAddr - 0xEFu) >= 0x11u)
-	{
-		uData  = (Uint32)pCpu->Mem[uAddr];
-		uData |= (Uint32)pCpu->Mem[uNext] << 8;
-		return (Uint16)uData;
-	}
-
-	uData = __SNSPCRead8(pCpu, uAddr, nPublishedCycles);
-	uData |= (Uint32)__SNSPCRead8(pCpu, uNext, nPublishedCycles) << 8;
-	return (Uint16)uData;
+	uData = __SNSPCRead8(pCpu, Addr, nPublishedCycles);
+	uData|= (__SNSPCRead8(pCpu, Addr+1, nPublishedCycles)<<8);
+	return uData;
 }
 
 static __inline void __SNSPCWrite8(
 	SNSpcT *pCpu, Uint32 uAddr, Uint8 uData, Int32 nPublishedCycles)
 {
 	uAddr &= 0xFFFFu;
+	const Bool bIO = ((uAddr - 0xF0u) < 0x10u);
 
-	/* V2: I/O keeps the exact old publish -> Mem write -> trap ordering, but
-	 * returns immediately. Ordinary APURAM no longer pays a second bIO test. */
-	if ((uAddr - 0xF0u) < 0x10u)
-	{
+	/* Publish before the memory-side write, preserving V2's exact ordering. */
+	if (bIO)
 		pCpu->Cycles = nPublishedCycles;
-		pCpu->Mem[uAddr] = uData;
-		pCpu->pWriteTrapFunc(pCpu, uAddr, uData);
-		return;
-	}
 
 	// Ordinary APURAM and disabled-IPL writes have the same destination.
 	if (uAddr < SNSPC_ROM_ADDR || !pCpu->bRomEnable)
 		pCpu->Mem[uAddr] = uData;
 	else
 		pCpu->ShadowMem[uAddr & (SNSPC_ROM_SIZE - 1)] = uData;
+
+	if (bIO)
+		pCpu->pWriteTrapFunc(pCpu, uAddr, uData);
 }
 
 static __inline void _SNSPCWrite16(
 	SNSpcT *pCpu, Uint32 Addr, Uint16 Data, Int32 nPublishedCycles)
 {
-	Uint32 uAddr = Addr & 0xFFFFu;
-	Uint32 uNext = (uAddr + 1u) & 0xFFFFu;
-
-	/* V2: with IPL overlay disabled and no $F0-$FF overlap, both destinations
-	 * are plain APURAM. Overlay-enabled and I/O cases retain the old helpers. */
-	if (!pCpu->bRomEnable && (uAddr - 0xEFu) >= 0x11u)
-	{
-		pCpu->Mem[uAddr] = (Uint8)Data;
-		pCpu->Mem[uNext] = (Uint8)(Data >> 8);
-		return;
-	}
-
-	__SNSPCWrite8(pCpu, uAddr, (Uint8)Data, nPublishedCycles);
-	__SNSPCWrite8(pCpu, uNext, (Uint8)(Data >> 8), nPublishedCycles);
+	__SNSPCWrite8(pCpu, Addr, (Uint8)Data, nPublishedCycles);
+	__SNSPCWrite8(pCpu, Addr + 1, Data >> 8, nPublishedCycles);
 }
 
 
@@ -770,7 +719,7 @@ Int32 SNSPCExecute_C(SNSpcT *pCpu)
 	SNSPC_OP(0xBE, 3);
 		// DAS A
 		SNSPC_GET_A8(t0);
-		if (!fC || t0 > 0x99u)
+		if (!(fC & 1) || t0 > 0x99u)
 		{
 			t0 = (t0 - 0x60u) & 0xFFu;
 			SNSPC_SETFLAGI_C(0);
@@ -785,7 +734,7 @@ Int32 SNSPCExecute_C(SNSpcT *pCpu)
 	SNSPC_OP(0xDF, 3);
 		// DAA A
 		SNSPC_GET_A8(t0);
-		if (fC || t0 > 0x99u)
+		if ((fC & 1) || t0 > 0x99u)
 		{
 			t0 = (t0 + 0x60u) & 0xFFu;
 			SNSPC_SETFLAGI_C(1);
@@ -887,7 +836,7 @@ Int32 SNSPCExecute_C(SNSpcT *pCpu)
 		SNSPC_SHL(t2,t1);
 		SNSPC_READ8(t0,t1);
 
-		if (fC)
+		if (fC & 1)
 		{
 			SNSPC_OR(t1,t2);
 		} else

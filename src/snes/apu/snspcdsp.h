@@ -7,7 +7,6 @@
 #include "snspcmixi.h"
 #include "snspcdefs.h"
 
-/* AURORA_CPU_SPC_DSP_HOST_WORK_REDUCTION_V3_20260920_HEADER */
 #define SNSPCDSP_WRITEQUEUE (TRUE)
 #define SNSPCDSP_MAXMIXERS (2)
 

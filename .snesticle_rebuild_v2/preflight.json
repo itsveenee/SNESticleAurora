@@ -1,0 +1,24 @@
+{
+  "base": "b4f5c180eeb0fcb81ade3da73a72a5ace381bac1",
+  "changed_paths": 126,
+  "cpu_ref": "88ac80f3e531bfbdea1aff2fea65386d6e18f004",
+  "dirty_at_start": [],
+  "expected_head": "07f1ed8c05b930c3a8554f3a1e472ac6dc0bfb1d",
+  "observed_head": "07f1ed8c05b930c3a8554f3a1e472ac6dc0bfb1d",
+  "ppu_accuracy_ref": "11290a5577fd76c44baa8d00b057b0e89d754c33",
+  "ppu_stable_ref": "32a0cb56cfacbe03425695c0d80e71d46f0443f7",
+  "submodules": [
+    " 4685b6454924933fd6dbc6ddca84b12ccdd88440 src/third_party/beetle-pce-fast (heads/master)",
+    " dc77e3ca4baad08f0023f61dba9846550735b74d src/third_party/fceumm-fds (heads/master)",
+    " 1f6d3fd13a24ede45a2f547f635e06cea2f5a0f4 src/third_party/gambatte (heads/master)",
+    " 52db8b129b46d97caf3887fca6fe4e52c93ba9d1 src/third_party/gpsp (heads/master)",
+    " f4e4c36a2203f01ff1d49bda75642d9ad397d8b6 src/third_party/picodrive (heads/master)",
+    " 3ac7cf1bdeecb60e2414980e8dc72ff092f69769 src/third_party/picodrive/cpu/cyclone (heads/master)",
+    " e62ac5995b1c7ef65ece35293914843b8ee57d49 src/third_party/picodrive/pico/cd/libchdr (heads/master)",
+    " a2dfc20ff507e4fd075cd325620bcea655e2c1f7 src/third_party/picodrive/pico/sound/emu2413 (1.5.9)",
+    " dd762b861ecadf5ddd5fb03e9ca1db6707b54fbb src/third_party/picodrive/platform/common/dr_libs (flac-0.12.43~53)",
+    " d1a166c83ab445b1c14bc83d37c84e18d172e5f5 src/third_party/picodrive/platform/common/dr_libs/tests/external/miniaudio (0.11.15~1676)",
+    " 9643cf444283f9d5a29ef44e14ec97469c5fe8e4 src/third_party/picodrive/platform/libpicofe (heads/master)",
+    " 4bb9a2a9da02bf64034856bc842243b8edf6085d src/third_party/quicknes (heads/master)"
+  ]
+}

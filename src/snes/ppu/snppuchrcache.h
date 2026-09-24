@@ -55,56 +55,6 @@ struct SnesPPUChrCacheT
 	Uint8  uValid4[SNPPU_CHR4_TILE_COUNT];
 };
 
-#if SNPPU_CHR_CACHE_HFLIP
-/* AURORA_SNES_OBJ_TRIPLE_HOTPATH_V1_20260920
- * OBJ chooses normal/HFlip once per object. Both views still share uValid4,
- * so invalidation/store policy is unchanged; only the per-hit orientation
- * branch is removed from the hot tile loop. */
-struct SnesPPUChrCache4ViewT
-{
-	const Uint64 (*pData)[8];
-	const Uint8  (*pOpaque)[8];
-	const Uint8  *pValid;
-};
-
-_INLINE void SnesPPUChrCacheSelect4View(
-	const SnesPPUChrCacheT *pCache, Bool bHFlip,
-	SnesPPUChrCache4ViewT *pView)
-{
-	pView->pData = bHFlip ? pCache->uData4HFlip : pCache->uData4;
-	pView->pOpaque = bHFlip ? pCache->uOpaque4HFlip : pCache->uOpaque4;
-	pView->pValid = pCache->uValid4;
-}
-
-_INLINE Bool SnesPPUChrCacheLookup4View(
-	const SnesPPUChrCache4ViewT *pView,
-	Uint32 uRowAddress, Uint64 *pData, Uint32 *pOpaque)
-{
-	const Uint32 uAddress = uRowAddress & SNPPU_VRAM_WORD_MASK;
-	const Uint32 uTile = uAddress >> 4;
-	const Uint32 uRow = uAddress & 7u;
-
-	if (!(pView->pValid[uTile] & (1u << uRow)))
-		return FALSE;
-
-	*pData = pView->pData[uTile][uRow];
-	*pOpaque = pView->pOpaque[uTile][uRow];
-	return TRUE;
-}
-
-_INLINE void SnesPPUChrCacheLoad4View(
-	const SnesPPUChrCache4ViewT *pView,
-	Uint32 uRowAddress, Uint64 *pData, Uint32 *pOpaque)
-{
-	const Uint32 uAddress = uRowAddress & SNPPU_VRAM_WORD_MASK;
-	const Uint32 uTile = uAddress >> 4;
-	const Uint32 uRow = uAddress & 7u;
-
-	*pData = pView->pData[uTile][uRow];
-	*pOpaque = pView->pOpaque[uTile][uRow];
-}
-#endif
-
 _INLINE Uint64 SnesPPUChrCacheReverseBytes(Uint64 uData)
 {
 	uData = ((uData & 0x00FF00FF00FF00FFULL) << 8) |

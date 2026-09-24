@@ -1,0 +1,1126 @@
+{
+  "base": "b4f5c180eeb0fcb81ade3da73a72a5ace381bac1",
+  "checkpoint": "aa3d654cd4e836d54b93bfd064d028afb55a6c63",
+  "original_head": "07f1ed8c05b930c3a8554f3a1e472ac6dc0bfb1d",
+  "expected_head": "07f1ed8c05b930c3a8554f3a1e472ac6dc0bfb1d",
+  "created_at": "20260923-214140",
+  "safety_tag": "snesticle-rebuild-backup-07f1ed8c-20260923-214140",
+  "submodule_status": [
+    " 4685b6454924933fd6dbc6ddca84b12ccdd88440 src/third_party/beetle-pce-fast (heads/master)",
+    " dc77e3ca4baad08f0023f61dba9846550735b74d src/third_party/fceumm-fds (heads/master)",
+    " 1f6d3fd13a24ede45a2f547f635e06cea2f5a0f4 src/third_party/gambatte (heads/master)",
+    " 52db8b129b46d97caf3887fca6fe4e52c93ba9d1 src/third_party/gpsp (heads/master)",
+    " f4e4c36a2203f01ff1d49bda75642d9ad397d8b6 src/third_party/picodrive (heads/master)",
+    " 3ac7cf1bdeecb60e2414980e8dc72ff092f69769 src/third_party/picodrive/cpu/cyclone (heads/master)",
+    " e62ac5995b1c7ef65ece35293914843b8ee57d49 src/third_party/picodrive/pico/cd/libchdr (heads/master)",
+    " a2dfc20ff507e4fd075cd325620bcea655e2c1f7 src/third_party/picodrive/pico/sound/emu2413 (1.5.9)",
+    " dd762b861ecadf5ddd5fb03e9ca1db6707b54fbb src/third_party/picodrive/platform/common/dr_libs (flac-0.12.43~53)",
+    " d1a166c83ab445b1c14bc83d37c84e18d172e5f5 src/third_party/picodrive/platform/common/dr_libs/tests/external/miniaudio (0.11.15~1676)",
+    " 9643cf444283f9d5a29ef44e14ec97469c5fe8e4 src/third_party/picodrive/platform/libpicofe (heads/master)",
+    " 4bb9a2a9da02bf64034856bc842243b8edf6085d src/third_party/quicknes (heads/master)"
+  ],
+  "gitlinks_ls_tree": [
+    "160000 commit 4685b6454924933fd6dbc6ddca84b12ccdd88440\tsrc/third_party/beetle-pce-fast",
+    "160000 commit dc77e3ca4baad08f0023f61dba9846550735b74d\tsrc/third_party/fceumm-fds",
+    "160000 commit 1f6d3fd13a24ede45a2f547f635e06cea2f5a0f4\tsrc/third_party/gambatte",
+    "160000 commit 52db8b129b46d97caf3887fca6fe4e52c93ba9d1\tsrc/third_party/gpsp",
+    "100644 blob a7788b9add1d7e457050da80e2dca6be6dcbf7fc\tsrc/third_party/jar/jar_mod.c",
+    "100644 blob 12b8101c423a778f06a5bc172d4caca15b25a2e5\tsrc/third_party/jar/jar_mod.h",
+    "100644 blob ec498ff4fb5d82125c3a7008369cd359fb239670\tsrc/third_party/jar/jar_xm.c",
+    "100644 blob 9ab0e9d755874a9dd8d2e96fd4e90c7e2a4da8d7\tsrc/third_party/jar/jar_xm.h",
+    "100644 blob 98b729086f7f55a620ce64bfe55028f69272bc2d\tsrc/third_party/libxmp-lite/LICENSE",
+    "100644 blob c75fb0912fdebd2a7d1da8b47828577fbd36a13f\tsrc/third_party/libxmp-lite/README.SNESticle",
+    "100644 blob 3c6c10de33f0a86d876884718370c1eb1a653fca\tsrc/third_party/libxmp-lite/include/xmp.h",
+    "100644 blob 13f52d951c5d06cd8f737e6881bc489e81dd8942\tsrc/third_party/libxmp-lite/src/Makefile",
+    "100644 blob de46eb49776f67f49d3ff0b4e9e820455d4996ce\tsrc/third_party/libxmp-lite/src/callbackio.h",
+    "100644 blob e1b984c188a04dcf658a9bca3b0b28488f245608\tsrc/third_party/libxmp-lite/src/common.h",
+    "100644 blob 4ee4d0c5e0f10cae92e3421f4bb113742d9de901\tsrc/third_party/libxmp-lite/src/control.c",
+    "100644 blob a7f69d87a219f314fcd533bb500eed0e88a668ea\tsrc/third_party/libxmp-lite/src/dataio.c",
+    "100644 blob 506927ac091d6b1830671f4eab30fad3b6ee9079\tsrc/third_party/libxmp-lite/src/effects.c",
+    "100644 blob ad6c10c284c8a547bbb5839cc63d5de7bc45ef91\tsrc/third_party/libxmp-lite/src/effects.h",
+    "100644 blob 7277372251d7b6f0eb6606a07c1c6c1bcfb43dd8\tsrc/third_party/libxmp-lite/src/filetype.c",
+    "100644 blob ccc24769cad9aa749bbd0aa1b45c2d68139ab909\tsrc/third_party/libxmp-lite/src/filter.c",
+    "100644 blob 8da53a15e8a6cd4b4d77b79ad8571b1bd6488788\tsrc/third_party/libxmp-lite/src/flow.c",
+    "100644 blob a655323616ed743e2fdcf7f42b5772211cf28255\tsrc/third_party/libxmp-lite/src/format.c",
+    "100644 blob af3a620f054d3f8d908f2fae9cae3fc9a30aa371\tsrc/third_party/libxmp-lite/src/format.h",
+    "100644 blob 9f42da5788609ae3a34b66132d1b463d6d4616ac\tsrc/third_party/libxmp-lite/src/hio.c",
+    "100644 blob a5107439eda3b9b0eefb96a7f0581c8ee3947e3d\tsrc/third_party/libxmp-lite/src/hio.h",
+    "100644 blob 009e7e742dc88de73c2defa5976ae614e64b51b5\tsrc/third_party/libxmp-lite/src/lfo.c",
+    "100644 blob cbc78f7212b3b187502310f3a7f37c2b437f939f\tsrc/third_party/libxmp-lite/src/lfo.h",
+    "100644 blob 83c7f8fce031e4a41187ec6d1e56c4530aaacd50\tsrc/third_party/libxmp-lite/src/load.c",
+    "100644 blob 8c4ccedbe4459a6b3681dfd568b0fd8773d0cce0\tsrc/third_party/libxmp-lite/src/load_helpers.c",
+    "100644 blob 04b3365bbc81334b94b37c16adbcc6ec38138ec1\tsrc/third_party/libxmp-lite/src/loaders/Makefile",
+    "100644 blob 06b5bd26f201372f1ccbe132e7e1eb60a4c1ddff\tsrc/third_party/libxmp-lite/src/loaders/common.c",
+    "100644 blob 9dd24c5e83e37ac297fce53102889b809896a294\tsrc/third_party/libxmp-lite/src/loaders/it.h",
+    "100644 blob 499b4609e39f1b284c2f26f12409a1e9902e714d\tsrc/third_party/libxmp-lite/src/loaders/it_load.c",
+    "100644 blob e73b057d49728569ed6a8307f4d46200f9bbefff\tsrc/third_party/libxmp-lite/src/loaders/itsex.c",
+    "100644 blob 4a7fd62abf2ac2670f9d6544ce479b5aef826499\tsrc/third_party/libxmp-lite/src/loaders/loader.h",
+    "100644 blob 682aef0226350d8f493d77633991c1d671f6da72\tsrc/third_party/libxmp-lite/src/loaders/mod.h",
+    "100644 blob 8b7e943e57d2f9701447182bc80aa6c80810a898\tsrc/third_party/libxmp-lite/src/loaders/mod_load.c",
+    "100644 blob 84b229bac13a0c987b6d44a79d2225f87439bd26\tsrc/third_party/libxmp-lite/src/loaders/s3m.h",
+    "100644 blob 3965e221552e63801d3e289c7438986fe38e5f52\tsrc/third_party/libxmp-lite/src/loaders/s3m_load.c",
+    "100644 blob d7a4c0c9fb83562b0fabd8fd5879baaa63204c05\tsrc/third_party/libxmp-lite/src/loaders/sample.c",
+    "100644 blob 0b3a6e6faf8351c40b1adc5eb16a8a278b116ba3\tsrc/third_party/libxmp-lite/src/loaders/xm.h",
+    "100644 blob 4d35cae56649b12a34185cf6184f2f29e843babb\tsrc/third_party/libxmp-lite/src/loaders/xm_load.c",
+    "100644 blob 7521bdc4415e1fde0f4c7abf7876c458e6c0763d\tsrc/third_party/libxmp-lite/src/md5.c",
+    "100644 blob b5c44bac9b9ce639ea8f95edb9f0b9969160c351\tsrc/third_party/libxmp-lite/src/md5.h",
+    "100644 blob 1b9a68de98c9f1b4da3f892bbdefd49750ee638d\tsrc/third_party/libxmp-lite/src/mdataio.h",
+    "100644 blob 944ebb826aa1c0a527c96a2efc59e7cd347fe2cf\tsrc/third_party/libxmp-lite/src/memio.c",
+    "100644 blob f0c6166d6d74fc2ae2e86329b262c7328a8c6a15\tsrc/third_party/libxmp-lite/src/memio.h",
+    "100644 blob c775c04a0bb426895eaeb5f6735779056748f155\tsrc/third_party/libxmp-lite/src/misc.c",
+    "100644 blob 6ee944262e4e79e572dfdeb33a08290734c8e881\tsrc/third_party/libxmp-lite/src/mix_all.c",
+    "100644 blob 3cbc60064af6498dbe9cac60c0f42d2d4a1c8804\tsrc/third_party/libxmp-lite/src/mix_all.h",
+    "100644 blob 804f50210df1dcd9fcf2aa7c6dfd2ce25913ca5e\tsrc/third_party/libxmp-lite/src/mixer.c",
+    "100644 blob a582b1f05bf70ed138d907f4070398ee66cf60d0\tsrc/third_party/libxmp-lite/src/mixer.h",
+    "100644 blob 4a968c13b749f754c3a592b940694de52e1fe1c8\tsrc/third_party/libxmp-lite/src/path.h",
+    "100644 blob 9c95bf829aa3e7f2b9475485b1619f6b81211aac\tsrc/third_party/libxmp-lite/src/period.c",
+    "100644 blob 7654383bb8a1bd594e7dcf4db719de42bba7e20b\tsrc/third_party/libxmp-lite/src/period.h",
+    "100644 blob 45497afa94720c344d251719d9e1c3ac51d2a8c6\tsrc/third_party/libxmp-lite/src/player.c",
+    "100644 blob 7b34f1bb0ddda652344be6a899f4a46f7c5eaeb7\tsrc/third_party/libxmp-lite/src/player.h",
+    "100644 blob d078891a54fc263924581cf2f79578a7b2a9d262\tsrc/third_party/libxmp-lite/src/precomp_lut.h",
+    "100644 blob 833f57cdc36ce2ef173a210762defeb212e1da72\tsrc/third_party/libxmp-lite/src/read_event.c",
+    "100644 blob c592cc509eb0f141cb86260939ebd12b1faea7a1\tsrc/third_party/libxmp-lite/src/rng.c",
+    "100644 blob b6c49e4519575d5fa25329e26166d231bc543549\tsrc/third_party/libxmp-lite/src/rng.h",
+    "100644 blob d2cc2d1438cbefdc4828de20d2fc85af3621ad8c\tsrc/third_party/libxmp-lite/src/scan.c",
+    "100644 blob 8e24424b8989542d7a4ddd6f88b08adfd804f57d\tsrc/third_party/libxmp-lite/src/smix.c",
+    "100644 blob be04d86bdec149efd25aff7fd5ef9df59ed24325\tsrc/third_party/libxmp-lite/src/tempfile.h",
+    "100644 blob b9d4f2746b683cb71f063d4334eca3a71951aad0\tsrc/third_party/libxmp-lite/src/virtual.c",
+    "100644 blob 8f32793fb921649e2436c52e898e979007eecd0c\tsrc/third_party/libxmp-lite/src/virtual.h",
+    "100644 blob 4ba61775ab848aaf599f1186e594d4d358eb2b1a\tsrc/third_party/libxmp-lite/src/win32.c",
+    "100644 blob d07b98d719c96484ab730b98e0b4849afc2f2786\tsrc/third_party/miniz/miniz.c",
+    "100644 blob 0efc5918b95483808697363e558cf25066b7df0a\tsrc/third_party/miniz/miniz.h",
+    "100644 blob 2050d72d76b9a79832332a473d57e7e61e9f9053\tsrc/third_party/miniz/miniz_common.h",
+    "100644 blob 768d1cf1b5493d85ec42c4c009a736836921a5f5\tsrc/third_party/miniz/miniz_export.h",
+    "100644 blob 63506f93c92bbc543d27111b36af208deb730d57\tsrc/third_party/miniz/miniz_tdef.c",
+    "100644 blob 7dc959bb0bca0bff93d963525da972ba3737d511\tsrc/third_party/miniz/miniz_tdef.h",
+    "100644 blob a8d2a5933c004c6bd8e03410ba137341887a19c3\tsrc/third_party/miniz/miniz_tinfl.c",
+    "100644 blob 7edca607cfcfce704b3a8875aa93390b12d6e300\tsrc/third_party/miniz/miniz_tinfl.h",
+    "100644 blob 303c732ce7e020b1239dd2f798e08092834719b2\tsrc/third_party/miniz/miniz_zip.c",
+    "100644 blob ccdb99042c586ee3688eb8be1dc216ddb70d6120\tsrc/third_party/miniz/miniz_zip.h",
+    "100644 blob f3467159087919d82da129f1b9fc22c074cf5d65\tsrc/third_party/nes_snd_emu/Blip_Buffer.cpp",
+    "100644 blob 7c82d5e33ff7426fda6fb7c3e504e8d9d261d4fa\tsrc/third_party/nes_snd_emu/Blip_Buffer.h",
+    "100644 blob 53afb04e5a0c9776c1640c9bd9ac10bea1bad987\tsrc/third_party/nes_snd_emu/LICENSE.txt",
+    "100644 blob 4b5f4a7f4fd5a954c0fee3edc5bcfd8ae974ac03\tsrc/third_party/nes_snd_emu/Nes_Apu.cpp",
+    "100644 blob 842c095ef129cf96d5a8a542fc4e8b511c7f2d33\tsrc/third_party/nes_snd_emu/Nes_Apu.h",
+    "100644 blob 153606d0a59b8e2a00aa073ab43a5c80f4fc7a33\tsrc/third_party/nes_snd_emu/Nes_Oscs.cpp",
+    "100644 blob 36a0d7d77394cc57d1bf903e64e94b901813e66e\tsrc/third_party/nes_snd_emu/Nes_Oscs.h",
+    "100644 blob 3b356853c67244a765942fe329a74296ff61c7b9\tsrc/third_party/nes_snd_emu/blargg_common.h",
+    "100644 blob 23ff94d9aed1843319b392ca4a405805d8ec219d\tsrc/third_party/nes_snd_emu/blargg_config.h",
+    "100644 blob 8c28a0d2d5df9b7c75bbeb7518509206024888f9\tsrc/third_party/nes_snd_emu/blargg_source.h",
+    "160000 commit f4e4c36a2203f01ff1d49bda75642d9ad397d8b6\tsrc/third_party/picodrive",
+    "160000 commit 4bb9a2a9da02bf64034856bc842243b8edf6085d\tsrc/third_party/quicknes",
+    "100644 blob ec9e910079c726ec840c12b880a77a95a1e09ae4\tsrc/third_party/upng/LICENSE",
+    "100644 blob dde1d71e7a9040702266e1c0e983e34cf28459c1\tsrc/third_party/upng/upng.c",
+    "100644 blob 35a0e9a05f8bf253f3279c4242a1e8fdc360c4e5\tsrc/third_party/upng/upng.h"
+  ],
+  "files": [
+    {
+      "status": "M",
+      "path": ".github/workflows/continuous.yml",
+      "additions": "1",
+      "deletions": "1",
+      "subsystem": "build-CI",
+      "plan": "KEEP_CURRENT"
+    },
+    {
+      "status": "M",
+      "path": ".gitignore",
+      "additions": "2",
+      "deletions": "0",
+      "subsystem": "other",
+      "plan": "KEEP_CURRENT"
+    },
+    {
+      "status": "M",
+      "path": "CONTINUOUS_RELEASE.md",
+      "additions": "36",
+      "deletions": "1",
+      "subsystem": "docs",
+      "plan": "KEEP_CURRENT"
+    },
+    {
+      "status": "A",
+      "path": "LICENSES/ZSNES-DSP3-GPL-2.0.txt",
+      "additions": "339",
+      "deletions": "0",
+      "subsystem": "other",
+      "plan": "KEEP_CURRENT"
+    },
+    {
+      "status": "M",
+      "path": "Makefile",
+      "additions": "74",
+      "deletions": "13",
+      "subsystem": "build-CI",
+      "plan": "KEEP_CURRENT_INTERFACE_PROTECTED"
+    },
+    {
+      "status": "M",
+      "path": "README.md",
+      "additions": "13",
+      "deletions": "9",
+      "subsystem": "docs",
+      "plan": "KEEP_CURRENT"
+    },
+    {
+      "status": "M",
+      "path": "THIRD_PARTY.md",
+      "additions": "13",
+      "deletions": "0",
+      "subsystem": "docs",
+      "plan": "KEEP_CURRENT"
+    },
+    {
+      "status": "A",
+      "path": "docs/AURORA_RUNTIME_TRACE.md",
+      "additions": "218",
+      "deletions": "0",
+      "subsystem": "docs",
+      "plan": "KEEP_CURRENT"
+    },
+    {
+      "status": "M",
+      "path": "src/common/io/miniz_compat.c",
+      "additions": "66",
+      "deletions": "5",
+      "subsystem": "other",
+      "plan": "KEEP_CURRENT"
+    },
+    {
+      "status": "M",
+      "path": "src/gb/system/gambattesystem.cpp",
+      "additions": "54",
+      "deletions": "775",
+      "subsystem": "bridge/GB-Gambatte",
+      "plan": "KEEP_CURRENT_BRIDGE_PROTECTED"
+    },
+    {
+      "status": "M",
+      "path": "src/gb/system/gambattesystem.h",
+      "additions": "3",
+      "deletions": "11",
+      "subsystem": "bridge/GB-Gambatte",
+      "plan": "KEEP_CURRENT_BRIDGE_PROTECTED"
+    },
+    {
+      "status": "M",
+      "path": "src/gba/system/gpspsystem.cpp",
+      "additions": "44",
+      "deletions": "10",
+      "subsystem": "bridge/GBA-gpSP",
+      "plan": "KEEP_CURRENT_BRIDGE_PROTECTED"
+    },
+    {
+      "status": "M",
+      "path": "src/gba/system/gpspsystem.h",
+      "additions": "5",
+      "deletions": "1",
+      "subsystem": "bridge/GBA-gpSP",
+      "plan": "KEEP_CURRENT_BRIDGE_PROTECTED"
+    },
+    {
+      "status": "M",
+      "path": "src/modules/audio/audio.h",
+      "additions": "1",
+      "deletions": "0",
+      "subsystem": "PS2/audio-driver",
+      "plan": "KEEP_CURRENT"
+    },
+    {
+      "status": "M",
+      "path": "src/modules/audio/audio_audsrv.c",
+      "additions": "19",
+      "deletions": "5",
+      "subsystem": "PS2/audio-driver",
+      "plan": "KEEP_CURRENT"
+    },
+    {
+      "status": "M",
+      "path": "src/platform/ps2/lowlevel/ps2mem.h",
+      "additions": "9",
+      "deletions": "0",
+      "subsystem": "PS2/lowlevel",
+      "plan": "KEEP_CURRENT"
+    },
+    {
+      "status": "A",
+      "path": "src/platform/ps2/system/aurora_ee_crash_diag.c",
+      "additions": "433",
+      "deletions": "0",
+      "subsystem": "PS2/host-mainloop",
+      "plan": "KEEP_CURRENT"
+    },
+    {
+      "status": "A",
+      "path": "src/platform/ps2/system/aurora_ee_crash_diag.h",
+      "additions": "86",
+      "deletions": "0",
+      "subsystem": "PS2/host-mainloop",
+      "plan": "KEEP_CURRENT"
+    },
+    {
+      "status": "A",
+      "path": "src/platform/ps2/system/aurora_runtime_trace.c",
+      "additions": "793",
+      "deletions": "0",
+      "subsystem": "PS2/host-mainloop",
+      "plan": "KEEP_CURRENT"
+    },
+    {
+      "status": "A",
+      "path": "src/platform/ps2/system/aurora_runtime_trace.h",
+      "additions": "184",
+      "deletions": "0",
+      "subsystem": "PS2/host-mainloop",
+      "plan": "KEEP_CURRENT"
+    },
+    {
+      "status": "A",
+      "path": "src/platform/ps2/system/aurora_runtime_trace_profile.h",
+      "additions": "149",
+      "deletions": "0",
+      "subsystem": "PS2/host-mainloop",
+      "plan": "KEEP_CURRENT"
+    },
+    {
+      "status": "A",
+      "path": "src/platform/ps2/system/aurora_snes_cost_profiler.cpp",
+      "additions": "449",
+      "deletions": "0",
+      "subsystem": "PS2/host-mainloop",
+      "plan": "KEEP_CURRENT"
+    },
+    {
+      "status": "A",
+      "path": "src/platform/ps2/system/aurora_snes_cost_profiler.h",
+      "additions": "134",
+      "deletions": "0",
+      "subsystem": "PS2/host-mainloop",
+      "plan": "KEEP_CURRENT"
+    },
+    {
+      "status": "M",
+      "path": "src/platform/ps2/system/mainloop_exec.cpp",
+      "additions": "33",
+      "deletions": "0",
+      "subsystem": "PS2/host-mainloop",
+      "plan": "KEEP_CURRENT"
+    },
+    {
+      "status": "A",
+      "path": "src/platform/ps2/system/mainloop_exec.cpp.pre_core_pressure_final",
+      "additions": "137",
+      "deletions": "0",
+      "subsystem": "PS2/host-mainloop",
+      "plan": "REMOVE_EXPERIMENT_SNAPSHOT"
+    },
+    {
+      "status": "A",
+      "path": "src/platform/ps2/system/mainloop_exec.cpp.pre_preflip_health_v2",
+      "additions": "140",
+      "deletions": "0",
+      "subsystem": "PS2/host-mainloop",
+      "plan": "REMOVE_EXPERIMENT_SNAPSHOT"
+    },
+    {
+      "status": "M",
+      "path": "src/platform/ps2/system/mainloop_input.cpp",
+      "additions": "6",
+      "deletions": "4",
+      "subsystem": "PS2/host-mainloop",
+      "plan": "KEEP_CURRENT_INTERFACE_PROTECTED"
+    },
+    {
+      "status": "M",
+      "path": "src/platform/ps2/system/mainloop_load.cpp",
+      "additions": "773",
+      "deletions": "260",
+      "subsystem": "PS2/host-mainloop",
+      "plan": "KEEP_CURRENT_INTERFACE_PROTECTED"
+    },
+    {
+      "status": "M",
+      "path": "src/platform/ps2/system/mainloop_process.cpp",
+      "additions": "6",
+      "deletions": "1",
+      "subsystem": "PS2/host-mainloop",
+      "plan": "KEEP_CURRENT"
+    },
+    {
+      "status": "A",
+      "path": "src/platform/ps2/system/mainloop_process.cpp.pre_core_pressure_final",
+      "additions": "753",
+      "deletions": "0",
+      "subsystem": "PS2/host-mainloop",
+      "plan": "REMOVE_EXPERIMENT_SNAPSHOT"
+    },
+    {
+      "status": "A",
+      "path": "src/platform/ps2/system/mainloop_process.cpp.pre_preflip_health_v2",
+      "additions": "765",
+      "deletions": "0",
+      "subsystem": "PS2/host-mainloop",
+      "plan": "REMOVE_EXPERIMENT_SNAPSHOT"
+    },
+    {
+      "status": "M",
+      "path": "src/platform/ps2/system/mainloop_render.cpp",
+      "additions": "203",
+      "deletions": "81",
+      "subsystem": "PS2/host-mainloop",
+      "plan": "KEEP_CURRENT"
+    },
+    {
+      "status": "A",
+      "path": "src/platform/ps2/system/mainloop_render.cpp.pre_AURORA_SAFE_FRAMESKIP_NATURAL_RECOVERY_V2_20260917",
+      "additions": "1014",
+      "deletions": "0",
+      "subsystem": "PS2/host-mainloop",
+      "plan": "REMOVE_EXPERIMENT_SNAPSHOT"
+    },
+    {
+      "status": "A",
+      "path": "src/platform/ps2/system/mainloop_render.cpp.pre_AURORA_SAFE_FRAMESKIP_POSTFLIP_REBASE_V1_20260916",
+      "additions": "984",
+      "deletions": "0",
+      "subsystem": "PS2/host-mainloop",
+      "plan": "REMOVE_EXPERIMENT_SNAPSHOT"
+    },
+    {
+      "status": "A",
+      "path": "src/platform/ps2/system/mainloop_render.cpp.pre_AURORA_SAFE_FRAMESKIP_RESTORE_4A350B_V1_20260917",
+      "additions": "998",
+      "deletions": "0",
+      "subsystem": "PS2/host-mainloop",
+      "plan": "REMOVE_EXPERIMENT_SNAPSHOT"
+    },
+    {
+      "status": "A",
+      "path": "src/platform/ps2/system/mainloop_render.cpp.pre_core_pressure_final",
+      "additions": "1117",
+      "deletions": "0",
+      "subsystem": "PS2/host-mainloop",
+      "plan": "REMOVE_EXPERIMENT_SNAPSHOT"
+    },
+    {
+      "status": "A",
+      "path": "src/platform/ps2/system/mainloop_render.cpp.pre_preflip_health_v2",
+      "additions": "1031",
+      "deletions": "0",
+      "subsystem": "PS2/host-mainloop",
+      "plan": "REMOVE_EXPERIMENT_SNAPSHOT"
+    },
+    {
+      "status": "A",
+      "path": "src/platform/ps2/system/mainloop_render.cpp.pre_preflip_recovery_v3",
+      "additions": "1096",
+      "deletions": "0",
+      "subsystem": "PS2/host-mainloop",
+      "plan": "REMOVE_EXPERIMENT_SNAPSHOT"
+    },
+    {
+      "status": "A",
+      "path": "src/platform/ps2/system/mainloop_render.cpp.pre_recovery_only_v3",
+      "additions": "1124",
+      "deletions": "0",
+      "subsystem": "PS2/host-mainloop",
+      "plan": "REMOVE_EXPERIMENT_SNAPSHOT"
+    },
+    {
+      "status": "A",
+      "path": "src/platform/ps2/system/mainloop_safe_frameskip.h.pre_core_pressure_final",
+      "additions": "20",
+      "deletions": "0",
+      "subsystem": "PS2/host-mainloop",
+      "plan": "REMOVE_EXPERIMENT_SNAPSHOT"
+    },
+    {
+      "status": "A",
+      "path": "src/platform/ps2/system/mainloop_safe_frameskip.h.pre_preflip_health_v2",
+      "additions": "23",
+      "deletions": "0",
+      "subsystem": "PS2/host-mainloop",
+      "plan": "REMOVE_EXPERIMENT_SNAPSHOT"
+    },
+    {
+      "status": "M",
+      "path": "src/platform/ps2/system/mainloop_state.cpp",
+      "additions": "57",
+      "deletions": "0",
+      "subsystem": "PS2/host-mainloop",
+      "plan": "KEEP_CURRENT_INTERFACE_PROTECTED"
+    },
+    {
+      "status": "M",
+      "path": "src/platform/ps2/system/mainloop_state.h",
+      "additions": "5",
+      "deletions": "0",
+      "subsystem": "PS2/host-mainloop",
+      "plan": "KEEP_CURRENT"
+    },
+    {
+      "status": "M",
+      "path": "src/platform/ps2/ui/uiVideo.cpp",
+      "additions": "157",
+      "deletions": "90",
+      "subsystem": "PS2/platform",
+      "plan": "KEEP_CURRENT_INTERFACE_PROTECTED"
+    },
+    {
+      "status": "M",
+      "path": "src/sega/picodrive/picodrive_bridge.cpp",
+      "additions": "5",
+      "deletions": "10",
+      "subsystem": "bridge/Sega-PicoDrive",
+      "plan": "KEEP_CURRENT_BRIDGE_PROTECTED"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/apu/opspc700_c.h",
+      "additions": "4",
+      "deletions": "2",
+      "subsystem": "SNES/APU-SPC-DSP",
+      "plan": "KEEP_CURRENT_APU_UNTIL_TARGETED_TIMING_BATTERY"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/apu/snspc.c",
+      "additions": "11",
+      "deletions": "1",
+      "subsystem": "SNES/APU-SPC-DSP",
+      "plan": "KEEP_CURRENT_APU_UNTIL_TARGETED_TIMING_BATTERY"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/apu/snspc_c.c",
+      "additions": "179",
+      "deletions": "66",
+      "subsystem": "SNES/APU-SPC-DSP",
+      "plan": "KEEP_CURRENT_APU_UNTIL_TARGETED_TIMING_BATTERY"
+    },
+    {
+      "status": "A",
+      "path": "src/snes/apu/snspc_c.c.pre_AURORA_SWC_TOPGEAR_COMMON_HW_PERF_V2_20260917",
+      "additions": "858",
+      "deletions": "0",
+      "subsystem": "SNES/APU-SPC-DSP",
+      "plan": "REMOVE_EXPERIMENT_SNAPSHOT"
+    },
+    {
+      "status": "A",
+      "path": "src/snes/apu/snspc_c.c.pre_AURORA_SWC_TOPGEAR_COMMON_HW_PERF_V3_20260917",
+      "additions": "884",
+      "deletions": "0",
+      "subsystem": "SNES/APU-SPC-DSP",
+      "plan": "REMOVE_EXPERIMENT_SNAPSHOT"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/apu/snspcbrr.c",
+      "additions": "47",
+      "deletions": "211",
+      "subsystem": "SNES/APU-SPC-DSP",
+      "plan": "KEEP_CURRENT_APU_UNTIL_TARGETED_TIMING_BATTERY"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/apu/snspcbrr.h",
+      "additions": "1",
+      "deletions": "0",
+      "subsystem": "SNES/APU-SPC-DSP",
+      "plan": "KEEP_CURRENT_APU_UNTIL_TARGETED_TIMING_BATTERY"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/apu/snspcdsp.cpp",
+      "additions": "82",
+      "deletions": "14",
+      "subsystem": "SNES/APU-SPC-DSP",
+      "plan": "KEEP_CURRENT_APU_UNTIL_TARGETED_TIMING_BATTERY"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/apu/snspcdsp.h",
+      "additions": "52",
+      "deletions": "2",
+      "subsystem": "SNES/APU-SPC-DSP",
+      "plan": "KEEP_CURRENT_APU_UNTIL_TARGETED_TIMING_BATTERY"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/apu/snspcio.cpp",
+      "additions": "161",
+      "deletions": "30",
+      "subsystem": "SNES/APU-SPC-DSP",
+      "plan": "KEEP_CURRENT_APU_UNTIL_TARGETED_TIMING_BATTERY"
+    },
+    {
+      "status": "A",
+      "path": "src/snes/apu/snspcio.cpp.pre_AURORA_SWC_TOPGEAR_COMMON_HW_PERF_V3_20260917",
+      "additions": "233",
+      "deletions": "0",
+      "subsystem": "SNES/APU-SPC-DSP",
+      "plan": "REMOVE_EXPERIMENT_SNAPSHOT"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/apu/snspcio.h",
+      "additions": "18",
+      "deletions": "1",
+      "subsystem": "SNES/APU-SPC-DSP",
+      "plan": "KEEP_CURRENT_APU_UNTIL_TARGETED_TIMING_BATTERY"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/apu/snspcmix.cpp",
+      "additions": "621",
+      "deletions": "348",
+      "subsystem": "SNES/APU-SPC-DSP",
+      "plan": "KEEP_CURRENT_APU_UNTIL_TARGETED_TIMING_BATTERY"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/apu/snspcmix.h",
+      "additions": "6",
+      "deletions": "2",
+      "subsystem": "SNES/APU-SPC-DSP",
+      "plan": "KEEP_CURRENT_APU_UNTIL_TARGETED_TIMING_BATTERY"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/apu/snspcmixi.h",
+      "additions": "3",
+      "deletions": "0",
+      "subsystem": "SNES/APU-SPC-DSP",
+      "plan": "KEEP_CURRENT_APU_UNTIL_TARGETED_TIMING_BATTERY"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/apu/snspctimer.cpp",
+      "additions": "108",
+      "deletions": "62",
+      "subsystem": "SNES/APU-SPC-DSP",
+      "plan": "KEEP_CURRENT_APU_UNTIL_TARGETED_TIMING_BATTERY"
+    },
+    {
+      "status": "A",
+      "path": "src/snes/core/dsp3emu.cpp",
+      "additions": "1180",
+      "deletions": "0",
+      "subsystem": "SNES/core-chips-bus",
+      "plan": "KEEP_CURRENT_FEATURE_UNLESS_SEPARATE_PATCH"
+    },
+    {
+      "status": "A",
+      "path": "src/snes/core/dsp3emu.h",
+      "additions": "13",
+      "deletions": "0",
+      "subsystem": "SNES/core-chips-bus",
+      "plan": "KEEP_CURRENT_FEATURE_UNLESS_SEPARATE_PATCH"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/core/dsp4emu.cpp",
+      "additions": "1",
+      "deletions": "9",
+      "subsystem": "SNES/core-chips-bus",
+      "plan": "KEEP_CURRENT_FEATURE_UNLESS_SEPARATE_PATCH"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/core/sncx4.cpp",
+      "additions": "146",
+      "deletions": "80",
+      "subsystem": "SNES/core-chips-bus",
+      "plan": "KEEP_CURRENT_FEATURE_UNLESS_SEPARATE_PATCH"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/core/sncx4.h",
+      "additions": "5",
+      "deletions": "6",
+      "subsystem": "SNES/core-chips-bus",
+      "plan": "KEEP_CURRENT_FEATURE_UNLESS_SEPARATE_PATCH"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/core/sndma.cpp",
+      "additions": "116",
+      "deletions": "18",
+      "subsystem": "SNES/core-chips-bus",
+      "plan": "ROLLBACK_AA3D_DMA_IMPL_KEEP_CURRENT_HEADER"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/core/sndma.h",
+      "additions": "7",
+      "deletions": "0",
+      "subsystem": "SNES/core-chips-bus",
+      "plan": "KEEP_CURRENT_FEATURE_UNLESS_SEPARATE_PATCH"
+    },
+    {
+      "status": "A",
+      "path": "src/snes/core/sndma.h.pre_AURORA_SWC_TOPGEAR_COMMON_HW_PERF_V2_20260917",
+      "additions": "88",
+      "deletions": "0",
+      "subsystem": "SNES/core-chips-bus",
+      "plan": "REMOVE_EXPERIMENT_SNAPSHOT"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/core/sndsp1.cpp",
+      "additions": "22",
+      "deletions": "22",
+      "subsystem": "SNES/core-chips-bus",
+      "plan": "KEEP_CURRENT_FEATURE_UNLESS_SEPARATE_PATCH"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/core/sndsp1.h",
+      "additions": "2",
+      "deletions": "1",
+      "subsystem": "SNES/core-chips-bus",
+      "plan": "KEEP_CURRENT_FEATURE_UNLESS_SEPARATE_PATCH"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/core/sndsp2.cpp",
+      "additions": "16",
+      "deletions": "8",
+      "subsystem": "SNES/core-chips-bus",
+      "plan": "KEEP_CURRENT_FEATURE_UNLESS_SEPARATE_PATCH"
+    },
+    {
+      "status": "A",
+      "path": "src/snes/core/sndsp3.cpp",
+      "additions": "51",
+      "deletions": "0",
+      "subsystem": "SNES/core-chips-bus",
+      "plan": "KEEP_CURRENT_FEATURE_UNLESS_SEPARATE_PATCH"
+    },
+    {
+      "status": "A",
+      "path": "src/snes/core/sndsp3.h",
+      "additions": "18",
+      "deletions": "0",
+      "subsystem": "SNES/core-chips-bus",
+      "plan": "KEEP_CURRENT_FEATURE_UNLESS_SEPARATE_PATCH"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/core/snes.cpp",
+      "additions": "709",
+      "deletions": "130",
+      "subsystem": "SNES/core-chips-bus",
+      "plan": "KEEP_CURRENT_FEATURE_UNLESS_SEPARATE_PATCH"
+    },
+    {
+      "status": "A",
+      "path": "src/snes/core/snes.cpp.pre_AURORA_SWC_TOPGEAR_COMMON_HW_PERF_V2_20260917",
+      "additions": "4500",
+      "deletions": "0",
+      "subsystem": "SNES/core-chips-bus",
+      "plan": "REMOVE_EXPERIMENT_SNAPSHOT"
+    },
+    {
+      "status": "A",
+      "path": "src/snes/core/snes.cpp.pre_AURORA_SWC_TOPGEAR_COMMON_HW_PERF_V3_20260917",
+      "additions": "4558",
+      "deletions": "0",
+      "subsystem": "SNES/core-chips-bus",
+      "plan": "REMOVE_EXPERIMENT_SNAPSHOT"
+    },
+    {
+      "status": "A",
+      "path": "src/snes/core/snes.cpp.pre_AURORA_TOPGEAR_COMMON_CART_SCHED_FAST_V1_20260917",
+      "additions": "4493",
+      "deletions": "0",
+      "subsystem": "SNES/core-chips-bus",
+      "plan": "REMOVE_EXPERIMENT_SNAPSHOT"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/core/snes.h",
+      "additions": "16",
+      "deletions": "1",
+      "subsystem": "SNES/core-chips-bus",
+      "plan": "KEEP_CURRENT_FEATURE_UNLESS_SEPARATE_PATCH"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/core/sngsu.cpp",
+      "additions": "139",
+      "deletions": "52",
+      "subsystem": "SNES/core-chips-bus",
+      "plan": "KEEP_CURRENT_FEATURE_UNLESS_SEPARATE_PATCH"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/core/sngsu.h",
+      "additions": "7",
+      "deletions": "1",
+      "subsystem": "SNES/core-chips-bus",
+      "plan": "KEEP_CURRENT_FEATURE_UNLESS_SEPARATE_PATCH"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/core/snmemmap.cpp",
+      "additions": "353",
+      "deletions": "64",
+      "subsystem": "SNES/core-chips-bus",
+      "plan": "KEEP_CURRENT_FEATURE_UNLESS_SEPARATE_PATCH"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/core/snqueue.h",
+      "additions": "31",
+      "deletions": "1",
+      "subsystem": "SNES/core-chips-bus",
+      "plan": "KEEP_CURRENT_FEATURE_UNLESS_SEPARATE_PATCH"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/core/snsa1.cpp",
+      "additions": "91",
+      "deletions": "57",
+      "subsystem": "SNES/core-chips-bus",
+      "plan": "OPTIONAL_ROLLBACK_AA3D_SA1"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/core/snsgb.cpp",
+      "additions": "8",
+      "deletions": "587",
+      "subsystem": "SNES/core-chips-bus",
+      "plan": "KEEP_CURRENT_FEATURE_UNLESS_SEPARATE_PATCH"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/core/snsgb.h",
+      "additions": "47",
+      "deletions": "103",
+      "subsystem": "SNES/core-chips-bus",
+      "plan": "KEEP_CURRENT_FEATURE_UNLESS_SEPARATE_PATCH"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/core/snswc.cpp",
+      "additions": "107",
+      "deletions": "21",
+      "subsystem": "SNES/core-chips-bus",
+      "plan": "KEEP_CURRENT_FEATURE_UNLESS_SEPARATE_PATCH"
+    },
+    {
+      "status": "A",
+      "path": "src/snes/core/snswc.cpp.pre_AURORA_SWC_12MBIT_SPLIT_ACCOUNTING_V1_20260917",
+      "additions": "3149",
+      "deletions": "0",
+      "subsystem": "SNES/core-chips-bus",
+      "plan": "REMOVE_EXPERIMENT_SNAPSHOT"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/core/snswc.h",
+      "additions": "12",
+      "deletions": "1",
+      "subsystem": "SNES/core-chips-bus",
+      "plan": "KEEP_CURRENT_FEATURE_UNLESS_SEPARATE_PATCH"
+    },
+    {
+      "status": "A",
+      "path": "src/snes/core/snswc.h.pre_AURORA_SWC_12MBIT_SPLIT_ACCOUNTING_V1_20260917",
+      "additions": "337",
+      "deletions": "0",
+      "subsystem": "SNES/core-chips-bus",
+      "plan": "REMOVE_EXPERIMENT_SNAPSHOT"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/core/sntiming.h",
+      "additions": "25",
+      "deletions": "2",
+      "subsystem": "SNES/core-chips-bus",
+      "plan": "KEEP_CURRENT_FEATURE_UNLESS_SEPARATE_PATCH"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/cpu/op65816.h",
+      "additions": "7",
+      "deletions": "0",
+      "subsystem": "SNES/CPU-65816",
+      "plan": "ROLLBACK_AA3D_CPU"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/cpu/op65816_mips.h",
+      "additions": "95",
+      "deletions": "112",
+      "subsystem": "SNES/CPU-65816",
+      "plan": "ROLLBACK_AA3D_CPU"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/cpu/sn65816.S",
+      "additions": "318",
+      "deletions": "134",
+      "subsystem": "SNES/CPU-65816",
+      "plan": "ROLLBACK_AA3D_CPU"
+    },
+    {
+      "status": "A",
+      "path": "src/snes/cpu/sn65816.S.pre_AURORA_CPU_BRANCH_E_SPLIT_PERF_V1_20260916",
+      "additions": "2297",
+      "deletions": "0",
+      "subsystem": "SNES/CPU-65816",
+      "plan": "REMOVE_EXPERIMENT_SNAPSHOT"
+    },
+    {
+      "status": "A",
+      "path": "src/snes/cpu/sn65816.S.pre_AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916",
+      "additions": "2297",
+      "deletions": "0",
+      "subsystem": "SNES/CPU-65816",
+      "plan": "REMOVE_EXPERIMENT_SNAPSHOT"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/cpu/sncpu_c.c",
+      "additions": "4",
+      "deletions": "4",
+      "subsystem": "SNES/CPU-65816",
+      "plan": "ROLLBACK_AA3D_CPU"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/ppu/snppu.cpp",
+      "additions": "335",
+      "deletions": "53",
+      "subsystem": "SNES/PPU-render",
+      "plan": "ROLLBACK_AA3D_PPU_IMPL"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/ppu/snppu.h",
+      "additions": "112",
+      "deletions": "3",
+      "subsystem": "SNES/PPU-render",
+      "plan": "KEEP_CURRENT_FEATURE_UNLESS_SEPARATE_PATCH"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/ppu/snppubg.cpp",
+      "additions": "273",
+      "deletions": "52",
+      "subsystem": "SNES/PPU-render",
+      "plan": "ROLLBACK_AA3D_PPU_IMPL"
+    },
+    {
+      "status": "A",
+      "path": "src/snes/ppu/snppubg.cpp.pre_AURORA_SWC_TOPGEAR_COMMON_HW_PERF_V5_20260917",
+      "additions": "1424",
+      "deletions": "0",
+      "subsystem": "SNES/PPU-render",
+      "plan": "REMOVE_EXPERIMENT_SNAPSHOT"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/ppu/snppublend_gs.cpp",
+      "additions": "239",
+      "deletions": "175",
+      "subsystem": "SNES/PPU-render",
+      "plan": "ROLLBACK_AA3D_PPU_IMPL"
+    },
+    {
+      "status": "A",
+      "path": "src/snes/ppu/snppublend_gs.cpp.pre_AURORA_SWC_TOPGEAR_COMMON_HW_PERF_V4_20260917",
+      "additions": "1090",
+      "deletions": "0",
+      "subsystem": "SNES/PPU-render",
+      "plan": "REMOVE_EXPERIMENT_SNAPSHOT"
+    },
+    {
+      "status": "A",
+      "path": "src/snes/ppu/snppublend_gs.cpp.pre_AURORA_SWC_TOPGEAR_COMMON_HW_PERF_V5_20260917",
+      "additions": "1121",
+      "deletions": "0",
+      "subsystem": "SNES/PPU-render",
+      "plan": "REMOVE_EXPERIMENT_SNAPSHOT"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/ppu/snppublend_gs.h",
+      "additions": "11",
+      "deletions": "6",
+      "subsystem": "SNES/PPU-render",
+      "plan": "KEEP_CURRENT_FEATURE_UNLESS_SEPARATE_PATCH"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/ppu/snppuchrcache.h",
+      "additions": "50",
+      "deletions": "0",
+      "subsystem": "SNES/PPU-render",
+      "plan": "ROLLBACK_AA3D_PPU_IMPL"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/ppu/snppuobj.cpp",
+      "additions": "325",
+      "deletions": "164",
+      "subsystem": "SNES/PPU-render",
+      "plan": "ROLLBACK_AA3D_PPU_IMPL"
+    },
+    {
+      "status": "A",
+      "path": "src/snes/ppu/snppuobj.cpp.pre_AURORA_SWC_TOPGEAR_COMMON_HW_PERF_V6_R7_20260917",
+      "additions": "699",
+      "deletions": "0",
+      "subsystem": "SNES/PPU-render",
+      "plan": "REMOVE_EXPERIMENT_SNAPSHOT"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/ppu/snppurender.cpp",
+      "additions": "395",
+      "deletions": "20",
+      "subsystem": "SNES/PPU-render",
+      "plan": "ROLLBACK_AA3D_PPU_IMPL"
+    },
+    {
+      "status": "A",
+      "path": "src/snes/ppu/snppurender.cpp.pre_AURORA_SWC_TOPGEAR_COMMON_HW_PERF_V4_20260917",
+      "additions": "805",
+      "deletions": "0",
+      "subsystem": "SNES/PPU-render",
+      "plan": "REMOVE_EXPERIMENT_SNAPSHOT"
+    },
+    {
+      "status": "A",
+      "path": "src/snes/ppu/snppurender.cpp.pre_AURORA_SWC_TOPGEAR_COMMON_HW_PERF_V5_20260917",
+      "additions": "810",
+      "deletions": "0",
+      "subsystem": "SNES/PPU-render",
+      "plan": "REMOVE_EXPERIMENT_SNAPSHOT"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/ppu/snppurender.h",
+      "additions": "12",
+      "deletions": "4",
+      "subsystem": "SNES/PPU-render",
+      "plan": "KEEP_CURRENT_FEATURE_UNLESS_SEPARATE_PATCH"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/ppu/snppurender8.cpp",
+      "additions": "954",
+      "deletions": "250",
+      "subsystem": "SNES/PPU-render",
+      "plan": "ROLLBACK_AA3D_PPU_IMPL"
+    },
+    {
+      "status": "A",
+      "path": "src/snes/ppu/snppurender8.cpp.pre_AURORA_SWC_TOPGEAR_COMMON_HW_PERF_V4_20260917",
+      "additions": "2942",
+      "deletions": "0",
+      "subsystem": "SNES/PPU-render",
+      "plan": "REMOVE_EXPERIMENT_SNAPSHOT"
+    },
+    {
+      "status": "A",
+      "path": "src/snes/ppu/snppurender8.cpp.pre_AURORA_SWC_TOPGEAR_COMMON_HW_PERF_V5_20260917",
+      "additions": "2995",
+      "deletions": "0",
+      "subsystem": "SNES/PPU-render",
+      "plan": "REMOVE_EXPERIMENT_SNAPSHOT"
+    },
+    {
+      "status": "A",
+      "path": "src/snes/ppu/snppurender8.cpp.pre_AURORA_SWC_TOPGEAR_COMMON_HW_PERF_V6_R7_20260917",
+      "additions": "3111",
+      "deletions": "0",
+      "subsystem": "SNES/PPU-render",
+      "plan": "REMOVE_EXPERIMENT_SNAPSHOT"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/ppu/snppurenderi.h",
+      "additions": "5",
+      "deletions": "0",
+      "subsystem": "SNES/PPU-render",
+      "plan": "KEEP_CURRENT_FEATURE_UNLESS_SEPARATE_PATCH"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/rom/snrom.cpp",
+      "additions": "308",
+      "deletions": "84",
+      "subsystem": "SNES/ROM",
+      "plan": "KEEP_CURRENT_FEATURE_UNLESS_SEPARATE_PATCH"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/rom/snrom.h",
+      "additions": "7",
+      "deletions": "0",
+      "subsystem": "SNES/ROM",
+      "plan": "KEEP_CURRENT_FEATURE_UNLESS_SEPARATE_PATCH"
+    },
+    {
+      "status": "M",
+      "path": "src/snes/state/snstate.cpp",
+      "additions": "58",
+      "deletions": "2",
+      "subsystem": "SNES/state",
+      "plan": "KEEP_CURRENT_FEATURE_UNLESS_SEPARATE_PATCH"
+    },
+    {
+      "status": "M",
+      "path": "src/third_party/beetle-pce-fast",
+      "additions": "1",
+      "deletions": "1",
+      "subsystem": "submodule-third-party",
+      "plan": "KEEP_CURRENT_PIN_PROTECTED"
+    },
+    {
+      "status": "M",
+      "path": "src/third_party/gpsp",
+      "additions": "1",
+      "deletions": "1",
+      "subsystem": "submodule-third-party",
+      "plan": "KEEP_CURRENT_PIN_PROTECTED"
+    },
+    {
+      "status": "M",
+      "path": "src/third_party/picodrive",
+      "additions": "1",
+      "deletions": "1",
+      "subsystem": "submodule-third-party",
+      "plan": "KEEP_CURRENT_PIN_PROTECTED"
+    },
+    {
+      "status": "M",
+      "path": "src/third_party/quicknes",
+      "additions": "1",
+      "deletions": "1",
+      "subsystem": "submodule-third-party",
+      "plan": "KEEP_CURRENT_PIN_PROTECTED"
+    },
+    {
+      "status": "M",
+      "path": "tools/prepare_gpsp_aurora_sources.py",
+      "additions": "78",
+      "deletions": "0",
+      "subsystem": "other",
+      "plan": "KEEP_CURRENT"
+    },
+    {
+      "status": "A",
+      "path": "tools/strip_gambatte_sgb_stage.py",
+      "additions": "500",
+      "deletions": "0",
+      "subsystem": "other",
+      "plan": "KEEP_CURRENT"
+    }
+  ]
+}

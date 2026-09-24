@@ -1,0 +1,4500 @@
+/* AURORA_V13_UNIFIED_GBC_AUDIO_32X_FRAMESKIP_20260910 */
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+#include <stdarg.h>
+#include <time.h> /* AURORA_V4_4_CUMULATIVE_20260908 */
+#include "types.h"
+#include "snes.h"
+#include "rendersurface.h"
+#include "mixbuffer.h"
+#include "console.h"
+#include "prof.h"
+#include "sntiming.h"
+#include "sndebug.h"
+#include "sndbglog.h"
+
+/* AURORA_SNES_NATIVE_32K_V1_20260822
+ *
+ * The SNESticle S-DSP mixer is fundamentally clocked around the SNES native
+ * 32 kHz sample domain. In particular, DSP-register write timestamps, envelope
+ * progression and echo/FIR behaviour were designed around that clock.
+ *
+ * Aurora briefly exposed lower synthesis rates directly to this mixer. That
+ * made the host buffer cheaper, but it also changed DSP timing semantics:
+ * the register-write queue still advanced in native 32 kHz units while the
+ * mixer produced fewer samples per frame.
+ *
+ * Keep SNES synthesis at its native rate and let AudMixBuffer perform the
+ * existing 32 -> 48 kHz host conversion. The setter remains as a compatibility
+ * API for video.cfg v35/older callers, but all requests normalize to native. */
+void SnesAudioSetRate(Uint32 hz)
+{
+    (void)hz;
+}
+
+Uint32 SnesAudioGetRate(void)
+{
+    return SNSPCDSP_SAMPLERATE;
+}
+
+
+/* AURORA_BSXSLOT_MEMORY_PACK_V1_20260906_SNES_CPP
+ * 8M Memory Pack flash command set, modelled after the bsnes/ares Type-1
+ * device: erased bytes are FF, programming only changes 1 -> 0, 20 D0 erases
+ * a 64 KiB block, A7 D0 erases the chip, and status/vendor reads are stateful. */
+SNBSXMemoryPack::SNBSXMemoryPack()
+{
+    m_pData = NULL;
+    m_bAttached = FALSE;
+    m_bDirty = FALSE;
+    m_bWriteEnabled = FALSE; /* AURORA_V4_4_CUMULATIVE_20260908 */
+    ResetProtocol();
+    ResetIOStats(); /* AURORA_BSXSLOT_MEMORY_PACK_V1_2_IO_WATCH_SGB_STATUS_20260906 */
+}
+
+SNBSXMemoryPack::~SNBSXMemoryPack()
+{
+    if (m_pData)
+        free(m_pData);
+    m_pData = NULL;
+}
+
+Bool SNBSXMemoryPack::AttachBlank()
+{
+    if (!m_pData)
+        m_pData = (Uint8 *)malloc(SNES_BSX_MEMORY_PACK_BYTES);
+    if (!m_pData)
+    {
+        m_bAttached = FALSE;
+        return FALSE;
+    }
+
+    memset(m_pData, 0xFF, SNES_BSX_MEMORY_PACK_BYTES);
+    m_bAttached = TRUE;
+    m_bDirty = FALSE;
+    /* Standalone BSC carts have no MCC /WP driver. BS-X base Power()
+     * overrides this immediately through Commit(). */
+    m_bWriteEnabled = TRUE; /* AURORA_V4_4_CUMULATIVE_20260908 */
+    ResetProtocol();
+    ResetIOStats();
+    return TRUE;
+}
+
+void SNBSXMemoryPack::Detach()
+{
+    m_bAttached = FALSE;
+    m_bDirty = FALSE;
+    m_bWriteEnabled = FALSE; /* AURORA_V4_4_CUMULATIVE_20260908 */
+    ResetProtocol();
+}
+
+void SNBSXMemoryPack::ResetProtocol()
+{
+    /* AURORA_BSXSLOT_FLASH_PROTOCOL_V2_20260907 */
+    m_uFlashMode = BSX_FLASH_MODE_ARRAY;
+    m_uPageIndex = 0;
+    memset(m_PageBuffer, 0xFF, sizeof(m_PageBuffer));
+
+    m_uPendingCommand = 0;
+    m_uPendingStep = 0;
+    m_uPendingData = 0;
+    m_uPendingAddrOdd = 0;
+    m_uPendingCount = 0;
+}
+
+
+void SNBSXMemoryPack::ResetIOStats()
+{
+    m_uReadCount = 0;
+    m_uWriteCount = 0;
+    m_uProgramCount = 0;
+    m_uBlockEraseCount = 0;
+    m_uChipEraseCount = 0;
+    m_uStatusReadCount = 0;
+    m_uVendorReadCount = 0;
+}
+
+/* AURORA_BSXSLOT_FLASH_PROTOCOL_V2_20260907: flash-array mutation helpers. */
+void SNBSXMemoryPack::ProgramFlashByte(Uint32 uAddr, Uint8 uData)
+{
+    Uint32 a;
+    Uint8 oldValue;
+    Uint8 newValue;
+
+    if (!m_bAttached || !m_pData || !m_bWriteEnabled)
+        return;
+
+    a = uAddr & (SNES_BSX_MEMORY_PACK_BYTES - 1);
+    oldValue = m_pData[a];
+
+    /* NOR flash programming can only change 1 -> 0 without an erase. */
+    newValue = (Uint8)(oldValue & uData);
+    if (newValue != oldValue)
+    {
+        m_pData[a] = newValue;
+        m_bDirty = TRUE;
+        ++m_uProgramCount;
+    }
+}
+
+void SNBSXMemoryPack::EraseFlashBlock(Uint32 uAddr)
+{
+    Uint32 a;
+    Uint32 base;
+    Uint32 i;
+    Bool changed = FALSE;
+
+    if (!m_bAttached || !m_pData || !m_bWriteEnabled)
+        return;
+
+    a = uAddr & (SNES_BSX_MEMORY_PACK_BYTES - 1);
+    base = a & 0x0F0000u; /* 16 x 64 KiB blocks in the 8M pack. */
+
+    for (i = 0; i < 0x10000u; ++i)
+    {
+        if (m_pData[base + i] != 0xFF)
+        {
+            changed = TRUE;
+            break;
+        }
+    }
+
+    if (changed)
+    {
+        memset(m_pData + base, 0xFF, 0x10000u);
+        m_bDirty = TRUE;
+        ++m_uBlockEraseCount;
+    }
+}
+
+void SNBSXMemoryPack::EraseFlashAll()
+{
+    Uint32 i;
+    Bool changed = FALSE;
+
+    if (!m_bAttached || !m_pData || !m_bWriteEnabled)
+        return;
+
+    for (i = 0; i < (Uint32)SNES_BSX_MEMORY_PACK_BYTES; ++i)
+    {
+        if (m_pData[i] != 0xFF)
+        {
+            changed = TRUE;
+            break;
+        }
+    }
+
+    if (changed)
+    {
+        memset(m_pData, 0xFF, SNES_BSX_MEMORY_PACK_BYTES);
+        m_bDirty = TRUE;
+        ++m_uChipEraseCount;
+    }
+}
+
+
+Bool SNBSXMemoryPack::Load(const Uint8 *pData, Uint32 nBytes)
+{
+    if (!m_bAttached || !m_pData || !pData ||
+        nBytes != (Uint32)SNES_BSX_MEMORY_PACK_BYTES)
+        return FALSE;
+
+    if (pData != m_pData)
+        memcpy(m_pData, pData, SNES_BSX_MEMORY_PACK_BYTES);
+    m_bDirty = FALSE;
+    ResetProtocol();
+    return TRUE;
+}
+
+Uint8 SNBSXMemoryPack::Read(Uint32 uAddr)
+{
+    Uint32 a;
+
+    if (!m_bAttached || !m_pData)
+        return 0xFF;
+
+    a = uAddr & (SNES_BSX_MEMORY_PACK_BYTES - 1);
+    ++m_uReadCount;
+
+    switch (m_uFlashMode)
+    {
+        case BSX_FLASH_MODE_CHIP:
+            ++m_uVendorReadCount;
+            if (a == 0) return 0xB0; /* Sharp vendor ID. */
+            if (a == 1) return 0xA8; /* LH28F800SU device ID low byte. */
+            if ((a & 7u) == 2u) return 0x63;
+            return 0x20;
+
+        case BSX_FLASH_MODE_PAGE:
+            return m_PageBuffer[m_uPageIndex & 1u][a & 0xFFu];
+
+        case BSX_FLASH_MODE_COMPAT_STATUS:
+            ++m_uStatusReadCount;
+            return 0x80; /* ready */
+
+        case BSX_FLASH_MODE_EXT_STATUS:
+            ++m_uStatusReadCount;
+            if ((a & 0xFFFFu) == 0x0002u)
+                return 0x80; /* block ready; lock bookkeeping not needed here */
+            if ((a & 0xFFFFu) == 0x0004u)
+                return (Uint8)(0x86u | (m_uPageIndex & 1u));
+            return 0x00;
+
+        case BSX_FLASH_MODE_ARRAY:
+        default:
+            return m_pData[a];
+    }
+}
+
+
+void SNBSXMemoryPack::Write(Uint32 uAddr, Uint8 uData)
+{
+    Uint32 a;
+
+    if (!m_bAttached || !m_pData)
+        return;
+
+    a = uAddr & (SNES_BSX_MEMORY_PACK_BYTES - 1);
+    ++m_uWriteCount;
+
+    /* AURORA_BSXSLOT_FLASH_PROTOCOL_V2_20260907
+     * Commands that require one or more following bus writes. */
+    if (m_uPendingCommand)
+    {
+        switch (m_uPendingCommand)
+        {
+            case 0x10:
+            case 0x40:
+                ProgramFlashByte(a, uData);
+                m_uFlashMode = BSX_FLASH_MODE_COMPAT_STATUS;
+                m_uPendingCommand = 0;
+                m_uPendingStep = 0;
+                return;
+
+            case 0x20:
+                if (uData == 0xD0)
+                    EraseFlashBlock(a);
+                m_uFlashMode = BSX_FLASH_MODE_COMPAT_STATUS;
+                m_uPendingCommand = 0;
+                m_uPendingStep = 0;
+                return;
+
+            case 0x38:
+                if (uData == 0xD0)
+                {
+                    Uint8 *p = m_PageBuffer[m_uPageIndex & 1u];
+
+                    /* Memory Pack identification page used by Nintendo's
+                     * slotted creation software. */
+                    p[0x00] = 0x4D; /* 'M' */
+                    p[0x02] = 0x50; /* 'P' */
+                    p[0x04] = 0x04;
+                    p[0x06] = 0x1A; /* Type 1, 8 Mbit */
+
+                    /* Stable synthetic 48-bit serial, same semantic role as
+                     * a physical pack's unique BCD serial. */
+                    p[0x08] = 0x00;
+                    p[0x0A] = 0x01;
+                    p[0x0C] = 0x23;
+                    p[0x0E] = 0x45;
+                    p[0x10] = 0x67;
+                    p[0x12] = 0x89;
+
+                    m_uPageIndex ^= 1u;
+                }
+                m_uPendingCommand = 0;
+                m_uPendingStep = 0;
+                return;
+
+            case 0x74:
+                m_PageBuffer[m_uPageIndex & 1u][a & 0xFFu] = uData;
+                m_uPendingCommand = 0;
+                m_uPendingStep = 0;
+                return;
+
+            case 0x0C:
+                if (m_uPendingStep == 0)
+                {
+                    m_uPendingData = uData;
+                    m_uPendingAddrOdd = (Uint8)(a & 1u);
+                    m_uPendingStep = 1;
+                    return;
+                }
+                else
+                {
+                    Uint16 count;
+                    Uint32 i;
+
+                    if (m_uPendingAddrOdd)
+                        count = (Uint16)uData | ((Uint16)m_uPendingData << 8);
+                    else
+                        count = (Uint16)m_uPendingData | ((Uint16)uData << 8);
+
+                    /* Count is N-1: commit count+1 bytes from the currently
+                     * selected 256-byte page buffer, wrapping its low byte. */
+                    for (i = 0; i <= (Uint32)count; ++i)
+                    {
+                        Uint32 dst = (a + i) &
+                            (SNES_BSX_MEMORY_PACK_BYTES - 1);
+                        Uint8 value =
+                            m_PageBuffer[m_uPageIndex & 1u][dst & 0xFFu];
+                        ProgramFlashByte(dst, value);
+                    }
+
+                    m_uPageIndex ^= 1u;
+                    m_uFlashMode = BSX_FLASH_MODE_COMPAT_STATUS;
+                    m_uPendingCommand = 0;
+                    m_uPendingStep = 0;
+                    return;
+                }
+
+            case 0xE0:
+                if (m_uPendingStep == 0)
+                {
+                    m_uPendingData = uData; /* count low */
+                    m_uPendingStep = 1;
+                    return;
+                }
+                if (m_uPendingStep == 1)
+                {
+                    m_uPendingCount =
+                        (Uint16)m_uPendingData | ((Uint16)uData << 8);
+                    m_uPendingStep = 2;
+                    return;
+                }
+
+                m_PageBuffer[m_uPageIndex & 1u][a & 0xFFu] = uData;
+                if (m_uPendingCount == 0)
+                {
+                    m_uPendingCommand = 0;
+                    m_uPendingStep = 0;
+                }
+                else
+                {
+                    --m_uPendingCount;
+                }
+                return;
+
+            case 0xFB:
+                if (m_uPendingStep == 0)
+                {
+                    m_uPendingData = uData;
+                    m_uPendingAddrOdd = (Uint8)(a & 1u);
+                    m_uPendingStep = 1;
+                    return;
+                }
+                else
+                {
+                    Uint8 lo, hi;
+                    if (m_uPendingAddrOdd)
+                    {
+                        lo = uData;
+                        hi = m_uPendingData;
+                    }
+                    else
+                    {
+                        lo = m_uPendingData;
+                        hi = uData;
+                    }
+                    ProgramFlashByte(a ^ 0u, lo);
+                    ProgramFlashByte(a ^ 1u, hi);
+                    m_uFlashMode = BSX_FLASH_MODE_COMPAT_STATUS;
+                    m_uPendingCommand = 0;
+                    m_uPendingStep = 0;
+                    return;
+                }
+
+            case 0x77: /* lock block */
+            case 0x97: /* refresh lock status */
+            case 0xB0: /* erase suspend/resume */
+                if (uData == 0xD0 && m_uPendingCommand == 0xB0)
+                    m_uFlashMode = BSX_FLASH_MODE_COMPAT_STATUS;
+                m_uPendingCommand = 0;
+                m_uPendingStep = 0;
+                return;
+
+            case 0x96: /* ready/busy mode */
+                m_uPendingCommand = 0;
+                m_uPendingStep = 0;
+                return;
+
+            case 0x99:
+                if (uData == 0xD0)
+                {
+                    Uint8 *p = m_PageBuffer[m_uPageIndex & 1u];
+                    Uint32 id;
+                    p[0x06] = 0x06;
+                    p[0x07] = 0x00;
+
+                    /* Minimal deterministic erase-information table for the
+                     * sixteen 64-KiB blocks of an 8-Mbit pack. */
+                    for (id = 0; id < 16u; ++id)
+                    {
+                        Uint32 pos =
+                            (id & 3u) * 0x08u +
+                            ((id >> 2) & 3u) * 0x40u;
+                        Uint32 erased = 0x80000001u;
+                        p[(pos + 0u) & 0xFFu] = (Uint8)(erased >> 0);
+                        p[(pos + 1u) & 0xFFu] = (Uint8)(erased >> 8);
+                        p[(pos + 2u) & 0xFFu] = (Uint8)(erased >> 16);
+                        p[(pos + 3u) & 0xFFu] = (Uint8)(erased >> 24);
+                    }
+                    m_uPageIndex ^= 1u;
+                }
+                m_uPendingCommand = 0;
+                m_uPendingStep = 0;
+                return;
+
+            case 0xA7:
+                if (uData == 0xD0)
+                    EraseFlashAll();
+                m_uFlashMode = BSX_FLASH_MODE_COMPAT_STATUS;
+                m_uPendingCommand = 0;
+                m_uPendingStep = 0;
+                return;
+
+            default:
+                m_uPendingCommand = 0;
+                m_uPendingStep = 0;
+                return;
+        }
+    }
+
+    switch (uData)
+    {
+        /* Multi-write commands. */
+        case 0x0C:
+        case 0x10:
+        case 0x20:
+        case 0x38:
+        case 0x40:
+        case 0x74:
+        case 0x77:
+        case 0x96:
+        case 0x97:
+        case 0x99:
+        case 0xA7:
+        case 0xB0:
+        case 0xE0:
+        case 0xFB:
+            m_uPendingCommand = uData;
+            m_uPendingStep = 0;
+            return;
+
+        case 0x50: /* clear status */
+            return;
+
+        case 0x70:
+            m_uFlashMode = BSX_FLASH_MODE_COMPAT_STATUS;
+            return;
+
+        case 0x71:
+            m_uFlashMode = BSX_FLASH_MODE_EXT_STATUS;
+            return;
+
+        case 0x72:
+            m_uPageIndex ^= 1u;
+            return;
+
+        case 0x75:
+            /* 75h reads the active page buffer.  It is not the vendor-info
+             * command; chip identifiers are selected by 90h. */
+            m_uFlashMode = BSX_FLASH_MODE_PAGE;
+            return;
+
+        case 0x80: /* abort/sleep side effect not timing-critical here */
+            return;
+
+        case 0x90:
+            m_uFlashMode = BSX_FLASH_MODE_CHIP;
+            return;
+
+        case 0xF0: /* sleep; ignored by the synchronous model */
+            return;
+
+        case 0xFF:
+            m_uFlashMode = BSX_FLASH_MODE_ARRAY;
+            m_uPendingCommand = 0;
+            m_uPendingStep = 0;
+            return;
+
+        default:
+            /* Unknown command: real hardware drops the short queue; it does
+             * not program the flash array as ordinary RAM. */
+            return;
+    }
+}
+
+/* =========================================================================
+ * AURORA_V4_4_CUMULATIVE_20260908
+ * BS-X interface/base cartridge: MCC + 512 KiB PSRAM + offline receiver.
+ * MCC decode and receiver behavior track ares af4cbb04.
+ * ========================================================================= */
+
+SNBSXBase::SNBSXBase()
+{
+    m_pRom = NULL;
+    m_nRomBytes = 0;
+    m_pPSRAM = NULL;
+    m_pPack = NULL;
+    m_bActive = FALSE;
+    m_uIRQFlag = 0;
+    m_uIRQEnable = 0;
+    m_uRegs = 0;
+    m_uPendingRegs = 0;
+    memset(m_Receiver, 0, sizeof(m_Receiver));
+    m_uRTCCounter = 0;
+    m_uRTCHour = 0;
+    m_uRTCMinute = 0;
+    m_uRTCSecond = 0;
+}
+
+SNBSXBase::~SNBSXBase()
+{
+    if (m_pPSRAM)
+        free(m_pPSRAM);
+    m_pPSRAM = NULL;
+}
+
+Bool SNBSXBase::Attach(const Uint8 *pRom, Uint32 nRomBytes,
+                       SNBSXMemoryPack *pPack)
+{
+    if (!pRom || !nRomBytes || !pPack || !pPack->IsAttached())
+        return FALSE;
+
+    if (!m_pPSRAM)
+        m_pPSRAM = (Uint8 *)malloc(SNES_BSX_PSRAM_BYTES);
+    if (!m_pPSRAM)
+        return FALSE;
+
+    m_pRom = pRom;
+    m_nRomBytes = nRomBytes;
+    m_pPack = pPack;
+    m_bActive = TRUE;
+
+    /* Volatile download/work RAM. Never mix it into the persistent .mpk. */
+    memset(m_pPSRAM, 0x00, SNES_BSX_PSRAM_BYTES);
+    Power();
+    return TRUE;
+}
+
+void SNBSXBase::Detach()
+{
+    if (m_pPack)
+        m_pPack->SetWriteEnabled(TRUE);
+
+    m_bActive = FALSE;
+    m_pRom = NULL;
+    m_nRomBytes = 0;
+    m_pPack = NULL;
+    m_uIRQFlag = 0;
+    m_uIRQEnable = 0;
+    m_uRegs = 0;
+    m_uPendingRegs = 0;
+    memset(m_Receiver, 0, sizeof(m_Receiver));
+    m_uRTCCounter = 0;
+    m_uRTCHour = 0;
+    m_uRTCMinute = 0;
+    m_uRTCSecond = 0;
+}
+
+void SNBSXBase::Commit()
+{
+    m_uRegs = m_uPendingRegs;
+    if (m_pPack)
+        m_pPack->SetWriteEnabled(
+            (m_uRegs & (Uint16)(1u << 13)) ? TRUE : FALSE);
+}
+
+void SNBSXBase::Power()
+{
+    if (!m_bActive)
+        return;
+
+    m_uIRQFlag = 0;
+    m_uIRQEnable = 0;
+
+    /* ares MCC power defaults:
+     * mapping=1, PSRAM low=1/high=0/mapping=3,
+     * ROM low/high=1, EX low=1/high=0/mapping=1,
+     * internal/external BS Memory writes=0.
+     */
+    m_uPendingRegs =
+        (Uint16)((1u << 2) | (1u << 3) |
+                 (1u << 5) | (1u << 6) |
+                 (1u << 7) | (1u << 8) |
+                 (1u << 9) | (1u << 11));
+    Commit();
+
+    memset(m_Receiver, 0, sizeof(m_Receiver));
+    m_uRTCCounter = 0;
+    m_uRTCHour = 0;
+    m_uRTCMinute = 0;
+    m_uRTCSecond = 0;
+}
+
+Bool SNBSXBase::ReadMCCRegister(
+    Uint32 uAddr, Uint8 uOpenBus, Uint8 *pData) const
+{
+    Uint8 index;
+    Uint8 value = uOpenBus;
+
+    if (!m_bActive || !pData ||
+        (uAddr & 0xF0F000u) != 0x005000u)
+        return FALSE;
+
+    index = (Uint8)((uAddr >> 16) & 0x0Fu);
+
+    switch (index)
+    {
+        case 0:  value = m_uIRQFlag ? 0x80 : 0x00; break;
+        case 1:  value = m_uIRQEnable ? 0x80 : 0x00; break;
+        case 14: value = 0x00; break;
+        case 15: value = 0x00; break;
+        default:
+            if (index >= 2 && index <= 13)
+                value = (m_uRegs & (Uint16)(1u << index)) ? 0x80 : 0x00;
+            break;
+    }
+
+    *pData = value;
+    return TRUE;
+}
+
+Bool SNBSXBase::WriteMCCRegister(
+    Uint32 uAddr, Uint8 uData, Bool *pCommitted)
+{
+    Uint8 index;
+
+    if (pCommitted)
+        *pCommitted = FALSE;
+
+    if (!m_bActive ||
+        (uAddr & 0xF0F000u) != 0x005000u)
+        return FALSE;
+
+    index = (Uint8)((uAddr >> 16) & 0x0Fu);
+
+    if (index == 1)
+    {
+        m_uIRQEnable = (uData & 0x80) ? 1 : 0;
+    }
+    else if (index >= 2 && index <= 13)
+    {
+        Uint16 bit = (Uint16)(1u << index);
+        if (uData & 0x80)
+            m_uPendingRegs |= bit;
+        else
+            m_uPendingRegs &= (Uint16)~bit;
+    }
+    else if (index == 14 && (uData & 0x80))
+    {
+        Commit();
+        if (pCommitted)
+            *pCommitted = TRUE;
+    }
+
+    return TRUE;
+}
+
+Uint32 SNBSXBase::MirrorRomOffset(Uint32 uPos) const
+{
+    Uint32 mask;
+
+    if (!m_nRomBytes)
+        return 0;
+    if (uPos < m_nRomBytes)
+        return uPos;
+
+    mask = 0x80000000u;
+    while (!(uPos & mask))
+        mask >>= 1;
+
+    if (m_nRomBytes <= (uPos & mask))
+        return MirrorRomOffset(uPos - mask);
+
+    return mask +
+        ((m_nRomBytes - mask)
+            ? (uPos - mask) % (m_nRomBytes - mask)
+            : 0);
+}
+
+SNBSXBase::AccessE SNBSXBase::ResolveMCU(
+    Uint32 uAddr, Uint32 *pOffset) const
+{
+    Uint32 a = uAddr & 0xFFFFFFu;
+    Uint32 off = 0;
+    Uint8 mapping;
+    Uint8 psramMapping;
+    Uint8 exMapping;
+
+    if (pOffset) *pOffset = 0;
+    if (!m_bActive)
+        return ACCESS_NONE;
+
+    mapping = (m_uRegs & (1u << 2)) ? 1 : 0;
+    psramMapping = (Uint8)((m_uRegs >> 5) & 3u);
+    exMapping = (m_uRegs & (1u << 11)) ? 1 : 0;
+
+    /* ROM: highest MCC priority. */
+    if ((m_uRegs & (1u << 7)) &&
+        (a & 0xC08000u) == 0x008000u)
+    {
+        off = ((a & 0x3F0000u) >> 1) | (a & 0x7FFFu);
+        if (pOffset) *pOffset = off;
+        return ACCESS_ROM;
+    }
+    if ((m_uRegs & (1u << 8)) &&
+        (a & 0xC08000u) == 0x808000u)
+    {
+        off = ((a & 0x3F0000u) >> 1) | (a & 0x7FFFu);
+        if (pOffset) *pOffset = off;
+        return ACCESS_ROM;
+    }
+
+    /* PSRAM mapping=0. */
+    if ((m_uRegs & (1u << 3)) && mapping == 0)
+    {
+        if (((a & 0xF08000u) == 0x008000u && psramMapping == 0) ||
+            ((a & 0xF08000u) == 0x208000u && psramMapping == 1) ||
+            ((a & 0xF00000u) == 0x400000u && psramMapping == 2) ||
+            ((a & 0xF00000u) == 0x600000u && psramMapping == 3))
+        {
+            off = ((a & 0x0F0000u) >> 1) | (a & 0x7FFFu);
+            if (pOffset) *pOffset = off;
+            return ACCESS_PSRAM;
+        }
+        if ((a & 0xF08000u) == 0x700000u)
+        {
+            off = ((a & 0x0F0000u) >> 1) | (a & 0x7FFFu);
+            if (pOffset) *pOffset = off;
+            return ACCESS_PSRAM;
+        }
+    }
+
+    if ((m_uRegs & (1u << 4)) && mapping == 0)
+    {
+        if (((a & 0xF08000u) == 0x808000u && psramMapping == 0) ||
+            ((a & 0xF08000u) == 0xA08000u && psramMapping == 1) ||
+            ((a & 0xF00000u) == 0xC00000u && psramMapping == 2) ||
+            ((a & 0xF00000u) == 0xE00000u && psramMapping == 3))
+        {
+            off = ((a & 0x0F0000u) >> 1) | (a & 0x7FFFu);
+            if (pOffset) *pOffset = off;
+            return ACCESS_PSRAM;
+        }
+        if ((a & 0xF08000u) == 0xF00000u)
+        {
+            off = ((a & 0x0F0000u) >> 1) | (a & 0x7FFFu);
+            if (pOffset) *pOffset = off;
+            return ACCESS_PSRAM;
+        }
+    }
+
+    /* PSRAM mapping=1. */
+    if ((m_uRegs & (1u << 3)) && mapping == 1)
+    {
+        if (((a & 0xF88000u) == 0x008000u && psramMapping == 0) ||
+            ((a & 0xF88000u) == 0x108000u && psramMapping == 1) ||
+            ((a & 0xF88000u) == 0x208000u && psramMapping == 2) ||
+            ((a & 0xF88000u) == 0x308000u && psramMapping == 3) ||
+            ((a & 0xF80000u) == 0x400000u && psramMapping == 0) ||
+            ((a & 0xF80000u) == 0x500000u && psramMapping == 1) ||
+            ((a & 0xF80000u) == 0x600000u && psramMapping == 2) ||
+            ((a & 0xF80000u) == 0x700000u && psramMapping == 3))
+        {
+            off = a & 0x07FFFFu;
+            if (pOffset) *pOffset = off;
+            return ACCESS_PSRAM;
+        }
+        if ((a & 0xE0E000u) == 0x206000u)
+        {
+            off = ((a & 0x3F0000u) >> 3) | (a & 0x1FFFu);
+            if (pOffset) *pOffset = off;
+            return ACCESS_PSRAM;
+        }
+    }
+
+    if ((m_uRegs & (1u << 4)) && mapping == 1)
+    {
+        if (((a & 0xF88000u) == 0x808000u && psramMapping == 0) ||
+            ((a & 0xF88000u) == 0x908000u && psramMapping == 1) ||
+            ((a & 0xF88000u) == 0xA08000u && psramMapping == 2) ||
+            ((a & 0xF88000u) == 0xB08000u && psramMapping == 3) ||
+            ((a & 0xF80000u) == 0xC00000u && psramMapping == 0) ||
+            ((a & 0xF80000u) == 0xD00000u && psramMapping == 1) ||
+            ((a & 0xF80000u) == 0xE00000u && psramMapping == 2) ||
+            ((a & 0xF80000u) == 0xF00000u && psramMapping == 3))
+        {
+            off = a & 0x07FFFFu;
+            if (pOffset) *pOffset = off;
+            return ACCESS_PSRAM;
+        }
+        if ((a & 0xE0E000u) == 0xA06000u)
+        {
+            off = ((a & 0x3F0000u) >> 3) | (a & 0x1FFFu);
+            if (pOffset) *pOffset = off;
+            return ACCESS_PSRAM;
+        }
+    }
+
+    /* EX memory is physically absent but still blocks lower-priority BS Memory. */
+    if ((m_uRegs & (1u << 9)) && mapping == 0)
+    {
+        if (((a & 0xE08000u) == 0x008000u && exMapping == 0) ||
+            ((a & 0xE00000u) == 0x400000u && exMapping == 1))
+            return ACCESS_EX;
+    }
+    if ((m_uRegs & (1u << 9)) && mapping == 1)
+    {
+        if (((a & 0xF08000u) == 0x008000u && exMapping == 0) ||
+            ((a & 0xF08000u) == 0x208000u && exMapping == 1) ||
+            ((a & 0xF00000u) == 0x400000u && exMapping == 0) ||
+            ((a & 0xF00000u) == 0x600000u && exMapping == 1))
+            return ACCESS_EX;
+    }
+    if ((m_uRegs & (1u << 10)) && mapping == 0)
+    {
+        if (((a & 0xE08000u) == 0x808000u && exMapping == 0) ||
+            ((a & 0xE00000u) == 0xC00000u && exMapping == 1))
+            return ACCESS_EX;
+    }
+    if ((m_uRegs & (1u << 10)) && mapping == 1)
+    {
+        if (((a & 0xF08000u) == 0x808000u && exMapping == 0) ||
+            ((a & 0xF08000u) == 0xA08000u && exMapping == 1) ||
+            ((a & 0xF00000u) == 0xC00000u && exMapping == 0) ||
+            ((a & 0xF00000u) == 0xE00000u && exMapping == 1))
+            return ACCESS_EX;
+    }
+
+    /* BS Memory: last MCC priority. */
+    if (m_pPack && m_pPack->IsAttached())
+    {
+        if (mapping == 0)
+        {
+            if (((a & 0x408000u) == 0x008000u) ||
+                ((a & 0x400000u) == 0x400000u))
+            {
+                off = ((a & 0x3F0000u) >> 1) | (a & 0x7FFFu);
+                if (pOffset) *pOffset = off;
+                return ACCESS_PACK;
+            }
+        }
+        else
+        {
+            if (((a & 0x408000u) == 0x008000u) ||
+                ((a & 0x400000u) == 0x400000u))
+            {
+                off = a & 0x3FFFFFu;
+                if (pOffset) *pOffset = off;
+                return ACCESS_PACK;
+            }
+        }
+    }
+
+    return ACCESS_NONE;
+}
+
+Uint8 SNBSXBase::ReadMCU(Uint32 uAddr, Uint8 uOpenBus)
+{
+    Uint32 off = 0;
+    AccessE kind = ResolveMCU(uAddr, &off);
+
+    switch (kind)
+    {
+        case ACCESS_ROM:
+            if (m_pRom && m_nRomBytes)
+                return m_pRom[MirrorRomOffset(off)];
+            break;
+        case ACCESS_PSRAM:
+            if (m_pPSRAM)
+                return m_pPSRAM[off & (SNES_BSX_PSRAM_BYTES - 1)];
+            break;
+        case ACCESS_PACK:
+            if (m_pPack)
+                return m_pPack->Read(off);
+            break;
+        case ACCESS_EX:
+        case ACCESS_NONE:
+        default:
+            break;
+    }
+    return uOpenBus;
+}
+
+void SNBSXBase::WriteMCU(Uint32 uAddr, Uint8 uData)
+{
+    Uint32 off = 0;
+    AccessE kind = ResolveMCU(uAddr, &off);
+
+    if (kind == ACCESS_PSRAM && m_pPSRAM)
+    {
+        m_pPSRAM[off & (SNES_BSX_PSRAM_BYTES - 1)] = uData;
+        return;
+    }
+
+    if (kind == ACCESS_PACK && m_pPack)
+    {
+        /* MCC internal gate controls bus delivery; external gate is /WP. */
+        if (m_uRegs & (1u << 12))
+            m_pPack->Write(off, uData);
+    }
+}
+
+Uint8 SNBSXBase::ReadReceiver(Uint16 uAddr, Uint8 uOpenBus)
+{
+    Uint8 index;
+    if (!m_bActive || uAddr < 0x2188 || uAddr > 0x219F)
+        return uOpenBus;
+
+    index = (Uint8)(uAddr - 0x2188);
+    switch (uAddr)
+    {
+        case 0x2188: case 0x2189: case 0x218A:
+        case 0x218C: case 0x218E: case 0x218F:
+        case 0x2190: case 0x2194: case 0x2196:
+        case 0x2197: case 0x2199:
+            return m_Receiver[index];
+
+        case 0x2192:
+        {
+            Uint8 counter = m_uRTCCounter++;
+            if (m_uRTCCounter >= 18)
+                m_uRTCCounter = 0;
+
+            if (counter == 0)
+            {
+                time_t rawtime;
+                struct tm *t;
+                time(&rawtime);
+                t = localtime(&rawtime);
+                if (t)
+                {
+                    m_uRTCHour = (Uint8)t->tm_hour;
+                    m_uRTCMinute = (Uint8)t->tm_min;
+                    m_uRTCSecond = (Uint8)t->tm_sec;
+                }
+            }
+
+            switch (counter)
+            {
+                case 5:  return 0x01;
+                case 6:  return 0x01;
+                case 10: return m_uRTCSecond;
+                case 11: return m_uRTCMinute;
+                case 12: return m_uRTCHour;
+                default: return 0x00;
+            }
+        }
+
+        case 0x2193:
+            return (Uint8)(m_Receiver[index] & (Uint8)~0x0C);
+
+        default:
+            return uOpenBus;
+    }
+}
+
+void SNBSXBase::WriteReceiver(Uint16 uAddr, Uint8 uData)
+{
+    Uint8 index;
+    if (!m_bActive || uAddr < 0x2188 || uAddr > 0x219F)
+        return;
+
+    index = (Uint8)(uAddr - 0x2188);
+    switch (uAddr)
+    {
+        case 0x2188:
+        case 0x2189:
+        case 0x218A:
+        case 0x218B:
+        case 0x218C:
+        case 0x218E:
+            m_Receiver[index] = uData;
+            break;
+
+        case 0x218F:
+            /* Match current ares behavior, including the unusual use of
+             * the previous r218f latch value. */
+            m_Receiver[0x218E - 0x2188] >>= 1;
+            m_Receiver[0x218E - 0x2188] =
+                (Uint8)(m_Receiver[0x218F - 0x2188] -
+                        m_Receiver[0x218E - 0x2188]);
+            m_Receiver[0x218F - 0x2188] >>= 1;
+            break;
+
+        case 0x2191:
+            m_Receiver[index] = uData;
+            m_uRTCCounter = 0;
+            break;
+        case 0x2192:
+            m_Receiver[0x2190 - 0x2188] = 0x80;
+            break;
+        case 0x2193:
+        case 0x2194:
+        case 0x2197:
+        case 0x2199:
+            m_Receiver[index] = uData;
+            break;
+        default:
+            break;
+    }
+}
+
+
+#ifndef SNES_HK97_SPC_BOOT
+#define SNES_HK97_SPC_BOOT 0
+#endif
+
+/* AURORA_HK97_SPC_PREWARM_V9
+ * Set by snrom.cpp from the normalized ROM's exact CRC32. */
+extern Bool g_SnesCompatHongKong97SPCBoot;
+
+/* AURORA_HK97_SPC_PREWARM_V9_2
+ * mainloop_exec.cpp normally installs this only immediately before frame 1.
+ * V9.2 needs the real interpreter during Reset() for the CRC-gated prewarm. */
+extern "C" Int32 SNSPCExecute_C(SNSpcT *pCpu);
+
+#ifndef SNES_CRC_ZERO_INIT
+#define SNES_CRC_ZERO_INIT 0
+#endif
+
+/* AURORA_CRC_ZERO_INIT_CORE_V8
+ * Set by snrom.cpp from the normalized ROM's exact CRC32. */
+extern Bool g_SnesCompatZeroInit;
+
+
+// --- diagnostico de TIMING (ver sndbglog.h) ---
+#if SNDBG_LOG
+static Uint32 g_TmgFrameStart = 0;   // COP0 cycle no inicio do frame
+static Uint32 g_TmgWinFrames  = 0;   // frames acumulados na janela
+static Uint32 g_TmgWinSumCyc  = 0;   // soma de ciclos/frame na janela
+static Uint32 g_TmgWinMaxCyc  = 0;   // pior frame (ciclos) na janela
+static Uint32 g_TmgWinSumM7   = 0;   // soma de ciclos do Mode-7 na janela
+static Uint32 g_TmgWinSumObj  = 0;   // soma de ciclos de sprites na janela
+static Uint32 g_TmgWinSumPPU  = 0;
+static Uint32 g_TmgWinSumCPU  = 0;
+static Uint32 g_TmgWinSumGSU  = 0;
+static Uint32 g_TmgWinSumMDMA = 0;
+static Uint32 g_TmgWinSumHDMA = 0;
+static Uint32 g_TmgWinSumAPU  = 0;
+static Uint32 g_TmgWinSumMix  = 0;
+static Uint32 g_TmgWinSumBlend = 0;
+static Uint32 g_TmgWinSumPPUSync = 0;
+static Uint32 g_TmgWinSumBGInfo = 0;
+static Uint32 g_TmgWinSumBGOffset = 0;
+static Uint32 g_TmgWinSumBGMap = 0;
+static Uint32 g_TmgWinSumBGChr = 0;
+static Uint32 g_TmgWinSumBGMain = 0;
+static Uint32 g_TmgWinSumBGSub = 0;
+static Uint32 g_TmgWinSumColorMath = 0;
+static Uint32 g_TmgWinSumObjUpdate = 0;
+static Uint32 g_TmgWinSumObjFetch = 0;
+static Uint32 g_TmgWinSumObjDraw = 0;
+static Uint32 g_TmgWinSumHDMAData = 0;
+static Uint32 g_TmgWinSumHDMATable = 0;
+static Int32  g_TmgIrqLineMin = 9999;
+static Int32  g_TmgIrqLineMax = -1;
+static Uint32 g_TmgIrqCount   = 0;   // total de H-IRQs na janela
+static Uint32 g_TmgFrameNo    = 0;
+// acumuladores por frame (externados, alimentados em snppurender8.cpp)
+Uint32 g_TmgCycM7  = 0;
+Uint32 g_TmgCycObj = 0;
+Uint32 g_TmgCycPPU = 0;
+Uint32 g_TmgCycCPU = 0;
+Uint32 g_TmgCycGSU = 0;
+Uint32 g_TmgCycMDMA = 0;
+Uint32 g_TmgCycHDMA = 0;
+Uint32 g_TmgCycAPU = 0;
+Uint32 g_TmgCycMix = 0;
+Uint32 g_TmgCycBlend = 0;
+Uint32 g_TmgCycPPUSync = 0;
+Uint32 g_TmgCycBGInfo = 0;
+Uint32 g_TmgCycBGOffset = 0;
+Uint32 g_TmgCycBGMap = 0;
+Uint32 g_TmgCycBGChr = 0;
+Uint32 g_TmgCycBGMain = 0;
+Uint32 g_TmgCycBGSub = 0;
+Uint32 g_TmgCycColorMath = 0;
+Uint32 g_TmgCycObjUpdate = 0;
+Uint32 g_TmgCycObjFetch = 0;
+Uint32 g_TmgCycObjDraw = 0;
+Uint32 g_TmgCycHDMAData = 0;
+Uint32 g_TmgCycHDMATable = 0;
+
+Uint32 g_DbgOAMWrites = 0;
+Uint32 g_DbgVRAMWrites = 0;
+Uint32 g_DbgCGRAMWrites = 0;
+Uint32 g_DbgObjEnabledLines = 0;
+Uint32 g_DbgObjOamRefs = 0;
+Uint32 g_DbgObjTiles = 0;
+Uint32 g_DbgObjCacheHits = 0;
+Uint32 g_DbgObjCacheMisses = 0;
+Uint32 g_DbgObjCacheRefreshes = 0;
+Uint32 g_DbgBGCacheHits = 0;
+Uint32 g_DbgBGCacheMisses = 0;
+Uint32 g_DbgBGCacheRefreshes = 0;
+Uint32 g_DbgChrCacheInvalidations = 0;
+Uint32 g_DbgAudioSamples = 0;
+Uint32 g_DbgObjOpaqueTiles = 0;
+Uint32 g_DbgObjCandidatePixels = 0;
+Uint32 g_DbgObjDrawnPixels = 0;
+Uint32 g_DbgObjClippedTiles = 0;
+Uint32 g_DbgObjEmptyLines = 0;
+Uint32 g_DbgObjRangeLimitLines = 0;
+Uint32 g_DbgObjLimitLines = 0;
+Uint8  g_DbgObjOBSEL = 0;
+Uint8  g_DbgObjTM = 0;
+Uint8  g_DbgObjTS = 0;
+Uint16 g_DbgObjPriority = 0;
+Uint32 g_DbgPPUSyncCalls = 0;
+Uint32 g_DbgPPURenderLines = 0;
+Uint32 g_DbgDMAStarts = 0;
+Uint32 g_DbgDMAReadBytes = 0;
+Uint32 g_DbgDMAOAMBytes = 0;
+Uint32 g_DbgDMAVRAMBytes = 0;
+Uint32 g_DbgDMACGRAMBytes = 0;
+Uint32 g_DbgDMAOtherBytes = 0;
+Uint32 g_DbgDMAWraps = 0;
+Uint32 g_DbgDMAMaxBytes = 0;
+Uint32 g_DbgDMAModes[8] = {0,0,0,0,0,0,0,0};
+Uint32 g_DbgHDMAScrollBytes = 0;
+Uint32 g_DbgHDMACGRAMBytes = 0;
+Uint32 g_DbgHDMAWindowColorBytes = 0;
+Uint32 g_DbgHDMAOtherBytes = 0;
+Uint32 g_DbgPPUQueuedWrites = 0;
+Uint32 g_DbgPPUAppliedWrites = 0;
+Uint32 g_DbgPPUQueueFull = 0;
+Uint32 g_DbgHDMALines = 0;
+Uint32 g_DbgHDMAActiveChannels = 0;
+Uint32 g_DbgHDMATransferChannels = 0;
+Uint32 g_DbgBGActiveLayers = 0;
+Uint32 g_DbgBGMapReloads = 0;
+Uint32 g_DbgBGChrRows = 0;
+Bool   g_DbgCaptureActive = FALSE;
+Uint32 g_DbgCaptureFrameNo = 0;
+// contagem de acessos ao DSP por janela (diagnostico de carga)
+static Uint32 g_TmgDspRd = 0;
+static Uint32 g_TmgDspWr = 0;
+
+#if SNDBG_DEEP
+// Bases por frame para detectar o instante em que os sprites colapsam sem
+// despejar uma linha de log a cada frame.
+static Uint32 g_DbgFrameBaseOAM = 0;
+static Uint32 g_DbgFrameBaseVRAM = 0;
+static Uint32 g_DbgFrameBaseCGRAM = 0;
+static Uint32 g_DbgFrameBaseEnabled = 0;
+static Uint32 g_DbgFrameBaseRefs = 0;
+static Uint32 g_DbgFrameBaseTiles = 0;
+static Uint32 g_DbgFrameBaseOpaque = 0;
+static Uint32 g_DbgFrameBaseCandidate = 0;
+static Uint32 g_DbgFrameBaseDrawn = 0;
+static Uint32 g_DbgPrevObjDrawn = 0;
+static Uint32 g_DbgObjEventCooldown = 0;
+
+static Uint32 SnesDbgHash32(const void *pData, Uint32 nBytes)
+{
+	const Uint8 *p = (const Uint8 *)pData;
+	Uint32 h = 2166136261u;
+	while (nBytes--)
+	{
+		h ^= *p++;
+		h *= 16777619u;
+	}
+	return h;
+}
+#endif
+
+#endif
+
+
+#define SNES_SYNCPPUEVERYLINE (CODE_DEBUG && 0) 
+
+/* AURORA_SGB_AUDIO_V0_5_20260904
+ * Transparent per-frame proxy used only while a real SGB firmware/game is
+ * active. SPC700 still renders exactly as before; GB PSG is summed into the
+ * same 32 kHz PCM samples before AudMixBuffer performs its host conversion.
+ */
+class SGBMixBufferProxy : public CMixBuffer
+{
+public:
+    SGBMixBufferProxy(SNSuperGameBoy *pSGB, CMixBuffer *pTarget)
+        : m_pSGB(pSGB), m_pTarget(pTarget) {}
+
+    virtual void GetFormat(Uint32 *pRate, Uint32 *pBits, Uint32 *pChannels)
+        { m_pTarget->GetFormat(pRate, pBits, pChannels); }
+    virtual Int32 GetOutputSamples() { return m_pTarget->GetOutputSamples(); }
+    virtual void OutputSamplesStereo(Int16 *pLeft, Int16 *pRight, Int32 nSamples)
+    {
+        Uint32 rate = 0, bits = 0, channels = 0;
+        m_pTarget->GetFormat(&rate, &bits, &channels);
+        (void)bits; (void)channels;
+        m_pSGB->MixAudio(pLeft, pRight, nSamples, rate);
+        m_pTarget->OutputSamplesStereo(pLeft, pRight, nSamples);
+    }
+    virtual void OutputSamplesMono(Int16 *pSamples, Int32 nSamples)
+    {
+        Uint32 rate = 0, bits = 0, channels = 0;
+        m_pTarget->GetFormat(&rate, &bits, &channels);
+        (void)bits; (void)channels;
+        m_pSGB->MixAudio(pSamples, NULL, nSamples, rate);
+        m_pTarget->OutputSamplesMono(pSamples, nSamples);
+    }
+    virtual void Flush() { m_pTarget->Flush(); }
+
+private:
+    SNSuperGameBoy *m_pSGB;
+    CMixBuffer *m_pTarget;
+};
+
+
+void SnesSystem::SyncSPC(Int32 uExtra, Bool bFlushAll)
+{
+	Int32 nCycles;
+
+/*#if SNES_DEBUG
+    if (g_bStateDebug)
+    {
+        ConDebug("SyncSPC cpu=%06d spc=%06d\n", 
+            SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME),
+            SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME)
+            );
+
+    }
+#endif */     
+
+    Int32 CpuTime = SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME);
+    Int32 SpcTime = SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME);
+
+    // get cycle count 
+    nCycles = CpuTime - SpcTime - m_Spc.Cycles;
+    nCycles += uExtra;
+    if (nCycles > (SNSPC_CYCLE * SNES_SPCMINCYCLES))
+    {
+        //SnesDebug("SNSPCExec: %d\n", nCycles);
+        // execute SPC
+        PROF_ENTER("SNSpcExecute");
+#if SNDBG_LOG
+        Uint32 _tAPU = ProfCtrGetCycle();
+#endif
+        SNSPCExecute(&m_Spc, nCycles);
+#if SNDBG_LOG
+        g_TmgCycAPU += ProfCtrGetCycle() - _tAPU;
+#endif
+        PROF_LEAVE("SNSpcExecute");
+
+#if SNSPCIO_WRITEQUEUE
+        /* AURORA_BLIZZARD_APUIO_QUEUE_ORDER_V1_20260914
+         * CPU APUIO reads are an observation point, not permission to make
+         * future CPU->SPC writes visible early.  The SPC executor may stop a
+         * few master clocks short of CpuTime at instruction granularity and
+         * carry that remainder in m_Spc.Cycles.  Respect its actually consumed
+         * FRAME timestamp on reads so an IPL/driver handshake cannot collapse
+         * several queued latch values into the newest one.
+         *
+         * Frame rollover and queue-full recovery deliberately retain the old
+         * full flush through bFlushAll=TRUE. */
+        if (bFlushAll)
+            m_SpcIO.SyncQueueAll();
+        else
+            m_SpcIO.SyncQueue(SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME));
+#endif
+    }
+
+//#if SNES_DEBUG
+//    if (g_bStateDebug)
+//    {
+//        ConDebug("DoneSyncSPC cpu=%06d spc=%06d\n", 
+//            SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME),
+//            SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME)
+//            );
+//
+//    }
+//#endif      
+
+    
+    
+    
+    
+    /*
+    // get cycle count 
+    nCycles = SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME) - SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME);
+    nCycles += uExtra;
+
+    // get cycle count 
+    PROF_ENTER("SNSpcExecute");
+    SNSPCExecuteToCycle( &m_Spc, nCycles );
+    PROF_LEAVE("SNSpcExecute");
+
+#if SNSPCIO_WRITEQUEUE
+    m_SpcIO.SyncQueueAll();
+#endif
+*/
+
+
+    /*
+	// get cycle count 
+	nCycles = SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME) - SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME);
+	nCycles += uExtra;
+	if (nCycles > (SNSPC_CYCLE * SNES_SPCMINCYCLES))
+	{
+		//SnesDebug("SNSPCExec: %d\n", nCycles);
+		// execute SPC
+        PROF_ENTER("SNSpcExecute");
+		SNSPCExecute(&m_Spc, nCycles);
+        PROF_LEAVE("SNSpcExecute");
+
+		#if SNSPCIO_WRITEQUEUE
+		m_SpcIO.SyncQueueAll();
+		#endif
+	}
+    */
+}
+
+
+inline void SnesSystem::SyncPPU()
+{
+#if SNDBG_LOG
+	Uint32 _tSync = ProfCtrGetCycle();
+	g_DbgPPUSyncCalls++;
+#endif
+	/* AURORA_DOT_RASTER_V6_SNES_20260915
+	 * During an active scanline synchronize to the live H. Between lines,
+	 * m_uLine already names the NEXT physical line, so finish only the line
+	 * that actually ran; this also prevents V4's V=128 timing latch from
+	 * rendering line 128 before the CPU has executed it. */
+	Uint32 uTargetLine = m_uLine;
+	Uint32 uTargetH = 0;
+	if (m_bRasterLineActive)
+	{
+		Int32 nH = SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_LINE);
+		if (nH < 0) nH = 0;
+		uTargetH = (Uint32)nH;
+	}
+	else if (uTargetLine > 0)
+	{
+		--uTargetLine;
+		uTargetH = SNESPPU_RASTER_H_FALLBACK;
+	}
+	m_PPU.Sync(uTargetLine, uTargetH);
+#if SNDBG_LOG
+	g_TmgCycPPUSync += ProfCtrGetCycle() - _tSync;
+#endif
+}
+
+
+/* AURORA_RASTER_MMIO_CATCHUP_V1_20260907
+ *
+ * The PS2 65816 executor is instruction-granular.  It may therefore finish
+ * an instruction a few master clocks beyond a horizontal scheduler target
+ * and carry the excess as negative Cycles.  That preserves total time, but a
+ * trapped MMIO access inside the overrun instruction can otherwise become
+ * visible before an HBlank/HDMA event which physically preceded the access.
+ *
+ * The ASM memory helpers save R_Cycles into SNCpuT before invoking a trap, so
+ * SNCPUGetCounter(LINE) is the beam position at this actual bus access.  If
+ * the access has crossed H=1096/H=1104, catch up the overdue event before the
+ * handler performs the read/write.  HDMA's cycle subtraction is deliberately
+ * left as CPU debt: later scheduler slices already pay that debt, exactly as
+ * the existing scanline path does for a transfer crossing a slice boundary.
+ *
+ * MDMA is excluded: it already owns the S-CPU bus and has separate scheduling.
+ * m_bRasterCatchupActive prevents recursion if an unusual HDMA A-bus source
+ * itself resolves through an MMIO trap.
+ */
+void SnesSystem::CatchUpRasterEventsForCpuMMIO(SNCpuT *pCpu)
+{
+	Int32 nClock;
+
+	if (!pCpu || pCpu != &m_Cpu ||
+		!m_bRasterLineActive || m_bRasterCatchupActive)
+		return;
+
+	if (pCpu->uSignal & SNCPU_SIGNAL_DMA)
+		return;
+
+	nClock = SNCPUGetCounter(pCpu, SNCPU_COUNTER_LINE);
+	if (nClock < SNES_HBLANK_START_CYCLE)
+		return;
+
+	m_bRasterCatchupActive = TRUE;
+
+	if (!m_bRasterHBlankDone && nClock >= SNES_HBLANK_START_CYCLE)
+	{
+		m_bRasterHBlankDone = TRUE;
+		m_IO.m_Regs.hvbjoy |= 0x40;
+	}
+
+	/* Process HDMA before the triggering CPU MMIO effect.  This preserves
+	 * FIFO order in the line-tagged PPU write queue when an instruction
+	 * straddles the HDMA boundary. */
+	nClock = SNCPUGetCounter(pCpu, SNCPU_COUNTER_LINE);
+	if (!m_bRasterHDMADone && nClock >= SNES_HDMA_START_CYCLE)
+	{
+		m_bRasterHDMADone = TRUE;
+		if (!(m_IO.m_Regs.hvbjoy & 0x80))
+		{
+#if SNDBG_LOG
+			Uint32 _tHDMA = ProfCtrGetCycle();
+#endif
+			m_DMAC.ProcessHDMA(m_uLine);
+#if SNDBG_LOG
+			g_TmgCycHDMA += ProfCtrGetCycle() - _tHDMA;
+#endif
+		}
+	}
+
+	m_bRasterCatchupActive = FALSE;
+}
+
+#if SNES_DEBUG
+Uint8 SNCPU_TRAPFUNC SnesSystem::Read2000Debug(SNCpuT *pCpu, Uint32 uAddr)
+{
+    Uint8 uData = Read2000(pCpu, uAddr);
+    if (Snes_bDebugIO)
+        SnesDebugReadData(uAddr, uData);
+    return uData;
+}
+#endif
+
+
+Uint8 SNCPU_TRAPFUNC SnesSystem::Read2000(SNCpuT *pCpu, Uint32 uAddr)
+{
+	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
+	SnesPPURegsT *pPPURegs = (SnesPPURegsT *)pSnes->m_PPU.GetRegs();
+
+	pSnes->CatchUpRasterEventsForCpuMMIO(pCpu);
+	uAddr &= 0xFFFF;
+
+	/* AURORA_V4_4_CUMULATIVE_20260908 */
+	if (pSnes->m_BSXBase.IsActive() &&
+	    uAddr >= 0x2188 && uAddr <= 0x219F)
+	{
+		Uint8 v = pSnes->m_BSXBase.ReadReceiver((Uint16)uAddr, pCpu->uMDR);
+		pCpu->uMDR = v;
+		return v;
+	}
+
+	if (pSnes->m_SA1.IsActive())
+	{
+		if (uAddr >= 0x2200 && uAddr <= 0x23FF)
+			return pSnes->m_SA1.ReadMainRegister((Uint16)uAddr, pCpu->uMDR);
+		if (uAddr >= 0x3000 && uAddr <= 0x37FF)
+			return pSnes->m_SA1.ReadMainIRAM((Uint16)uAddr, pCpu->uMDR);
+	}
+
+	// S-RTC: relogio em $2800 (leitura)
+	if (pSnes->m_bSRTC && uAddr == 0x2800)
+		return pSnes->m_SRTC.ReadReg();
+
+	// SuperFX/GSU: registradores em $3000-34FF.  Roteados aqui (dentro do
+	// handler do PPU0) porque a granularidade de trap e' 8KB e a pagina
+	// $2000-3FFF e' compartilhada com o PPU -- um trap proprio em $3000
+	// atropelaria o PPU. O GSU avanca em fatias por scanline, em paralelo
+	// aproximado com a CPU principal.
+	if (pSnes->m_bSuperFX && uAddr >= 0x3000 && uAddr <= 0x34FF)
+	{
+		Uint8 v = pSnes->m_GSU.ReadReg((Uint16)uAddr, pCpu->uMDR); /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916 */
+		// ler o SFR ($3031) limpa o flag de IRQ do GSU -> baixa a linha de IRQ.
+		if (!pSnes->m_GSU.IrqPending())
+			pSnes->UpdateMainIRQLine();
+		return v;
+	}
+
+	// The four CPU/APU communication ports repeat throughout $2140-$217F
+	// on real SNES hardware.  Some games deliberately use those mirrors;
+	// treating $2144+ as open bus can turn a 16-bit port read into a value
+	// which never matches and leave the game in an infinite wait loop.
+	if (uAddr >= 0x2140 && uAddr <= 0x217F)
+	{
+		/* AURORA_BLIZZARD_APUIO_QUEUE_ORDER_V1_20260914
+		 * Do not flush writes newer than the SPC's consumed timestamp merely
+		 * because the S-CPU is polling the response ports. */
+		pSnes->SyncSPC(0, FALSE);
+		return pSnes->m_SpcIO.m_Regs.apu_r[uAddr & 3];
+	}
+
+	/* AURORA_MEGA_V2_PPU_READ_MDR
+	 * PPU1 write-only register reads expose the chip's MDR. */
+	switch (uAddr)
+	{
+	case 0x2104: case 0x2105: case 0x2106: case 0x2108:
+	case 0x2109: case 0x210A: case 0x2114: case 0x2115:
+	case 0x2116: case 0x2118: case 0x2119: case 0x211A:
+	case 0x2124: case 0x2125: case 0x2126: case 0x2128:
+	case 0x2129: case 0x212A:
+		return pSnes->m_PPU.GetPPU1MDR();
+	default:
+		break;
+	}
+/*	if (uAddr < 0x2140)
+	{
+		// ppu read
+		return pSnes->m_PPU.Read8(uAddr);
+	} else*/
+	switch (uAddr)
+	{
+
+	case 0x2137: // slhv
+		/* AURORA_ACCURACY_HV_IO_LATCH_V1
+		 * Software latching through $2137 is enabled by WRIO bit 7. */
+		if (pSnes->m_IO.m_Regs.wrio & 0x80)
+		{
+			pPPURegs->ophct.Reg.w = (SNCPUGetCounter(&pSnes->m_Cpu, SNCPU_COUNTER_LINE) + 14) >> 2;
+			pPPURegs->opvct.Reg.w = pSnes->m_uLine & 0x1FF;
+			pPPURegs->stat78 |= 0x40;
+		}
+		/* $2137 itself returns the S-CPU MDR; it does not drive a
+		   fresh PPU value onto the bus. */
+		return pCpu->uMDR;
+
+	case 0x2138: // OAMDATAREAD (PPU1 MDR)
+		{
+			#if SNPPU_WRITEQUEUE
+			pSnes->SyncPPU();
+			#endif
+			pSnes->m_PPU.SetMemoryAccessFlags(
+				pSnes->m_PPU.BuildMemoryAccessFlags(
+					pSnes->m_uLine,
+					(Uint32)SNCPUGetCounter(pCpu, SNCPU_COUNTER_LINE)));
+			Uint8 uData = pSnes->m_PPU.ReadOAMDATA();
+			pSnes->m_PPU.SetMemoryAccessFlags(0);
+			pSnes->m_PPU.SetPPU1MDR(uData);
+			return uData;
+		}
+
+	case 0x213c: // OPHCT (PPU2 MDR; high read only replaces bit 0)
+		{
+			Bool bHigh = pPPURegs->ophct.bFlip;
+			Uint8 uData = pPPURegs->ophct.Read8();
+			if (bHigh)
+				uData = (Uint8)((pSnes->m_PPU.GetPPU2MDR() & 0xFE) | (uData & 1));
+			pSnes->m_PPU.SetPPU2MDR(uData);
+			return uData;
+		}
+
+	case 0x213d: // OPVCT (PPU2 MDR; high read only replaces bit 0)
+		{
+			Bool bHigh = pPPURegs->opvct.bFlip;
+			Uint8 uData = pPPURegs->opvct.Read8();
+			if (bHigh)
+				uData = (Uint8)((pSnes->m_PPU.GetPPU2MDR() & 0xFE) | (uData & 1));
+			pSnes->m_PPU.SetPPU2MDR(uData);
+			return uData;
+		}
+
+	case 0x213e: // STAT77: bit 4 comes from PPU1 MDR
+		{
+			Uint8 uData = (Uint8)((pSnes->m_PPU.GetPPU1MDR() & 0x10) |
+			                           (pPPURegs->stat77 & 0xCF));
+			pSnes->m_PPU.SetPPU1MDR(uData);
+			return uData;
+		}
+
+	case 0x213f: // STAT78: bit 5 comes from PPU2 MDR
+		{
+			Uint8 uData = pPPURegs->stat78;
+			pPPURegs->ophct.Reset();
+			pPPURegs->opvct.Reset();
+			if (!(pSnes->m_IO.m_Regs.wrio & 0x80))
+				uData |= 0x40;
+			else
+				pPPURegs->stat78 &= (Uint8)~0x40;
+			uData = (Uint8)((uData & 0xDF) | (pSnes->m_PPU.GetPPU2MDR() & 0x20));
+			pSnes->m_PPU.SetPPU2MDR(uData);
+			return uData;
+		}
+	case 0x2134: // MPYL (PPU1 MDR)
+	case 0x2135: // MPYM
+	case 0x2136: // MPYH
+		{
+			#if SNPPU_WRITEQUEUE
+			pSnes->SyncPPU();
+			#endif
+			Uint8 uData = (uAddr == 0x2134) ? pPPURegs->mpyl :
+			              (uAddr == 0x2135) ? pPPURegs->mpym : pPPURegs->mpyh;
+			pSnes->m_PPU.SetPPU1MDR(uData);
+			return uData;
+		}
+
+	case 0x2139: // VMDATALREAD (PPU1 MDR)
+		{
+			#if SNPPU_WRITEQUEUE
+			pSnes->SyncPPU();
+			#endif
+			pSnes->m_PPU.SetMemoryAccessFlags(
+				pSnes->m_PPU.BuildMemoryAccessFlags(
+					pSnes->m_uLine,
+					(Uint32)SNCPUGetCounter(pCpu, SNCPU_COUNTER_LINE)));
+			Uint8 uData = pSnes->m_PPU.ReadVMDATAL();
+			pSnes->m_PPU.SetMemoryAccessFlags(0);
+			pSnes->m_PPU.SetPPU1MDR(uData);
+			return uData;
+		}
+
+	case 0x213a: // VMDATAHREAD (PPU1 MDR)
+		{
+			#if SNPPU_WRITEQUEUE
+			pSnes->SyncPPU();
+			#endif
+			pSnes->m_PPU.SetMemoryAccessFlags(
+				pSnes->m_PPU.BuildMemoryAccessFlags(
+					pSnes->m_uLine,
+					(Uint32)SNCPUGetCounter(pCpu, SNCPU_COUNTER_LINE)));
+			Uint8 uData = pSnes->m_PPU.ReadVMDATAH();
+			pSnes->m_PPU.SetMemoryAccessFlags(0);
+			pSnes->m_PPU.SetPPU1MDR(uData);
+			return uData;
+		}
+
+	case 0x213b: // CGDATAREAD (PPU2 MDR)
+		{
+			#if SNPPU_WRITEQUEUE
+			pSnes->SyncPPU();
+			#endif
+			pSnes->m_PPU.SetMemoryAccessFlags(
+				pSnes->m_PPU.BuildMemoryAccessFlags(
+					pSnes->m_uLine,
+					(Uint32)SNCPUGetCounter(pCpu, SNCPU_COUNTER_LINE)));
+			Bool bHigh = (pPPURegs->cgadd.w & 1) ? TRUE : FALSE;
+			Uint8 uData = pSnes->m_PPU.ReadCGDATA();
+			pSnes->m_PPU.SetMemoryAccessFlags(0);
+			if (bHigh)
+				uData = (Uint8)((pSnes->m_PPU.GetPPU2MDR() & 0x80) | (uData & 0x7F));
+			pSnes->m_PPU.SetPPU2MDR(uData);
+			return uData;
+		}
+
+	case 0x2180:	// WMDATA
+		{
+			Uint8 uData;
+			// read from ram
+			uData = pSnes->m_Ram[pSnes->m_IO.m_Regs.wmadd];
+			// increment memory address
+			pSnes->m_IO.m_Regs.wmadd++;
+			pSnes->m_IO.m_Regs.wmadd &= 0x1FFFF;
+			return uData;
+		}
+
+	default:
+		#if SNES_DEBUG
+        if (Snes_bDebugUnhandledIO)
+            SnesDebugRead(uAddr);
+		#endif
+		break;
+	}
+
+	/* AURORA_V2_TRICKY_ACCURACY_20260915
+	 * Unhandled/write-only reads in this $2000-$3FFF trap expose CPU open
+	 * bus. Explicit PPU1/PPU2 MDR cases are handled above. */
+	/* AURORA_V9_GLOBAL_TRICKY_AUDIT_20260915
+	 * Final global SNESdev tricky-games pass. Existing hardware fixes are
+	 * preserved; exact dot-selected OAM/CGRAM contention addresses, exact OBJ-fetch corruption,
+	 * per-cycle SPC, CPU read-side-effect phase, and board-specific SRAM are
+	 * not approximated by this scanline scheduler. SuperFX RPIX already does
+	 * a real cache flush plus bitplane read and remains intact. */
+	return pCpu->uMDR;
+}
+
+//#define SNES_SPCWRITE_LATENCY (21)
+#define SNES_SPCWRITE_LATENCY (0)
+
+#if SNES_DEBUG
+void SNCPU_TRAPFUNC SnesSystem::Write2000Debug(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData)
+{
+    if (Snes_bDebugIO)
+        SnesDebugWrite(uAddr, uData);
+    Write2000(pCpu, uAddr, uData);
+}
+#endif
+
+void SNCPU_TRAPFUNC SnesSystem::Write2000(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData)
+{
+	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
+
+	pSnes->CatchUpRasterEventsForCpuMMIO(pCpu);
+	uAddr &= 0xFFFF;
+
+	/* AURORA_V4_4_CUMULATIVE_20260908 */
+	if (pSnes->m_BSXBase.IsActive() &&
+	    uAddr >= 0x2188 && uAddr <= 0x219F)
+	{
+		pCpu->uMDR = uData;
+		pSnes->m_BSXBase.WriteReceiver((Uint16)uAddr, uData);
+		return;
+	}
+
+	if (pSnes->m_SA1.IsActive())
+	{
+		if (uAddr >= 0x2200 && uAddr <= 0x23FF)
+		{
+			pSnes->m_SA1.WriteMainRegister((Uint16)uAddr, uData);
+			return;
+		}
+		if (uAddr >= 0x3000 && uAddr <= 0x37FF)
+		{
+			pSnes->m_SA1.WriteMainIRAM((Uint16)uAddr, uData);
+			return;
+		}
+	}
+
+	// S-RTC: relogio em $2801 (escrita)
+	if (pSnes->m_bSRTC && uAddr == 0x2801)
+	{
+		pSnes->m_SRTC.WriteReg(uData);
+		return;
+	}
+
+	// SuperFX/GSU: registradores em $3000-34FF (ver Read2000). Escrever
+	// R15.MSB ($301F) liga GO; a execucao acontece em fatias no fim de cada
+	// scanline, evitando bloquear a EE por uma rotina inteira do coprocessador.
+	if (pSnes->m_bSuperFX && uAddr >= 0x3000 && uAddr <= 0x34FF)
+	{
+		pSnes->m_GSU.WriteReg((Uint16)uAddr, uData);
+		if (pSnes->UpdateSuperFXBusMap()) SNCPUAbort(pCpu); /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916 */
+		return;
+	}
+
+	// APUIO0-3 are mirrored every four bytes through $217F.  Route every
+	// mirror through the same SPC write queue and timing path as $2140-43.
+	if (uAddr >= 0x2140 && uAddr <= 0x217F)
+	{
+		#if SNSPCIO_WRITEQUEUE
+		if (!pSnes->m_SpcIO.EnqueueWrite(
+		        SNCPUGetCounter(pCpu, SNCPU_COUNTER_FRAME) + SNES_SPCWRITE_LATENCY,
+		        uAddr & 3, uData))
+		#endif
+		{
+			pSnes->SyncSPC(SNES_SPCWRITE_LATENCY);
+			pSnes->m_SpcIO.m_Regs.apu_w[uAddr & 3] = uData;
+		}
+		return;
+	}
+
+	if (uAddr < 0x2140)
+	{
+		// enqueue write to ppu, if it fails (full) then force a sync 
+		#if SNPPU_WRITEQUEUE
+		/* AURORA_PPU_MEMORY_V3_SNES_20260915
+		 * Keep the existing line-tagged raster queue but preserve the memory
+		 * bus phase in its previously-unused metadata byte. */
+		/* AURORA_CUMULATIVE_V5_SNES_20260915
+		 * Only the four S-PPU memory data ports consume V3 bus metadata.
+		 * Keep ordinary register HDMA/CPU traffic on the zero-metadata path. */
+		Uint8 uMemoryAccessFlags = 0;
+		const Uint32 uPPUReg = uAddr & 0x3Fu;
+		const Uint32 uPPUHClock =
+			(Uint32)SNCPUGetCounter(pCpu, SNCPU_COUNTER_LINE);
+		if (uPPUReg == 0x04u || uPPUReg == 0x18u ||
+		    uPPUReg == 0x19u || uPPUReg == 0x22u)
+		{
+			uMemoryAccessFlags = pSnes->m_PPU.BuildMemoryAccessFlags(
+				pSnes->m_uLine, uPPUHClock);
+		}
+		while (!pSnes->m_PPU.EnqueueWrite(
+			pSnes->m_uLine, uAddr, uData, TRUE, uMemoryAccessFlags,
+			uPPUHClock))
+		{
+			// sync ppu
+			pSnes->SyncPPU();
+		}
+		#else
+		// sync ppu before writing to it
+		pSnes->SyncPPU();
+		Uint8 uMemoryAccessFlags = 0;
+		const Uint32 uPPUReg = uAddr & 0x3Fu;
+		if (uPPUReg == 0x04u || uPPUReg == 0x18u ||
+		    uPPUReg == 0x19u || uPPUReg == 0x22u)
+		{
+			uMemoryAccessFlags = pSnes->m_PPU.BuildMemoryAccessFlags(
+				pSnes->m_uLine,
+				(Uint32)SNCPUGetCounter(pCpu, SNCPU_COUNTER_LINE));
+		}
+		pSnes->m_PPU.SetMemoryAccessFlags(uMemoryAccessFlags);
+
+		// ppu write
+		pSnes->m_PPU.Write8(uAddr, uData);
+		pSnes->m_PPU.SetMemoryAccessFlags(0);
+		#endif
+	} else
+	{
+		switch(uAddr)
+		{
+			case 0x2180:	// WMDATA
+				// write directly to ram
+				pSnes->m_Ram[pSnes->m_IO.m_Regs.wmadd] = uData;
+				// increment memory address
+				pSnes->m_IO.m_Regs.wmadd++;
+				pSnes->m_IO.m_Regs.wmadd &= 0x1FFFF;
+				break;
+			case 0x2181:	// WMADDL
+				pSnes->m_IO.m_Regs.wmadd &= ~0x0000FF;
+				pSnes->m_IO.m_Regs.wmadd |= (uData & 0xFF) << 0;
+				break;
+
+			case 0x2182:	// WMADDM
+				pSnes->m_IO.m_Regs.wmadd &= ~0x00FF00;
+				pSnes->m_IO.m_Regs.wmadd |= (uData & 0xFF) << 8;
+				break;
+
+			case 0x2183:	// WMADDH
+				pSnes->m_IO.m_Regs.wmadd &= ~0xFF0000;
+				pSnes->m_IO.m_Regs.wmadd |= (uData & 0x01) << 16;
+				break;
+
+			case 0x2184:	// ?? dk country
+				break;
+
+			default:
+				#if SNES_DEBUG
+                if (Snes_bDebugUnhandledIO)
+                    SnesDebugWrite(uAddr, uData);
+				#endif
+				break;
+		}
+	}
+}
+
+#if CODE_DEBUG
+Uint8 _CPUHackMem[0x10000];
+#endif
+
+
+#if SNES_DEBUG
+Uint8 SNCPU_TRAPFUNC SnesSystem::Read4000Debug(SNCpuT *pCpu, Uint32 uAddr)
+{
+    Uint8 uData = Read4000(pCpu, uAddr);
+    if (Snes_bDebugIO)
+        SnesDebugReadData(uAddr, uData);
+    return uData;
+}
+#endif
+
+Uint8 SNCPU_TRAPFUNC SnesSystem::Read4000(SNCpuT *pCpu, Uint32 uAddr)
+{
+	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
+	SnesIO *pIO = &pSnes->m_IO;
+
+	pSnes->CatchUpRasterEventsForCpuMMIO(pCpu);
+
+	/* AURORA_V4_4_CUMULATIVE_20260908 */
+	if (pSnes->m_BSXBase.IsActive())
+	{
+		Uint8 v;
+		if (pSnes->m_BSXBase.ReadMCCRegister(uAddr, pCpu->uMDR, &v))
+		{
+			pCpu->uMDR = v;
+			return v;
+		}
+	}
+
+	uAddr &= 0xFFFF;
+
+	if (uAddr >= 0x4300 && uAddr < 0x4380)
+	{
+		// read from DMA controller
+		return pSnes->m_DMAC.Read8((uAddr>>4) & 7, uAddr & 0xF);
+	} else
+	if (pSnes->m_bSDD1 && uAddr >= 0x4800 && uAddr <= 0x4807)
+	{
+		// S-DD1 registradores
+		return pSnes->m_SDD1.ReadReg(uAddr);
+	} else
+	switch (uAddr)
+	{
+    //
+    // 40XX
+    //
+    case 0x4016:	// serial joystick port
+        SNCPUConsumeCycles(&pSnes->m_Cpu, 2);       //access from 4000>41FF is 1.78mhz
+        return pIO->ReadSerial0();
+    case 0x4017:
+        SNCPUConsumeCycles(&pSnes->m_Cpu, 2);       //access from 4000>41FF is 1.78mhz
+        return pIO->ReadSerial1();
+
+    //
+    // 42XX
+    //
+    case 0x4202:	// wrmpya (multiplicand-a)
+		return 0; // ? pIO->m_Regs.wrmpya
+	case 0x4203:	// wrmpyb (multiplicand-b)
+		return 0; // ? pIO->m_Regs.wrmpyb = uData;
+
+    case 0x420B:	// mdmaen (DMA enable register)
+        return pSnes->m_DMAC.GetMDMAEnable();
+    case 0x420C:
+        return pSnes->m_DMAC.GetHDMAEnable();
+
+    case 0x4210:	// RDNMI
+        {
+            Uint8 uData = pIO->m_Regs.rdnmi;
+
+            // clear RDNMI on read
+            pIO->m_Regs.rdnmi &= ~0x80;
+
+            // set new nmi signal
+            SNCPUSignalNMI(pCpu, pIO->m_Regs.rdnmi & pIO->m_Regs.nmitimen & 0x80);
+            return uData;
+        }
+
+    case 0x4211:	// TIMEUP
+        {
+            Uint8 uData = pIO->m_Regs.timeup;
+            pIO->m_Regs.timeup &= ~0x80;
+            pSnes->UpdateMainIRQLine();
+
+            /* AURORA_SPEEDY_MDR_4211_V1
+               TIMEUP drives bit 7; bits 0-6 are S-CPU MDR/open bus.
+               This is the behavior used by the classic Speedy Gonzales case. */
+            uData = (Uint8)((uData & 0x80) | (pCpu->uMDR & 0x7F));
+            pCpu->uMDR = uData;
+            return uData;
+        }
+    case 0x4212:	// HVBJOY
+    {
+        /* V3 review of V1 geometry: VBlank already lives in hvbjoy bit 7 and
+         * therefore follows 224/239 correctly. HBlank includes the 3-cycle
+         * line-wrap window, matching the S-CPU status port. Bits 1-5 are
+         * CPU MDR/open bus; bit 0 is auto-joy busy. */
+        Uint32 uHClock = (Uint32)SNCPUGetCounter(pCpu, SNCPU_COUNTER_LINE);
+        Uint8 uData = (Uint8)(pCpu->uMDR & 0x3E);
+        uData |= (Uint8)(pIO->m_Regs.hvbjoy & 0x81);
+        if (uHClock <= 2 || uHClock >= SNES_HBLANK_START_CYCLE)
+            uData |= 0x40;
+        return uData;
+    }
+    case 0x4213:	// RDIO
+        return pIO->m_Regs.wrio;
+
+	case 0x4214:	// RDDIVL
+		return pIO->m_Regs.rddiv.b.l;
+
+	case 0x4215:	// RDDIVH
+		return pIO->m_Regs.rddiv.b.h;
+
+	case 0x4216:	// RDMPYL
+		return pIO->m_Regs.rdmpy.b.l;
+
+	case 0x4217:	// RDMPYH
+		return pIO->m_Regs.rdmpy.b.h;
+
+	case 0x4218:	// JOY1L
+		return pIO->m_Regs.joy1.b.l;
+	case 0x4219:	// JOY1H
+		return pIO->m_Regs.joy1.b.h;
+
+	case 0x421A:	// JOY2L
+		return pIO->m_Regs.joy2.b.l;
+	case 0x421B:	// JOY2H
+		return pIO->m_Regs.joy2.b.h;
+
+	case 0x421C:	// JOY3L
+		return pIO->m_Regs.joy3.b.l;
+	case 0x421D:	// JOY3H
+		return pIO->m_Regs.joy3.b.h;
+
+	case 0x421E:	// JOY4L
+		return pIO->m_Regs.joy4.b.l;
+	case 0x421F:	// JOY4H
+		return pIO->m_Regs.joy4.b.h;
+
+	default:
+		break;
+	}
+	#if SNES_DEBUG
+    if (Snes_bDebugUnhandledIO)
+	    SnesDebugRead(uAddr);
+	#endif
+	return pCpu->uMDR;
+}
+
+#if SNES_DEBUG
+void SNCPU_TRAPFUNC SnesSystem::Write4000Debug(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData)
+{
+    if (Snes_bDebugIO)
+        SnesDebugWrite(uAddr, uData);
+
+    _CPUHackMem[uAddr & 0xFFFF]= uData;
+
+    Write4000(pCpu, uAddr, uData);
+}
+#endif
+
+void SNCPU_TRAPFUNC SnesSystem::Write4000(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData)
+{
+	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
+
+	pSnes->CatchUpRasterEventsForCpuMMIO(pCpu);
+
+	/* AURORA_V4_4_CUMULATIVE_20260908
+	 * Shadow writes change the physical map only on bank-E commit. */
+	if (pSnes->m_BSXBase.IsActive())
+	{
+		Bool committed = FALSE;
+		if (pSnes->m_BSXBase.WriteMCCRegister(uAddr, uData, &committed))
+		{
+			pCpu->uMDR = uData;
+			if (committed)
+			{
+				pSnes->MapBSXBase();
+				/* Same reason as the existing SWC mode-switch abort: the MIPS
+				 * executor may hold a stale direct fetch pointer. */
+				SNCPUAbort(pCpu);
+			}
+			return;
+		}
+	}
+
+	uAddr &= 0xFFFF;
+
+	if (uAddr >= 0x4300 && uAddr < 0x4380)
+	{
+		// write to DMA controller
+		pSnes->m_DMAC.Write8((uAddr>>4) & 7, uAddr & 0xF, uData);
+	} else
+	if (pSnes->m_bSDD1 && uAddr >= 0x4800 && uAddr <= 0x4807)
+	{
+		// S-DD1 registradores; $4804-$4807 mudam o mapa de bancos $C0-$FF
+		pSnes->m_SDD1.WriteReg(uAddr, uData);
+		if (pSnes->m_SDD1.MapDirty())
+		{
+			pSnes->RemapSDD1();
+			pSnes->m_SDD1.ClearMapDirty();
+		}
+	} else
+	{
+		SnesIO *pIO = &pSnes->m_IO;
+
+		switch (uAddr)
+		{
+        case 0x4016:	// reset serial joystick port?
+            SNCPUConsumeCycles(&pSnes->m_Cpu, 2);       //access from 4000>41FF is 1.78mhz
+            pIO->WriteSerial(uData);
+            break;
+
+        case 0x4200:	// nmitimen
+        {
+#if SNES_HVIRQ_RESCHEDULE
+            Uint8 uOldNmitimen = pIO->m_Regs.nmitimen;
+#endif
+            pIO->m_Regs.nmitimen = uData;
+            if (!(uData & 0x01))
+                pIO->m_Regs.hvbjoy &= (Uint8)~0x01;
+
+            // unconfirmed:
+            // should nmi be disabled if someone set 0 to nmitimen register?
+            // this breaks final fight
+            // has nmi enable been set to zero?
+            if ( !( uData & 0x80 ))
+            {
+                // if so, disable 'BLANK NMI' for good
+                if ( pIO->m_Regs.rdnmi & 0x80 )
+                {
+//                    pIO->m_Regs.rdnmi &= ~0x80;
+                }
+            }
+
+            // have v-en and h-en been set to zero?
+            if ( !(uData & (0x20|0x10)) )
+            {
+                if ( pIO->m_Regs.timeup & 0x80 )
+                {
+                    // remove timeup bit
+                    pIO->m_Regs.timeup &= ~0x80;
+                }
+                // clear IRQ
+                pSnes->UpdateMainIRQLine();
+            }
+
+            // set new nmi signal
+            SNCPUSignalNMI(pCpu, pIO->m_Regs.rdnmi & pIO->m_Regs.nmitimen & 0x80);
+#if SNES_HVIRQ_RESCHEDULE
+            if ((uOldNmitimen ^ uData) & 0x30)
+            {
+                /* AURORA_SNES_IRQ_TOGGLE_PRECISION_V1_20260907
+                 *
+                 * Match mature S-CPU schedulers: changing $4200's H/V IRQ
+                 * mode always recalculates the event, but an already-passed
+                 * compare point may fire immediately only when IRQ is being
+                 * toggled completely OFF<->ON. Switching H<->V or
+                 * H/V<->H/V must not manufacture a stale instant IRQ.
+                 *
+                 * This is global hardware behavior, not a title/CRC hack. */
+                Uint8 uOldIRQMode = uOldNmitimen & 0x30;
+                Uint8 uNewIRQMode = uData & 0x30;
+                Bool bAllowImmediate =
+                    (uOldIRQMode == 0 || uNewIRQMode == 0) ? TRUE : FALSE;
+                pSnes->RescheduleLineIRQ(bAllowImmediate);
+            }
+#endif
+            break;
+        }
+
+        case 0x4201:	// wrio (programmable i/o port)
+            /* Falling edge on PIO bit 7 is the software-controlled
+               external H/V latch trigger used by the real S-CPU. */
+            if ((pIO->m_Regs.wrio & 0x80) && !(uData & 0x80))
+            {
+                SnesPPURegsT *pPPURegs =
+                    (SnesPPURegsT *)pSnes->m_PPU.GetRegs();
+                pPPURegs->ophct.Reg.w =
+                    (SNCPUGetCounter(&pSnes->m_Cpu, SNCPU_COUNTER_LINE) + 14) >> 2;
+                pPPURegs->opvct.Reg.w = pSnes->m_uLine & 0x1FF;
+                pPPURegs->stat78 |= 0x40;
+            }
+            pIO->m_Regs.wrio = uData;
+            break;
+
+		case 0x4202:	// wrmpya (multiplicand-a)
+			pIO->m_Regs.wrmpya = uData;
+			break;
+		case 0x4203:	// wrmpyb (multiplicand-b)
+			pIO->m_Regs.wrmpyb = uData;
+
+			// multiply
+			pIO->m_Regs.rdmpy.w = pIO->m_Regs.wrmpya * pIO->m_Regs.wrmpyb;
+			break;
+
+		case 0x4204:	// wrdivl (multiplier-c low)
+			pIO->m_Regs.wrdiv.b.l = uData;
+			break;
+		case 0x4205:	// wrdivh (multiplier-c high)
+			pIO->m_Regs.wrdiv.b.h = uData;
+			break;
+		case 0x4206:	// wrdivb (divisor-b)
+			pIO->m_Regs.wrdivb  = uData;
+			if (uData!=0)
+			{
+				pIO->m_Regs.rddiv.w = pIO->m_Regs.wrdiv.w / pIO->m_Regs.wrdivb;
+				pIO->m_Regs.rdmpy.w = pIO->m_Regs.wrdiv.w % pIO->m_Regs.wrdivb;
+			} else
+			{
+                // divide by zero
+				pIO->m_Regs.rddiv.w = 0xFFFF;
+				pIO->m_Regs.rdmpy.w = pIO->m_Regs.wrdiv.w;
+			}
+			break;
+
+        case 0x4207:	// htmel (video horizontal IRQ beam position)
+            pIO->m_Regs.htime.b.l = uData;
+#if SNES_HVIRQ_RESCHEDULE
+            pSnes->RescheduleLineIRQ(FALSE);
+#endif
+            break;
+        case 0x4208:	// htmeh (video horizontal IRQ beam position)
+            pIO->m_Regs.htime.b.h = uData & 1;
+#if SNES_HVIRQ_RESCHEDULE
+            pSnes->RescheduleLineIRQ(FALSE);
+#endif
+            break;
+        case 0x4209:	// vtmel (video vertical IRQ beam position)
+            pIO->m_Regs.vtime.b.l = uData;
+#if SNES_HVIRQ_RESCHEDULE
+            pSnes->RescheduleLineIRQ(FALSE);
+#endif
+            break;
+        case 0x420A:	// vtmeh (video vertical IRQ beam position)
+            pIO->m_Regs.vtime.b.h = uData & 1;
+#if SNES_HVIRQ_RESCHEDULE
+            pSnes->RescheduleLineIRQ(FALSE);
+#endif
+            break;
+
+		case 0x420B:	// mdmaen (DMA enable register)
+			pSnes->m_DMAC.SetMDMAEnable(uData);
+			if (uData != 0)
+			{
+                // we've got DMA, so abort execution
+                SNCPUSignalDMA(pCpu, 1);
+			}
+			break;
+
+		case 0x420C:	// hdmaen (HDMA enable register)
+			pSnes->m_DMAC.SetHDMAEnable(uData);
+			break;
+
+        case 0x420D:	// memsel (cycle speed register)
+            if ((pIO->m_Regs.memsel ^ uData) & 1)
+            {
+                if (uData & 1)
+                {
+                    pSnes->SetFastRom();
+                } else
+                {
+                    pSnes->SetSlowRom();
+                }
+                pIO->m_Regs.memsel = uData;
+            }
+            break;
+
+		case 0x4211:	// TIMEUP 
+			pIO->m_Regs.timeup &= ~0x80;
+			pSnes->UpdateMainIRQLine();
+			break;
+
+		case 0x4212:	// HVBJOY
+			break;
+
+		case 0x4214:	// RDDIVL
+		case 0x4215:	// RDDIVH
+		case 0x4216:	// RDMPYL
+		case 0x4217:	// RDMPYH 
+			break; // mario ??
+
+		default:
+			#if SNES_DEBUG
+            if (Snes_bDebugUnhandledIO)
+			    SnesDebugWrite(uAddr, uData);
+			#endif
+			break;
+		}
+	}
+
+}
+
+Uint8 SNCPU_TRAPFUNC SnesSystem::ReadMem(SNCpuT *pCpu, Uint32 uAddr)
+{
+
+
+//	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
+	#if SNES_DEBUG
+    if (Snes_bDebugUnhandledIO)
+	SnesDebugRead(uAddr);
+	#endif
+	return pCpu->uMDR;
+}
+
+
+void SNCPU_TRAPFUNC SnesSystem::WriteMem(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData)
+{
+//	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
+	#if SNES_DEBUG
+    if (Snes_bDebugUnhandledIO)
+        SnesDebugWrite(uAddr, uData);
+	#endif
+}
+
+Uint8 SNCPU_TRAPFUNC SnesSystem::ReadSRAM(SNCpuT *pCpu, Uint32 uAddr)
+{
+	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
+	Uint8 *pSRAM =  pSnes->GetSRAM();
+	return pSRAM[uAddr & (pSnes->m_uSramSize-1)];
+}
+
+
+void SNCPU_TRAPFUNC SnesSystem::WriteSRAM(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData)
+{
+	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
+	Uint8 *pSRAM =  pSnes->GetSRAM();
+
+	pSRAM[uAddr & (pSnes->m_uSramSize-1)] = uData;
+}
+
+#ifdef SNES_DSP1
+
+/* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: board-specific DR/SR decode. */
+Bool SnesSystem::DSPAddressIsStatus(Uint32 uAddr) const
+{
+    Uint16 a = (Uint16)(uAddr & 0xFFFFu);
+#if SNES_DSP1
+    if (m_pDsp == &m_DSP1)
+    {
+        Bool largeLo = FALSE;
+        if (m_bSuperWildCard && m_SWC.HasExternalCartridge())
+            largeLo = m_SWC.GetExternalCartridgeMapping() == SNROM_MAPPING_LOROM &&
+                      m_SWC.GetExternalCartridgeBytes() > 0x100000u;
+        else if (m_pRom)
+            largeLo = m_pRom->m_eMapping == SNROM_MAPPING_LOROM &&
+                      m_pRom->GetBytes() > 0x100000u;
+        if (largeLo) return (a >= 0x4000u && a < 0x8000u) ? TRUE : FALSE;
+    }
+    if (m_pDsp == &m_DSP2) return FALSE;
+#endif
+    if (a >= 0x6000u && a < 0x8000u) return (a >= 0x7000u) ? TRUE : FALSE;
+    if (a >= 0x8000u) return (a >= 0xC000u) ? TRUE : FALSE;
+    return FALSE;
+}
+
+Uint8 SNCPU_TRAPFUNC SnesSystem::ReadDSP1(SNCpuT *pCpu, Uint32 uAddr)
+{
+	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
+
+	// Guarda anti-crash: se o chip nao esta ligado (ex.: jogo de
+	// DSP-3/DSP-4 sem o firmware correspondente), nao ha objeto DSP.
+	// Devolve um status "ocupado/sem RQM" e dados 0 em vez de
+	// dereferenciar um ponteiro nulo.  (O mapa de memoria normalmente
+	// nem mapeia a regiao quando nao ha chip, mas isto e' a rede de
+	// seguranca para qualquer caminho residual.)
+	if (!pSnes->m_pDsp)
+		return pSnes->DSPAddressIsStatus(uAddr) ? 0x80 : 0x00;
+
+	if (pSnes->DSPAddressIsStatus(uAddr))
+	{
+		Uint8 s = pSnes->m_pDsp->ReadStatus(uAddr);
+#if SNDBG_LOG
+		g_TmgDspRd++;
+#endif
+		return s;
+	}
+	else
+	{
+		Uint8 d = pSnes->m_pDsp->ReadData(uAddr);
+#if SNDBG_LOG
+		g_TmgDspRd++;
+#endif
+		return d;
+	}
+}
+
+
+void SNCPU_TRAPFUNC SnesSystem::WriteDSP1(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData)
+{
+	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
+
+	// Guarda anti-crash: sem chip DSP ligado, ignora a escrita.
+	if (!pSnes->m_pDsp)
+		return;
+
+	// Escritas vao para o DR; o SR e' somente leitura.
+	if (!pSnes->DSPAddressIsStatus(uAddr))
+	{
+#if SNDBG_LOG
+		g_TmgDspWr++;
+#endif
+		pSnes->m_pDsp->WriteData(uAddr, uData);
+	}
+}
+
+#endif
+
+
+Uint8 SNCPU_TRAPFUNC SnesSystem::ReadGSU(SNCpuT *pCpu, Uint32 uAddr)
+{
+	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
+	return pSnes->m_GSU.ReadReg((Uint16)(uAddr & 0xFFFF), pCpu->uMDR); /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916 */
+}
+
+void SNCPU_TRAPFUNC SnesSystem::WriteGSU(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData)
+{
+	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
+	pSnes->m_GSU.WriteReg((Uint16)(uAddr & 0xFFFF), uData);
+	if (pSnes->UpdateSuperFXBusMap()) SNCPUAbort(pCpu); /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916 */
+}
+
+
+Uint8 SNCPU_TRAPFUNC SnesSystem::ReadOBC1(SNCpuT *pCpu, Uint32 uAddr)
+{
+	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
+	return pSnes->m_OBC1.Read(uAddr & 0xFFFF);
+}
+
+void SNCPU_TRAPFUNC SnesSystem::WriteOBC1(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData)
+{
+	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
+	pSnes->m_OBC1.Write(uAddr & 0xFFFF, uData);
+}
+
+
+// CX4 (Mega Man X2/X3). O chip le dados direto da ROM (vertices, sprites,
+// blocos de DMA); o callback resolve um endereco SNES de 24 bits via a CPU.
+Uint8 SnesSystem::CX4ReadMem(void *pCtx, Uint32 uAddr)
+{
+	return SNCPUPeek8((SNCpuT *)pCtx, uAddr);
+}
+
+Uint8 SNCPU_TRAPFUNC SnesSystem::ReadCX4(SNCpuT *pCpu, Uint32 uAddr)
+{
+	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
+	return pSnes->m_CX4.Read(uAddr & 0xFFFF, pCpu->uMDR); /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916 */
+}
+
+void SNCPU_TRAPFUNC SnesSystem::WriteCX4(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData)
+{
+	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
+	pSnes->m_CX4.Write(uAddr & 0xFFFF, uData);
+}
+
+
+//
+//
+//
+
+
+
+
+
+
+
+
+//
+//
+//
+
+SnesSystem::SnesSystem()
+{
+	m_pRom			= NULL;
+
+	// setup cpu
+	SNCPUNew(&m_Cpu);
+	m_Cpu.pUserData = (void *)this;
+
+	m_uSramSize = 0;
+#if SNES_HVIRQ_RESCHEDULE
+	m_bLineIRQActive = FALSE;
+	m_bLineIRQReschedule = FALSE;
+	m_bLineIRQFired = FALSE;
+	m_bLineIRQInstant = FALSE;
+	m_nLineIRQCycle = -1;
+	m_nLineIRQClock = 0;
+#endif
+
+	/* AURORA_RASTER_MMIO_CATCHUP_V1_20260907 */
+	m_bRasterLineActive = FALSE;
+	m_bRasterCatchupActive = FALSE;
+	m_bRasterHBlankDone = FALSE;
+	m_bRasterHDMADone = FALSE;
+
+	// setup spc
+	SNSPCNew(&m_Spc);
+	SNSPCSetTrapFunc(&m_Spc, SNSpcIO::Read8Trap, SNSpcIO::Write8Trap);
+	m_Spc.pUserData  = (void *)&m_SpcIO;
+	m_SpcIO.SetSpc(&m_Spc);
+	m_SpcIO.SetSpcDsp(&m_SpcDsp);
+
+	// link dsp with mixer(s)
+	m_SpcDsp.SetMixer(0,&m_SpcDspMixer);
+	m_SpcDsp.SetMixer(1,&m_SpcDspSilentMixer);
+	m_SpcDspMixer.SetDsp(&m_SpcDsp);
+	m_SpcDspSilentMixer.SetDsp(&m_SpcDsp);
+	/* AURORA_SPC700_MEGA_ACCURACY_V1_20260916
+	 * Wire both IPL-visible memory and underlying physical APURAM. */
+	m_SpcDsp.SetMem(m_Spc.Mem, m_Spc.ShadowMem, &m_Spc.bRomEnable);
+
+	// setup dma controller
+	m_DMAC.SetCPU(&m_Cpu);
+	m_DMAC.SetPPU(&m_PPU);
+	m_DMAC.SetSDD1(&m_SDD1);
+
+	m_bSDD1 = FALSE;
+	m_bSuperFXRomBlocked = FALSE; /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916 */
+	m_bSuperFXRamBlocked = FALSE;
+	m_bSA1IRQ = FALSE; /* AURORA_SA1_V1_REFERENCE_LOGIC_20260902 */
+	m_bSuperWildCard = FALSE; /* AURORA_SWC_FLOPPY_V1_20260831 */
+	m_uSGBSyncClock = 0; /* AURORA_SGB_RUNTIME_V0_4_20260904 */
+
+	// setup ppu
+	m_PPURender.SetPPU(&m_PPU);
+	m_PPU.SetPPURender(&m_PPURender);
+
+#if SNES_DSP1
+	m_pDsp = NULL;
+#endif
+}
+
+SnesSystem::~SnesSystem()
+{
+	SetRom(NULL);
+	SNCPUDelete(&m_Cpu);
+	SNSPCDelete(&m_Spc);
+#if SNES_DSP1
+	m_pDsp = NULL;
+#endif 
+}
+
+void SnesSystem::Reset()
+{
+	if (m_BSXMemory.IsAttached())
+		m_BSXMemory.ResetProtocol(); /* AURORA_BSXSLOT_MEMORY_PACK_V1_20260906_SNES_CPP */
+	/* AURORA_V7_FRONT_COPIER_MEDIA_CART_RESET_20260831
+	 * SNES RESET is a warm console reset, not copier power-on. Preserve the
+	 * Front copier's current System Mode (1=cart, 2/3=DRAM) and merely rebuild
+	 * the map before the S-CPU takes the current reset vector. */
+	if (m_bSuperWildCard)
+	{
+		MapSuperWildCard();
+	}
+	else if (m_BSXBase.IsActive())
+	{
+		MapBSXBase(); /* AURORA_V4_4_CUMULATIVE_20260908 */
+	}
+	else
+	{
+		SetSlowRom();
+	}
+
+	m_PPU.Reset();
+	m_DMAC.Reset();
+	m_IO.Reset();
+	m_SpcIO.Reset();
+	m_SpcDsp.Reset();
+	m_SpcDspMixer.Reset();
+	m_SpcDspSilentMixer.Reset();
+
+#ifdef SNES_DSP1
+	if (m_pDsp)
+	{
+		m_pDsp->Reset();
+	}
+#endif 
+
+	m_OBC1.Reset();
+
+	m_CX4.Reset();
+
+	m_GSU.Reset();
+	UpdateSuperFXBusMap(TRUE); /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916 */
+
+	m_SDD1.Reset();
+
+	if (m_SA1.IsActive())
+	{
+	    m_SA1.Reset();
+	    /* AURORA_SA1_COMPAT_V12_RESET_MAP_20260910
+	     * Rebuild the S-CPU's materialized SA-1 view after reset. */
+	    /* AURORA_V12_SELF_AUDIT_GBC_FX1_20260910: audited S-CPU reset-map barrier. */
+	    m_SA1.MapMainCPU(&m_Cpu);
+	}
+
+	// So' o cartucho com S-RTC deve tocar o relogio do host (time/gmtime).
+	// Antes isso rodava no boot de TODO jogo -> se time()/gmtime() falhar no
+	// PS2 real, quebraria o boot de qualquer jogo.
+	if (m_bSRTC)
+		m_SRTC.Reset();
+
+#if CODE_DEBUG
+	memset(_CPUHackMem, 0, sizeof(_CPUHackMem));
+#endif
+
+	/* AURORA_MEGA_V5_RESET_PRESERVE_RAM
+	 * RESET is warm: preserve WRAM/SRAM. Cold power is SetSnesRom(). */
+	// reset cpu
+	SNCPUReset(&m_Cpu, true);
+	SNSPCReset(&m_Spc, true);
+
+    if (m_SGB.IsActive())
+    {
+        m_SGB.Reset();
+        m_uSGBSyncClock = (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_TOTAL);
+    }
+
+#if SNES_HK97_SPC_BOOT
+	/* AURORA_HK97_SPC_PREWARM_V9
+	 *
+	 * Hong Kong '97 forces $2100=$80 (black screen) and then performs
+	 * a 16-bit CMP $2140 until the SPC700 IPL publishes $BBAA.
+	 *
+	 * Normally Aurora advances the SPC lazily when the S-CPU touches APUIO.
+	 * For these exact Hong Kong '97 CRCs only, let the REAL embedded IPL run
+	 * first until it naturally writes AA to $F4 and BB to $F5.
+	 *
+	 * We do NOT synthesize AA/BB. If the SPC core cannot reach the handshake
+	 * within the bounded budget, restore the ordinary hard-reset state.
+	 *
+	 * On success, retain SPC registers/APURAM/ports but zero only scheduler
+	 * counters, so CPU and SPC both begin emulated time at t=0 while the IPL
+	 * remains parked in its normal wait-for-$CC loop.
+	 */
+	if (g_SnesCompatHongKong97SPCBoot)
+	{
+		const Int32 kHK97ChunkClocks = 4096;
+		const Int32 kHK97MaxClocks   = 131072;
+		Int32 nHK97Clocks = 0;
+
+		while (nHK97Clocks < kHK97MaxClocks &&
+		       !(m_SpcIO.m_Regs.apu_r[0] == 0xAA &&
+		         m_SpcIO.m_Regs.apu_r[1] == 0xBB))
+		{
+			/* V9.2: Reset() runs before _ExecuteSnes() installs
+			 * SNSPCExecute_C as the global SPC executor. Calling the wrapper here
+			 * therefore used the no-op default executor in V9/V9.1.
+			 *
+			 * Reproduce SNSPCExecute()'s accounting locally, but invoke the real
+			 * SPC700 interpreter directly. This keeps the experiment CRC-isolated
+			 * and does not change the global executor for other games. */
+			m_Spc.Cycles += kHK97ChunkClocks;
+			m_Spc.Counter[SNSPC_COUNTER_TOTAL] += kHK97ChunkClocks;
+			m_Spc.Counter[SNSPC_COUNTER_FRAME] += kHK97ChunkClocks;
+			SNSPCExecute_C(&m_Spc);
+			nHK97Clocks += kHK97ChunkClocks;
+		}
+
+		if (m_SpcIO.m_Regs.apu_r[0] == 0xAA &&
+		    m_SpcIO.m_Regs.apu_r[1] == 0xBB)
+		{
+			/* Preserve the naturally reached IPL state and handshake,
+			   but do not start the APU ahead of the S-CPU scheduler. */
+			SNSPCResetCounters(&m_Spc);
+		}
+		else
+		{
+			/* Fail closed: exact legacy hard-reset state, no forged ports. */
+			m_SpcIO.Reset();
+			SNSPCReset(&m_Spc, true);
+		}
+	}
+#endif
+
+	m_uFrame=0;
+	m_uLine =0;
+}
+
+void SnesSystem::SoftReset()
+{
+    if (m_BSXMemory.IsAttached())
+        m_BSXMemory.ResetProtocol(); /* AURORA_BSXSLOT_MEMORY_PACK_V1_20260906_SNES_CPP */
+    /*
+     * Soft reset:
+     * reset the console hardware state without clearing RAM, SRAM,
+     * VRAM, CGRAM or OAM.
+     */
+
+    /* AURORA_V7_FRONT_COPIER_MEDIA_CART_RESET_20260831: soft reset preserves active copier System Mode too. */
+    if (m_bSuperWildCard)
+        MapSuperWildCard();
+    else if (m_BSXBase.IsActive())
+        MapBSXBase(); /* AURORA_V4_4_CUMULATIVE_20260908 */
+    else
+        SetSlowRom();
+
+    m_PPU.SoftReset();
+    m_DMAC.Reset();
+    m_IO.Reset();
+    m_SpcIO.Reset();
+    m_SpcDsp.Reset();
+    m_SpcDspMixer.Reset();
+    m_SpcDspSilentMixer.Reset();
+
+#ifdef SNES_DSP1
+    if (m_pDsp)
+    {
+        m_pDsp->Reset();
+    }
+#endif
+
+    m_OBC1.Reset();
+    m_CX4.Reset();
+    m_GSU.Reset();
+    UpdateSuperFXBusMap(TRUE); /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916 */
+    m_SDD1.Reset();
+    if (m_SA1.IsActive())
+    {
+        m_SA1.Reset();
+        /* AURORA_SA1_COMPAT_V12_RESET_MAP_20260910
+         * Rebuild the S-CPU's materialized SA-1 view after reset. */
+        /* AURORA_V12_SELF_AUDIT_GBC_FX1_20260910: audited S-CPU reset-map barrier. */
+        m_SA1.MapMainCPU(&m_Cpu);
+    }
+
+    /*
+     * Do not randomize or clear main RAM/SRAM here.
+     */
+SNCPUResetCounters(&m_Cpu);
+
+SNCPUReset(&m_Cpu, false);
+m_Cpu.Regs.rS.w = 0x01FF;
+m_Cpu.Regs.rDP = 0;
+m_Cpu.Regs.rDB = 0;
+m_Cpu.Regs.rX.b.h = 0;
+m_Cpu.Regs.rY.b.h = 0;
+
+/* Restart SPC from IPL ROM while preserving APURAM. */
+SNSPCSoftReset(&m_Spc);
+
+m_uFrame = 0;
+m_uLine = 0;
+}
+
+
+/* AURORA_V6_RUNTIME_EFFECT_ALL5_20260908
+ * Normally SetSnesRom() attaches the pack before mapping. Persistence runs
+ * later, after Reset(), so it is also a safe place to retry a failed 1 MiB
+ * allocation or BS-X base PSRAM/MCC attachment without inventing a second
+ * Memory Pack object. */
+Bool SnesSystem::EnsureBSXMemoryPack()
+{
+    if (!m_pRom ||
+        !(m_pRom->m_Flags & (SNROM_FLAG_BSXSLOT | SNROM_FLAG_BSXBASE)))
+        return FALSE;
+
+    if (!m_BSXMemory.IsAttached() && !m_BSXMemory.AttachBlank())
+    {
+        printf("[BSX] V6 could not allocate 8M Memory Pack\n");
+        return FALSE;
+    }
+
+    if ((m_pRom->m_Flags & SNROM_FLAG_BSXBASE) && !m_BSXBase.IsActive())
+    {
+        if (!m_BSXBase.Attach(
+                m_pRom->GetData(), m_pRom->GetBytes(), &m_BSXMemory))
+        {
+            printf("[BSX] V6 could not allocate/re-attach 512K base PSRAM\n");
+            return FALSE;
+        }
+        MapBSXBase();
+    }
+
+    return TRUE;
+}
+
+void SnesSystem::SetRom(class Emu::Rom *pRom)
+{
+	SetSnesRom((SnesRom *)pRom);
+}
+
+void SnesSystem::SetSnesRom(SnesRom *pRom)
+{
+	/* AURORA_SWC_FLOPPY_V1_20260831 */
+	if (m_bSuperWildCard)
+	{
+		m_SWC.Shutdown();
+		m_bSuperWildCard = FALSE;
+	}
+	m_SA1.Detach(); /* AURORA_SA1_V1_REFERENCE_LOGIC_20260902 */
+	m_bSA1IRQ = FALSE;
+	m_BSXBase.Detach(); /* AURORA_V4_4_CUMULATIVE_20260908 */
+	m_SGB.Detach();
+	m_uSGBSyncClock = (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_TOTAL);
+	if (m_pRom)
+	{
+		// disconnect from current rom
+		m_pRom = NULL;
+	}
+#ifdef SNES_DSP1
+	m_pDsp = NULL;
+	/* AURORA_UPSTREAM_20260827_DSP1_OP28_REVISION_V1 */
+	m_DSP1.SetOriginalDistanceBug(FALSE);
+#endif 
+	// set rom
+	m_pRom = pRom;
+
+	/* AURORA_BSXSLOT_MEMORY_PACK_V1_20260906_SNES_CPP
+	 * Attach an erased per-game pack before the board mapper is built.
+	 * mainloop_state.cpp loads this ROM's .mpk immediately afterwards. */
+	if (m_pRom && (m_pRom->m_Flags & SNROM_FLAG_BSXSLOT))
+	{
+		if (!m_BSXMemory.AttachBlank())
+			printf("[BSX] could not allocate 8M Memory Pack\n");
+	}
+	else
+	{
+		m_BSXMemory.Detach();
+	}
+
+	/* AURORA_V4_4_CUMULATIVE_20260908
+	 * Attach after the existing exact 1 MiB Memory Pack allocation and before
+	 * MapMem() builds the first MCC bus image. Attach() is the power-on event. */
+	if (m_pRom && (m_pRom->m_Flags & SNROM_FLAG_BSXBASE))
+	{
+		if (!m_BSXBase.Attach(
+		        m_pRom->GetData(), m_pRom->GetBytes(), &m_BSXMemory))
+			printf("[BSX] could not allocate 512K base PSRAM\n");
+	}
+
+	if (m_pRom)
+	{
+#ifdef SNES_DSP1
+		m_DSP1.SetOriginalDistanceBug(
+			(m_pRom->m_Flags & SNROM_FLAG_DSP1_ORIGINAL_OP28) ? TRUE : FALSE);
+#endif
+		// setup memory mapping for this rom
+		MapMem(m_pRom->m_eMapping, m_pRom->m_Flags);
+
+		/* AURORA_CRC_ZERO_INIT_CORE_V8
+		 * A tiny exact-CRC compatibility group reproduces ReyFxck's original
+		 * cold boot (WRAM=00, SRAM backing=00). This happens before the normal
+		 * SRAM loader, so an existing .srm still replaces the initialized bytes.
+		 * Every other ROM keeps Aurora's randomized WRAM + 0xFF fresh SRAM. */
+#if SNES_CRC_ZERO_INIT
+		if (g_SnesCompatZeroInit)
+		{
+			memset(m_Ram, 0x00, sizeof(m_Ram));
+			memset(m_SRam, 0x00, sizeof(m_SRam));
+		}
+		else
+#endif
+		{
+			/* AURORA_MEGA_V5_COLD_BOOT_WRAM
+			 * Real power-on WRAM is undefined/random-looking. Randomise only when a
+			 * new cartridge is attached, never on RESET or save-state restore. */
+			Uint32 uAuroraSeed =
+				((Uint32)(unsigned long)m_pRom ^ (Uint32)rand() ^
+				 ((Uint32)rand() << 16) ^ 0xA5C31F27u);
+			if (!uAuroraSeed) uAuroraSeed = 0x6D2B79F5u;
+			for (Uint32 i = 0; i < (Uint32)sizeof(m_Ram); ++i)
+			{
+				uAuroraSeed ^= uAuroraSeed << 13;
+				uAuroraSeed ^= uAuroraSeed >> 17;
+				uAuroraSeed ^= uAuroraSeed << 5;
+				m_Ram[i] = (Uint8)uAuroraSeed;
+			}
+			/* Fresh nonvolatile backing starts erased; the SRAM loader may replace it. */
+			if (m_uSramSize)
+				memset(m_SRam, 0xFF, m_uSramSize);
+		}
+	} 
+	else
+	{
+		// reset mapping
+		SNCPUSetBank(&m_Cpu, 0, SNCPU_MEM_SIZE, NULL, TRUE);
+		SNCPUSetTrap(&m_Cpu, 0, SNCPU_MEM_SIZE, NULL, NULL);
+		m_uSramSize = 0;
+	}
+}
+
+//////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////
+
+
+
+
+/* AURORA_SWC_FLOPPY_V1_20260831 */
+Bool SnesSystem::LoadSuperWildCard(const Char *pFirmwarePath,
+                                   const Char *pDiskPath,
+                                   Uint8 *pExternalDRAM,
+                                   Uint32 nExternalDRAMBytes) /* AURORA_SWC_32MBIT_SRAM_FIDELITY_V1_1_20260916 */
+{
+    SetSnesRom(NULL);
+
+    if (!m_SWC.Load(pFirmwarePath, pDiskPath,
+                    SNSuperWildCard::MODEL_SWC,
+                    pExternalDRAM, nExternalDRAMBytes)) /* AURORA_SWC_32MBIT_SRAM_FIDELITY_V1_1_20260916 */
+        return FALSE;
+
+    m_bSuperWildCard = TRUE;
+    m_bSDD1 = FALSE;
+    m_bSRTC = FALSE;
+    m_bSuperFX = FALSE;
+#if SNES_DSP1
+    m_pDsp = NULL;
+#endif
+
+    m_uSramSize = 0x8000;
+    memset(m_SRam, 0xFF, m_uSramSize);
+
+    MapSuperWildCard();
+    Reset();
+    return TRUE;
+}
+
+/* AURORA_V6_MAGICOM_FRONT_FAREAST_20260831: classic common 16-Mbit Super Magicom MS-3201. */
+Bool SnesSystem::LoadSuperMagicom(const Char *pFirmwarePath,
+                                  const Char *pDiskPath)
+{
+    SetSnesRom(NULL);
+    if (!m_SWC.Load(pFirmwarePath,pDiskPath,SNSuperWildCard::MODEL_MAGICOM))
+        return FALSE;
+    m_bSuperWildCard=TRUE; /* shared Front-copier-active flag */
+    m_bSDD1=FALSE; m_bSRTC=FALSE; m_bSuperFX=FALSE;
+#if SNES_DSP1
+    m_pDsp=NULL;
+#endif
+    m_uSramSize=0x8000;
+    memset(m_SRam,0xFF,m_uSramSize);
+    MapSuperWildCard();
+    Reset();
+    return TRUE;
+}
+
+
+/* AURORA_SWC_FLOPPY_V5_20260831 */
+Bool SnesSystem::InsertSuperWildCardCartridge(SnesRom *pRom)
+{
+    Bool ok;
+
+    if (!m_bSuperWildCard || !pRom || !pRom->IsLoaded())
+        return FALSE;
+
+    if (pRom->m_eMapping != SNROM_MAPPING_LOROM &&
+        pRom->m_eMapping != SNROM_MAPPING_HIROM &&
+        pRom->m_eMapping != SNROM_MAPPING_EXLOROM)
+        return FALSE;
+
+    /* AURORA_SWC_CART_SRAM_MEMORY_FINAL_V5_3_20260901
+     * The external cart owns separate Game Pak RAM. SNROM_FLAG_SAVERAM is
+     * battery-backed; plain SNROM_FLAG_RAM remains volatile. */
+    ok = m_SWC.SetExternalCartridge(
+        pRom->GetData(),
+        pRom->GetBytes(),
+        (Int32)pRom->m_eMapping,
+        pRom->GetSRAMBytes(),
+        (pRom->m_Flags & SNROM_FLAG_SAVERAM) ? TRUE : FALSE,
+        pRom->m_Flags);
+    if (ok)
+    {
+        /* AURORA_SWC_V10_MENU_INDEX_CARTRESET_20260831
+         * Cartridge topology changed: restart SWC/SNES so the BIOS sees the
+         * newly attached cartridge from a clean mode-0 boot. Mounted floppy
+         * media is preserved by SNSuperWildCard::Reset(). */
+        /* AURORA_V7_FRONT_COPIER_MEDIA_CART_RESET_20260831: physical cartridge topology changed -> copier BIOS. */
+        m_SWC.Reset();
+        Reset();
+    }
+    return ok;
+}
+
+void SnesSystem::EjectSuperWildCardCartridge()
+{
+    if (m_bSuperWildCard && m_SWC.HasExternalCartridge())
+    {
+        m_SWC.ClearExternalCartridge();
+
+        /* AURORA_SWC_V10_MENU_INDEX_CARTRESET_20260831
+         * Cartridge removal resets the copier too. Disk insertion/swap is
+         * deliberately separate and remains hot-swappable. */
+        /* AURORA_V7_FRONT_COPIER_MEDIA_CART_RESET_20260831: physical cartridge removal -> copier BIOS. */
+        m_SWC.Reset();
+        Reset();
+    }
+}
+
+Bool SnesSystem::SwapSuperWildCardDisk(const Char *pDiskPath)
+{
+    if (!m_bSuperWildCard)
+        return FALSE;
+    return m_SWC.SwapDisk(pDiskPath);
+}
+
+void SnesSystem::ShutdownSuperWildCard()
+{
+    if (!m_bSuperWildCard)
+        return;
+    SetSnesRom(NULL);
+}
+
+/* AURORA_FRONT_COPIER_POWER_CYCLE_V2_20260902
+ * Model a host-requested power-off/power-on of the active classic Front
+ * copier without changing physical topology:
+ *   - m_SWC.Reset() returns System Mode/page/FDC control state to power-on;
+ *   - mounted D88 remains mounted;
+ *   - inserted external/donor cartridge remains inserted;
+ *   - the selected copier model/firmware remains the same;
+ *   - Reset() hard-resets S-CPU/PPU/SPC and rebuilds the now-Mode-0 map,
+ *     so the reset vector is taken from the copier BIOS.
+ *
+ * No host file is closed/reopened and no cartridge is detached/reinserted.
+ */
+void SnesSystem::PowerCycleFrontCopier()
+{
+    if (!m_bSuperWildCard)
+        return;
+
+    m_SWC.Reset();
+    Reset();
+}
+
+#if SNES_HVIRQ_RESCHEDULE
+/* AURORA_HVIRQ_RESCHEDULE_V4
+ * Return the absolute master-clock position of the timer event on the
+ * current scanline.  -1 means that the current H/V enable + V-counter state
+ * does not arm an IRQ on this line.
+ *
+ * H-only: every line at HTIME.
+ * V-only: matching V line at the vertical IRQ trigger position.
+ * H+V:    matching V line at HTIME.
+ */
+Int32 SnesSystem::CalculateLineIRQCycle()
+{
+	const Bool bH = (m_IO.m_Regs.nmitimen & 0x10) ? TRUE : FALSE;
+	const Bool bV = (m_IO.m_Regs.nmitimen & 0x20) ? TRUE : FALSE;
+
+	if (bV)
+	{
+		if (m_uLine != m_IO.m_Regs.vtime.w)
+			return -1;
+		return bH ? SNES_HIRQ_CYCLES(m_IO.m_Regs.htime.w) : SNES_VIRQ_CYCLES;
+	}
+
+	return bH ? SNES_HIRQ_CYCLES(m_IO.m_Regs.htime.w) : -1;
+}
+
+
+void SnesSystem::RescheduleLineIRQ(Bool bAllowImmediate)
+{
+	/* Register writes outside ExecuteLine() only affect the next line's normal
+	 * initial calculation.  While a line is live, re-arm from the new register
+	 * state and abort the current 65816 execution batch so ExecuteWithIRQ() can
+	 * return the unspent clocks to the horizontal scheduler and split at the
+	 * new event position.
+	 *
+	 * SNCPUAbort() is already the core's supported mechanism for leaving the
+	 * executing CPU batch (MDMA/NMI use the same facility); it preserves the
+	 * remaining cycle budget in m_Cpu.Cycles. */
+	if (!m_bLineIRQActive)
+		return;
+
+	m_nLineIRQCycle = CalculateLineIRQCycle();
+	m_bLineIRQFired = FALSE;
+	m_bLineIRQInstant = bAllowImmediate;
+	m_bLineIRQReschedule = TRUE;
+	SNCPUAbort(&m_Cpu);
+}
+#endif
+
+/* AURORA_SA1_V1_REFERENCE_LOGIC_20260902
+ * Preserve all existing IRQ sources when one device clears its own latch. */
+void SnesSystem::UpdateMainIRQLine(void)
+{
+    Bool bPending = (m_IO.m_Regs.timeup & 0x80) ? TRUE : FALSE;
+    if (m_bSuperFX && m_GSU.IrqPending()) bPending = TRUE;
+    if (m_bSA1IRQ) bPending = TRUE;
+    SNCPUSignalIRQ(&m_Cpu, bPending ? 1 : 0);
+}
+
+void SnesSystem::SetSA1IRQ(Bool bPending)
+{
+    m_bSA1IRQ = bPending;
+    UpdateMainIRQLine();
+}
+
+void SnesSystem::MarkSA1BWRAMDirty(void)
+{
+    if (m_bSuperWildCard && m_SWC.HasExternalCartridge())
+        m_SWC.MarkExternalCartridgeSRAMDirty();
+}
+
+void SnesSystem::ExecuteCPU(Int32 nCycles)
+{
+    // increment cycle counter
+    SNCPUAddCycles( &m_Cpu, nCycles );
+    Int32 nSA1Synced = 0; /* AURORA_SA1_INTERLEAVED_CHUNK_SCHEDULER_V7_2_20260903 */
+    /* AURORA_TOPGEAR_COMMON_CART_SCHED_FAST_V1_20260917
+     * Cartridge topology cannot change during one CPU slice. Cache
+     * these attachment predicates once so ordinary carts do not pay
+     * SA-1/SGB method calls repeatedly inside the execution loop. */
+    const Bool bSA1Active = m_SA1.IsActive();
+    const Bool bSGBActive = m_SGB.IsActive();
+
+    while (m_Cpu.Cycles > 0)
+    {
+		/* STP ignores IRQ/NMI and remains halted until reset.  Consume the
+		   scheduler budget so the PPU and APU keep advancing. */
+		if ((m_Cpu.uSignal & SNCPU_SIGNAL_STP) &&
+			!(m_Cpu.uSignal & SNCPU_SIGNAL_RESET))
+		{
+			m_Cpu.Cycles = 0;
+			break;
+		}
+
+        // process signal
+        if (m_Cpu.uSignal & (SNCPU_SIGNAL_IRQ | SNCPU_SIGNAL_NMIEDGE | SNCPU_SIGNAL_RESET | SNCPU_SIGNAL_DMA))
+        {
+            if (m_Cpu.uSignal & SNCPU_SIGNAL_DMA)
+            {
+                // sync up PPU before DMA (only necessary for read dmas?)
+                SyncPPU();
+
+                PROF_ENTER("ProcessMDMA");
+#if SNDBG_LOG
+				Uint32 _tMDMA = ProfCtrGetCycle();
+#endif
+                // so, execute DMA for remainder of CPU time
+                // this function automatically subtracts from the CPU cycle count as it transfers each byte
+                m_DMAC.SetRasterLine(m_uLine);
+#if 1
+                m_DMAC.ProcessMDMA();
+#else
+                {
+                    int n = m_Cpu.Cycles;
+                    m_Cpu.Cycles = 100000;
+                    m_DMAC.ProcessMDMA();
+                    m_Cpu.Cycles += n - 100000;
+                }
+#endif
+#if SNDBG_LOG
+				g_TmgCycMDMA += ProfCtrGetCycle() - _tMDMA;
+#endif
+                PROF_LEAVE("ProcessMDMA");
+
+                // are all MDMAs complete?
+                if (m_DMAC.GetMDMAEnable() == 0)
+                {
+                    // remove DMA signal
+                    m_Cpu.uSignal &= ~SNCPU_SIGNAL_DMA;
+
+                    // very interesting
+                    #if SNES_DEBUG
+                    if (m_Cpu.uSignal != 0)
+                    {
+                        // this means that a nmi occurred while we were in an dma
+                        ConDebug("interesting");
+                    }
+                    #endif
+                } 
+
+                // continue...dont allow CPU to run unless it has cycle time available
+                continue;
+            } else
+            if (m_Cpu.uSignal & SNCPU_SIGNAL_NMIEDGE)
+            {
+				if (m_Cpu.uNmiDmaDelay)
+				{
+					/* An NMI captured while MDMA owns the bus is released 24-30
+					   master clocks after DMA.  Run ordinary CPU work during that
+					   window, as the hardware does, and carry a partial delay into
+					   the next scheduler slice when necessary. */
+					Int32 nStartCycles = m_Cpu.Cycles;
+					if (m_Cpu.uSignal & SNCPU_SIGNAL_WAI)
+					{
+						Int32 nDelay = m_Cpu.uNmiDmaDelay;
+						if (nDelay > m_Cpu.Cycles) nDelay = m_Cpu.Cycles;
+						SNCPUConsumeCycles(&m_Cpu, nDelay);
+					}
+					else
+					{
+						while (m_Cpu.Cycles > 0 &&
+							(nStartCycles - m_Cpu.Cycles) < m_Cpu.uNmiDmaDelay &&
+							!(m_Cpu.uSignal & SNCPU_SIGNAL_DMA))
+						{
+							SNCPUExecuteOne(&m_Cpu);
+						}
+					}
+
+					Int32 nElapsed = nStartCycles - m_Cpu.Cycles;
+					if (nElapsed >= m_Cpu.uNmiDmaDelay)
+						m_Cpu.uNmiDmaDelay = 0;
+					else if (nElapsed > 0)
+						m_Cpu.uNmiDmaDelay -= (Uint8)nElapsed;
+
+					if (m_Cpu.uNmiDmaDelay ||
+						(m_Cpu.uSignal & SNCPU_SIGNAL_DMA))
+						continue;
+				}
+				else
+				{
+					/* The S-CPU sees the vblank NMI edge around H=6 and enters
+					   the vector after the instruction then in progress. */
+					if (!(m_Cpu.uSignal & SNCPU_SIGNAL_WAI))
+					{
+						SNCPUExecuteOne(&m_Cpu);
+						if (m_Cpu.uSignal & SNCPU_SIGNAL_DMA)
+						{
+							m_Cpu.uNmiDmaDelay = 24;
+							continue;
+						}
+					}
+				}
+
+                if (!bSA1Active || !m_SA1.EnterMainNMIOverride(&m_Cpu))
+                    SNCPUNMI(&m_Cpu);
+                // clear NMI edge signal
+                m_Cpu.uSignal&= ~SNCPU_SIGNAL_NMIEDGE;
+            } else
+            if (m_Cpu.uSignal & SNCPU_SIGNAL_IRQ)
+            {
+                // attempt irq
+                // irqs will always be attempted until signal has been cleared
+                if (!bSA1Active || !m_SA1.EnterMainIRQOverride(&m_Cpu))
+                    SNCPUIRQ(&m_Cpu);
+            } else
+            if (m_Cpu.uSignal & SNCPU_SIGNAL_RESET)
+            {
+                // perform reset (soft)
+                SNCPUReset(&m_Cpu, FALSE);
+
+                m_Cpu.uSignal&= ~SNCPU_SIGNAL_RESET;
+            } 
+        }			
+
+        assert(m_DMAC.GetMDMAEnable() == 0);
+
+        /* AURORA_V3_WAI_SCHEDULER_FIX
+         * 65C816 WAI stops instruction issue until IRQ/NMI releases it.
+         * Physical scheduler time still advances on every cartridge.
+         * If an SA-1 is active, it continues running in the existing bounded
+         * interleave quantum while the main S-CPU sleeps. */
+        if (m_Cpu.uSignal & SNCPU_SIGNAL_WAI)
+        {
+            Int32 nWait = m_Cpu.Cycles;
+
+            if (bSA1Active &&
+                nWait > SNSA1::MAIN_INTERLEAVE_QUANTUM)
+                nWait = SNSA1::MAIN_INTERLEAVE_QUANTUM;
+
+            if (nWait > 0)
+            {
+                SNCPUConsumeCycles(&m_Cpu, nWait);
+
+                if (bSA1Active)
+                {
+                    m_SA1.Run(nWait);
+                    nSA1Synced += nWait;
+                }
+            }
+            continue;
+        }
+
+        // run CPU!
+        if (bSA1Active)
+        {
+            /* AURORA_SA1_BOUNDED_CHUNK_EXECUTOR_V7_20260903
+             * AURORA_SA1_INTERLEAVED_CHUNK_SCHEDULER_V7_2_20260903 */
+            Int32 before = m_Cpu.Cycles;
+            Int32 nSpent;
+
+            (void)SNCPUExecuteBounded(&m_Cpu, SNSA1::MAIN_INTERLEAVE_QUANTUM);
+
+            if (m_Cpu.Cycles >= before)
+            {
+                Int32 nForce = before;
+                if (nForce > SNCPU_CYCLE_FAST)
+                    nForce = SNCPU_CYCLE_FAST;
+                if (nForce > 0)
+                    SNCPUConsumeCycles(&m_Cpu, nForce);
+            }
+
+            nSpent = before - m_Cpu.Cycles;
+            if (nSpent < 0) nSpent = 0;
+            if (nSpent > before) nSpent = before;
+
+            if (nSpent > 0)
+            {
+                m_SA1.Run(nSpent);
+                nSA1Synced += nSpent;
+            }
+        }
+        else
+        {
+            SNCPUExecute(&m_Cpu);
+        }
+#if SNES_HVIRQ_RESCHEDULE
+        if (m_bLineIRQActive && m_bLineIRQReschedule)
+            break;
+#endif
+    }
+
+    if (bSA1Active)
+    {
+        Int32 nElapsed = nCycles;
+#if SNES_HVIRQ_RESCHEDULE
+        if (m_bLineIRQActive && m_bLineIRQReschedule && m_Cpu.Cycles > 0)
+            nElapsed -= m_Cpu.Cycles;
+#endif
+        /* AURORA_SA1_INTERLEAVED_CHUNK_SCHEDULER_V7_2_20260903
+         * Opcode/WAI chunks already handed nSA1Synced master clocks to SA-1. */
+        nElapsed -= nSA1Synced;
+        if (nElapsed > 0)
+            m_SA1.Run(nElapsed);
+    }
+
+    if (bSGBActive)
+        SyncSuperGameBoy();
+}
+
+
+
+void SnesSystem::ExecuteWithIRQ(Int32 nCycles, Int32 &nIRQCycles)
+{
+#if SNES_HVIRQ_RESCHEDULE
+	if (m_bLineIRQActive)
+	{
+		/* Dynamic timer path.  Normally this still executes one large batch up
+		 * to the pending IRQ.  Extra scheduler work happens only when a game
+		 * actually rewrites $4200/$4207-$420A during the line.
+		 *
+		 * A timer write calls SNCPUAbort(), leaving the unexecuted part of the
+		 * current batch in m_Cpu.Cycles.  Undo that reservation from all CPU
+		 * counters before looping, so the replacement schedule does not double
+		 * count physical time. */
+		Int32 nRemaining = nCycles;
+
+		while (nRemaining > 0)
+		{
+			Int32 nNow = m_nLineIRQClock;
+
+			/* A newly-programmed position may already be behind the beam.  This
+			 * is the immediate-IRQ case used by mature SNES schedulers when timer
+			 * registers are changed mid-line. */
+			if (!m_bLineIRQFired && m_nLineIRQCycle >= 0 &&
+				m_nLineIRQCycle <= nNow)
+			{
+				/* Current reference emulator only permits an instant IRQ when IRQ mode is
+				 * toggled. A plain HTIME/VTIME rewrite to a position already
+				 * behind the beam is stale for this scanline. */
+				m_bLineIRQFired = TRUE;
+				m_nLineIRQCycle = -1;
+				if (m_bLineIRQInstant)
+				{
+					m_IO.m_Regs.timeup |= 0x80;
+					SNCPUSignalIRQ(&m_Cpu, 1);
+				}
+				continue;
+			}
+
+			Int32 nRun = nRemaining;
+			Bool bReachIRQ = FALSE;
+
+			if (!m_bLineIRQFired && m_nLineIRQCycle >= 0)
+			{
+				Int32 nToIRQ = m_nLineIRQCycle - nNow;
+				if (nToIRQ > 0 && nToIRQ <= nRun)
+				{
+					nRun = nToIRQ;
+					bReachIRQ = TRUE;
+				}
+			}
+
+			m_bLineIRQReschedule = FALSE;
+			ExecuteCPU(nRun);
+
+			if (m_bLineIRQReschedule)
+			{
+				/* SNCPUAbort restored the part of this just-added execution budget
+				 * that has not run yet.  Remove those clocks from Cycles AND every
+				 * scheduled counter.  Counter-Cycles (the observed beam position)
+				 * therefore stays unchanged. */
+				Int32 nUnspent = m_Cpu.Cycles;
+				if (nUnspent < 0)
+					nUnspent = 0;
+				if (nUnspent > nRun)
+				{
+					/* This should be impossible at an I/O trap; fail conservative by
+					 * limiting the rollback to clocks reserved by this batch. */
+					nUnspent = nRun;
+				}
+
+				if (nUnspent > 0)
+				{
+					m_Cpu.Cycles -= nUnspent;
+					for (Int32 i = 0; i < SNCPU_COUNTER_NUM; ++i)
+						m_Cpu.Counter[i] -= nUnspent;
+				}
+
+				Int32 nSpent = nRun - nUnspent;
+				if (nSpent < 0)
+					nSpent = 0;
+				m_nLineIRQClock += nSpent;
+				nRemaining -= nSpent;
+				m_bLineIRQReschedule = FALSE;
+				continue;
+			}
+
+			m_nLineIRQClock += nRun;
+			nRemaining -= nRun;
+
+			if (bReachIRQ && !m_bLineIRQFired && m_nLineIRQCycle >= 0)
+			{
+				/* The old scheduler stopped here too; IRQ entry itself still waits
+				 * for the 65816 instruction boundary through SNCPUSignalIRQ(). */
+				m_bLineIRQFired = TRUE;
+				m_nLineIRQCycle = -1;
+				m_IO.m_Regs.timeup |= 0x80;
+				SNCPUSignalIRQ(&m_Cpu, 1);
+			}
+		}
+
+		nIRQCycles -= nCycles;
+		return;
+	}
+#endif
+
+	/* Exact legacy scheduler, compiled unchanged for A/B fallback. */
+    if (nIRQCycles >= 0 && nIRQCycles < nCycles)
+    {
+        // execute up to h-irq
+        ExecuteCPU(nIRQCycles);
+
+        // set irq flag 
+        m_IO.m_Regs.timeup |= 0x80;
+        SNCPUSignalIRQ(&m_Cpu, 1);
+
+        // execute rest of way
+        ExecuteCPU(nCycles - nIRQCycles);
+    }
+    else
+    {
+        // just execute as normal
+        ExecuteCPU(nCycles);
+    }
+
+    nIRQCycles -= nCycles;
+}
+
+
+
+/* AURORA_SAFE_RASTER_V4_SNES_20260915
+ * Physical S-PPU/S-CPU field geometry. ares/SNES timing has one 1360-clock
+ * NTSC short line when non-interlaced (field 1, V=240), and one 1368-clock
+ * PAL long line when interlaced (field 1, V=311). Interlace field 0 carries
+ * one extra scanline. All other lines remain the familiar 1364 clocks. */
+static _INLINE Uint32 SnesRasterFieldLineCount(const SnesPPU &ppu, Bool bPAL)
+{
+    Uint32 uLines = bPAL ? SNES_PAL_BASE_LINES : SNES_NTSC_BASE_LINES;
+    if (ppu.IsTimingInterlace() && !ppu.GetField())
+        ++uLines;
+    return uLines;
+}
+
+static _INLINE Int32 SnesRasterLineClocks(const SnesPPU &ppu, Uint32 uLine, Bool bPAL)
+{
+    if (!bPAL && !ppu.IsTimingInterlace() && ppu.GetField() && uLine == 240u)
+        return SNES_CYCLESPERLINE_SHORT;
+    if (bPAL && ppu.IsTimingInterlace() && ppu.GetField() && uLine == 311u)
+        return SNES_CYCLESPERLINE_LONG;
+    return SNES_CYCLESPERLINE_NORMAL;
+}
+
+static _INLINE Int32 SnesAutoJoyStartCycle(Uint32 uLineStartTotal)
+{
+    Int32 nCycle = (Int32)((SNES_AUTOJOY_ALIGN_CYCLES -
+        (uLineStartTotal & (SNES_AUTOJOY_ALIGN_CYCLES - 1u))) &
+        (SNES_AUTOJOY_ALIGN_CYCLES - 1u));
+    while (nCycle < SNES_AUTOJOY_START_MIN_CYCLE)
+        nCycle += SNES_AUTOJOY_ALIGN_CYCLES;
+    return nCycle <= SNES_AUTOJOY_START_MAX_CYCLE ? nCycle : -1;
+}
+
+static _INLINE Int32 SnesAutoJoyEndCycle(const SnesPPU &ppu,
+                                         Uint32 uLine,
+                                         Bool bPAL,
+                                         Uint32 uLineStartTotal)
+{
+    const Uint32 uStartLine = ppu.GetFrameVisibleLineCount() + 1u;
+    Uint32 uStartTotal = uLineStartTotal;
+    Int32 nEnd;
+    Uint32 u;
+
+    if (uLine < uStartLine || uLine > uStartLine + 4u)
+        return -1;
+
+    for (u = uLine; u > uStartLine; --u)
+        uStartTotal -= (Uint32)SnesRasterLineClocks(ppu, u - 1u, bPAL);
+
+    nEnd = SnesAutoJoyStartCycle(uStartTotal);
+    if (nEnd < 0)
+        return -1;
+    nEnd += SNES_AUTOJOY_BUSY_CYCLES;
+
+    for (u = uStartLine; u < uLine; ++u)
+        nEnd -= SnesRasterLineClocks(ppu, u, bPAL);
+
+    if (nEnd < 0 || nEnd >= SnesRasterLineClocks(ppu, uLine, bPAL))
+        return -1;
+    return nEnd;
+}
+
+void SnesSystem::ExecuteLine()
+{
+	/* AURORA_V7_HORIZONTAL_SCHEDULER
+	 * Keep the existing scanline-oriented renderer, but put the major
+	 * S-CPU bus events at their real horizontal positions instead of
+	 * treating H=1024 as both HBlank and HDMA.
+	 *
+	 * ExecuteWithIRQ() is deliberately used to account stolen intervals.
+	 * The bus owner first subtracts clocks from m_Cpu.Cycles; scheduling the
+	 * same number of physical clocks afterwards advances the counters while
+	 * the negative CPU budget prevents 65816 instructions from running.
+	 * If HDMA overruns H=1364, the remaining negative budget naturally
+	 * carries into the next line instead of lengthening the video line. */
+	SNCPUResetCounter(&m_Cpu, SNCPU_COUNTER_LINE);
+	const Bool bPALRaster = (m_PPU.GetRegs()->stat78 & 0x10) ? TRUE : FALSE;
+	const Int32 nLineClocks = SnesRasterLineClocks(m_PPU, m_uLine, bPALRaster);
+	const Uint32 uLineStartTotal = (Uint32)m_Cpu.Counter[SNCPU_COUNTER_TOTAL];
+
+	/* AURORA_RASTER_MMIO_CATCHUP_V1_20260907
+	 * These guards describe only the live physical scanline. */
+	m_bRasterLineActive = TRUE;
+	m_bRasterCatchupActive = FALSE;
+	m_bRasterHBlankDone = FALSE;
+	m_bRasterHDMADone = FALSE;
+
+	Int32 nHIRQCycles = -1;
+	Int32 nHClock = 0;
+	/* ares S-CPU revision 2: setup=12+phase, refresh=538-phase.
+	 * Counter[TOTAL] is scheduled physical time, so it remains meaningful
+	 * even when a DMA overrun is carried as a negative CPU budget. */
+	Int32 nDMAPhase = m_Cpu.Counter[SNCPU_COUNTER_TOTAL] & 7;
+	Int32 nHDMASetupCycle = SNES_HDMA_SETUP_BASE_CYCLE + nDMAPhase;
+	Int32 nDRAMRefreshCycle = SNES_DRAM_REFRESH_BASE_CYCLE - nDMAPhase;
+	const Uint32 uAutoJoyVBlankLine = m_PPU.GetFrameVisibleLineCount() + 1u;
+	const Int32 nAutoJoyStartCycle = (m_uLine == uAutoJoyVBlankLine)
+		? SnesAutoJoyStartCycle(uLineStartTotal) : -1;
+	const Int32 nAutoJoyEndCycle = (m_IO.m_Regs.hvbjoy & 0x01)
+		? SnesAutoJoyEndCycle(m_PPU, m_uLine, bPALRaster, uLineStartTotal) : -1;
+
+	// vertical + horizontal IRQ selection
+	if (m_IO.m_Regs.nmitimen & 0x20)
+	{
+		if (m_uLine == m_IO.m_Regs.vtime.w)
+		{
+			if (m_IO.m_Regs.nmitimen & 0x10)
+				nHIRQCycles = SNES_HIRQ_CYCLES(m_IO.m_Regs.htime.w);
+			else
+				nHIRQCycles = SNES_VIRQ_CYCLES;
+		}
+	}
+	else if (m_IO.m_Regs.nmitimen & 0x10)
+	{
+		nHIRQCycles = SNES_HIRQ_CYCLES(m_IO.m_Regs.htime.w);
+	}
+
+#if SNES_HVIRQ_RESCHEDULE
+	m_bLineIRQActive = TRUE;
+	m_bLineIRQReschedule = FALSE;
+	m_bLineIRQFired = FALSE;
+	m_bLineIRQInstant = TRUE;
+	m_nLineIRQCycle = nHIRQCycles;
+	m_nLineIRQClock = 0;
+#endif
+
+#if SNDBG_LOG
+	if (nHIRQCycles >= 0)
+	{
+		Int32 ln = (Int32)m_uLine;
+		if (ln < g_TmgIrqLineMin) g_TmgIrqLineMin = ln;
+		if (ln > g_TmgIrqLineMax) g_TmgIrqLineMax = ln;
+		g_TmgIrqCount++;
+	}
+#endif
+
+	PROF_ENTER("ExecLine");
+
+	/* These macros advance PHYSICAL line time.  They intentionally do not
+	 * force m_Cpu.Cycles to zero: a negative budget is an in-flight bus
+	 * stall from DMA/HDMA and is paid by later physical slices. */
+#define AURORA_V7_RUN_TO(_target) do { \
+		Int32 _auroraTarget = (Int32)(_target); \
+		if (nHClock < _auroraTarget) { \
+			Int32 _auroraSlice = _auroraTarget - nHClock; \
+			ExecuteWithIRQ(_auroraSlice, nHIRQCycles); \
+			nHClock = _auroraTarget; \
+		} \
+	} while (0)
+
+#define AURORA_V7_ACCOUNT_STEAL(_clocks) do { \
+		Int32 _auroraSteal = (Int32)(_clocks); \
+		Int32 _auroraRoom = nLineClocks - nHClock; \
+		if (_auroraSteal > _auroraRoom) _auroraSteal = _auroraRoom; \
+		if (_auroraSteal > 0) { \
+			ExecuteWithIRQ(_auroraSteal, nHIRQCycles); \
+			nHClock += _auroraSteal; \
+		} \
+	} while (0)
+
+	/* HVBJOY reports the tiny HBlank wrap interval at the beginning of a
+	 * scanline as well as the long HBlank at the end. */
+	m_IO.m_Regs.hvbjoy |= 0x40;
+	AURORA_V7_RUN_TO(SNES_HBLANK_WRAP_CYCLES);
+	m_IO.m_Regs.hvbjoy &= ~0x40;
+
+	/* HDMA setup belongs near H=12 on line zero, not before BeginFrame(). */
+	if (m_uLine == 0 && nHClock < nLineClocks)
+	{
+		Int32 nBefore;
+		Int32 nStolen;
+
+		AURORA_V7_RUN_TO(nHDMASetupCycle);
+		nBefore = m_Cpu.Cycles;
+		m_DMAC.BeginHDMA();
+		nStolen = nBefore - m_Cpu.Cycles;
+		AURORA_V7_ACCOUNT_STEAL(nStolen);
+	}
+
+	/* Automatic joypad polling starts on a 256-clock global divider edge
+	 * at H=130..384 of the first VBlank line. Aurora still commits the serial
+	 * result atomically, but now does so at the hardware completion edge rather
+	 * than three coarse scanlines early. Both events are before the earliest
+	 * rev.2 DRAM refresh position (H=531) for all 1360/1364 line cases. */
+	if (nAutoJoyStartCycle >= 0)
+	{
+		AURORA_V7_RUN_TO(nAutoJoyStartCycle);
+		if (m_IO.m_Regs.nmitimen & 0x01)
+			m_IO.m_Regs.hvbjoy |= 0x01;
+	}
+	if (nAutoJoyEndCycle >= 0)
+	{
+		AURORA_V7_RUN_TO(nAutoJoyEndCycle);
+		if (m_IO.m_Regs.hvbjoy & 0x01)
+		{
+			if (m_IO.m_Regs.nmitimen & 0x01)
+				m_IO.UpdateJoyPads();
+			m_IO.m_Regs.hvbjoy &= (Uint8)~0x01;
+		}
+	}
+
+	/* Keep the 40-clock aggregate refresh cost, now at the revision-2
+	 * DMA-divider-aligned horizontal position instead of H=0. */
+	AURORA_V7_RUN_TO(nDRAMRefreshCycle);
+	if (nHClock < nLineClocks)
+	{
+		SNCPUConsumeCycles(&m_Cpu, SNES_DRAM_REFRESH_CYCLES);
+		AURORA_V7_ACCOUNT_STEAL(SNES_DRAM_REFRESH_CYCLES);
+	}
+
+	/* Normal HBlank starts at H=1096. */
+	AURORA_V7_RUN_TO(SNES_HBLANK_START_CYCLE);
+	m_bRasterHBlankDone = TRUE;
+	m_IO.m_Regs.hvbjoy |= 0x40;
+
+	/* HDMA starts eight clocks into HBlank, at H=1104. */
+	AURORA_V7_RUN_TO(SNES_HDMA_START_CYCLE);
+	if (!m_bRasterHDMADone)
+	{
+		m_bRasterHDMADone = TRUE;
+		if (!(m_IO.m_Regs.hvbjoy & 0x80) && nHClock < nLineClocks)
+		{
+			Int32 nBefore = m_Cpu.Cycles;
+#if SNDBG_LOG
+			Uint32 _tHDMA = ProfCtrGetCycle();
+#endif
+			m_DMAC.ProcessHDMA(m_uLine);
+#if SNDBG_LOG
+			g_TmgCycHDMA += ProfCtrGetCycle() - _tHDMA;
+#endif
+			Int32 nStolen = nBefore - m_Cpu.Cycles;
+			AURORA_V7_ACCOUNT_STEAL(nStolen);
+		}
+	}
+
+	AURORA_V7_RUN_TO(nLineClocks);
+
+	/* The PPU beam wraps regardless of whether a DMA debt carries into the
+	 * following line. */
+	m_bRasterLineActive = FALSE;
+	m_bRasterCatchupActive = FALSE;
+	m_IO.m_Regs.hvbjoy &= ~0x40;
+
+#undef AURORA_V7_ACCOUNT_STEAL
+#undef AURORA_V7_RUN_TO
+
+	// GSU runs in parallel; preserve Aurora's low-cost per-scanline model.
+	if (m_bSuperFX && m_GSU.IsRunning())
+	{
+#if SNDBG_LOG
+		Uint32 _tGSU = ProfCtrGetCycle();
+#endif
+		/* AURORA_V8_GSU_CLOCK_SCHEDULER
+		 * The GSU core now charges cache/external-memory clocks internally.
+		 * Give it one 21.47-MHz master-clock scanline (1364 clocks) rather
+		 * than an arbitrary instruction count; CLSR is accounted in the core. */
+		m_GSU.Run(m_GSU.GetLineClockBudget());
+		UpdateSuperFXBusMap(); /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: STOP releases RON/RAN immediately. */
+#if SNDBG_LOG
+		g_TmgCycGSU += ProfCtrGetCycle() - _tGSU;
+#endif
+	}
+	if (m_bSuperFX && m_GSU.IrqPending())
+		SNCPUSignalIRQ(&m_Cpu, 1);
+
+#if SNES_HVIRQ_RESCHEDULE
+	m_bLineIRQActive = FALSE;
+	m_bLineIRQReschedule = FALSE;
+	m_bLineIRQInstant = FALSE;
+	m_nLineIRQCycle = -1;
+	m_nLineIRQClock = nLineClocks;
+#endif
+
+	PROF_LEAVE("ExecLine");
+}
+
+
+
+
+void SnesSystem::ExecuteFrame(Emu::SysInputT  *pInput, CRenderSurface *pTarget, CMixBuffer *pSound, ModeE eMode)
+{
+Bool bPAL = FALSE;
+
+if (g_SnesForceRegion == SNES_FORCE_REGION_PAL)
+{
+    bPAL = TRUE;
+}
+else
+if (g_SnesForceRegion == SNES_FORCE_REGION_NTSC_U ||
+    g_SnesForceRegion == SNES_FORCE_REGION_NTSC_J)
+{
+    bPAL = FALSE;
+}
+else
+if (m_pRom)
+{
+    bPAL = (m_pRom->m_eVideoType == SNROM_VIDEO_PAL);
+}
+
+m_PPU.SetRegionPAL(bPAL);
+    m_uLine = 0;
+    /* AURORA_FCEUMM_FDS_V8_1_COMPAT_REVIEW_20260827: line zero is never part of VBlank. */
+    m_IO.m_Regs.hvbjoy &= (Uint8)~0x81;
+
+#if SNDBG_LOG
+	#if SNDBG_DEEP
+	g_DbgCaptureFrameNo = g_TmgFrameNo + 1;
+	g_DbgCaptureActive =
+		(g_DbgCaptureFrameNo % (SNDBG_FRAME_PERIOD * 5u)) == 0;
+	if (g_DbgCaptureActive)
+	{
+		DLog("[snes-capture] begin f=%u (light OBJ/DMA trace)",
+			(unsigned)g_DbgCaptureFrameNo);
+	}
+	#else
+	g_DbgCaptureActive = FALSE;
+	#endif
+	// --- timing: marca inicio do frame ---
+	g_TmgFrameStart  = ProfCtrGetCycle();
+	g_TmgCycM7  = 0;
+	g_TmgCycObj = 0;
+	g_TmgCycPPU = 0;
+	g_TmgCycCPU = 0;
+	g_TmgCycGSU = 0;
+	g_TmgCycMDMA = 0;
+	g_TmgCycHDMA = 0;
+	g_TmgCycAPU = 0;
+	g_TmgCycMix = 0;
+	g_TmgCycBlend = 0;
+	g_TmgCycPPUSync = 0;
+	g_TmgCycBGInfo = 0;
+	g_TmgCycBGOffset = 0;
+	g_TmgCycBGMap = 0;
+	g_TmgCycBGChr = 0;
+	g_TmgCycBGMain = 0;
+	g_TmgCycBGSub = 0;
+	g_TmgCycColorMath = 0;
+	g_TmgCycObjUpdate = 0;
+	g_TmgCycObjFetch = 0;
+	g_TmgCycObjDraw = 0;
+	g_TmgCycHDMAData = 0;
+	g_TmgCycHDMATable = 0;
+	#if SNDBG_DEEP
+	g_DbgFrameBaseOAM = g_DbgOAMWrites;
+	g_DbgFrameBaseVRAM = g_DbgVRAMWrites;
+	g_DbgFrameBaseCGRAM = g_DbgCGRAMWrites;
+	g_DbgFrameBaseEnabled = g_DbgObjEnabledLines;
+	g_DbgFrameBaseRefs = g_DbgObjOamRefs;
+	g_DbgFrameBaseTiles = g_DbgObjTiles;
+	g_DbgFrameBaseOpaque = g_DbgObjOpaqueTiles;
+	g_DbgFrameBaseCandidate = g_DbgObjCandidatePixels;
+	g_DbgFrameBaseDrawn = g_DbgObjDrawnPixels;
+	#endif
+#endif
+
+	m_IO.LatchInput(pInput);
+
+	// reset frame cycle counter
+	SNCPUResetCounter(&m_Cpu, SNCPU_COUNTER_FRAME);
+    SNCPUResetCounter(&m_Cpu, SNCPU_COUNTER_LINE);
+	SNSPCResetCounter(&m_Spc, SNCPU_COUNTER_FRAME);
+
+#if SNES_DEBUG
+    if (Snes_bDebugFrame)
+        SnesDebug("frame\n");
+#endif
+
+	/* AURORA_V7_HDMA_SETUP_MOVED: BeginHDMA() agora ocorre em H=12..19 (fase DMA) da linha 0. */
+	m_PPURender.BeginRender(pTarget);
+	m_PPU.BeginFrame();
+
+	/* AURORA_SETINI_DISPLAY_V1_SCHED_20260915
+	 * Overscan is sampled at V=0 by SnesPPU::BeginFrame(). Keep this local
+	 * copy fixed for the whole frame: a later $2133 write belongs to the next
+	 * frame's vertical geometry, matching the hardware latch. */
+	const Uint32 uVisibleLines = m_PPU.GetFrameVisibleLineCount();
+	for (m_uLine=0; m_uLine < (uVisibleLines + 1u); m_uLine++)
+	{
+		if (m_uLine == 128u)
+		{
+			SyncPPU();
+			m_PPU.LatchTimingInterlace();
+		}
+		#if SNES_SYNCPPUEVERYLINE
+		SyncPPU();
+		#endif
+
+		ExecuteLine();
+	}
+
+	/* VBlank begins after this frame's latched 224/239-line display.
+	 * Auto-joy derives that edge directly from PPU geometry in ExecuteLine(). */
+	const Uint32 uFrameLines = SnesRasterFieldLineCount(m_PPU, bPAL);
+
+	// sync ppu at end of frame (this ensures all rendering has been completed)
+	SyncPPU();
+
+	m_PPU.EndFrame();
+	m_PPURender.EndRender();
+
+    //ExecuteLine();
+    //ExecuteLine();
+
+	// confirmed:
+	// nmi is triggered from hi->lo transition (edge level interrupt)
+	// rdnmi flag is set at beginning of vbl
+	// rdnmi flag is cleared at end of vbl
+	// rdnmi flag is cleared on rdnmi read
+	// nmi will trigger immediately if nmitimen flag is set while rdnmi flag is set
+
+    PROF_ENTER("ExecVBLANK");
+    // set vbl flag at start of vblank
+    m_IO.m_Regs.hvbjoy|= 0x80;
+
+	/* Auto-joy begins later in this scanline; ExecuteLine() schedules
+	 * the phase-aligned start and 4224-clock completion. */
+
+    // set 'BLANK NMI' flag at beginning of v-blank
+    m_IO.m_Regs.rdnmi |= 0x80;
+    SNCPUSignalNMI(&m_Cpu, m_IO.m_Regs.rdnmi & m_IO.m_Regs.nmitimen & 0x80);
+
+    for ( ; m_uLine < uFrameLines; m_uLine++)
+	{
+		ExecuteLine();
+
+	}
+
+    // clear 'BLANK NMI' flag at end of v-blank
+    m_IO.m_Regs.rdnmi &= ~0x80;
+    SNCPUSignalNMI(&m_Cpu, m_IO.m_Regs.rdnmi & m_IO.m_Regs.nmitimen & 0x80);
+
+	// clear vbl flag at end of vblank
+	m_IO.m_Regs.hvbjoy&= ~0x80;
+	PROF_LEAVE("ExecVBLANK");
+
+	//SNCPUConsumeCycles(&m_Cpu, SNES_CYCLESPERLINE);
+	//SNCPUExecute(&m_Cpu, SNES_CYCLESPERLINE);
+
+	SyncPPU();
+	/* Field changes at V-counter wrap, not when VBlank begins. */
+	m_PPU.AdvanceField();
+	SyncSPC();
+
+	// update spc timers
+	SNSpcTimerSync(&m_SpcIO.m_Regs.spc_timer[0], SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_TOTAL));
+	SNSpcTimerSync(&m_SpcIO.m_Regs.spc_timer[1], SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_TOTAL));
+	SNSpcTimerSync(&m_SpcIO.m_Regs.spc_timer[2], SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_TOTAL));
+
+	// mix non-deterministic mixer
+	PROF_ENTER("SNSpcDspUpdate");
+#if SNDBG_LOG
+	Uint32 _tMix = ProfCtrGetCycle();
+#endif
+	if (m_SGB.IsActive() && pSound)
+	{
+		SGBMixBufferProxy SgbAudio(&m_SGB, pSound);
+		m_SpcDspMixer.Mix(&SgbAudio);
+	}
+	else
+	{
+		m_SpcDspMixer.Mix(pSound);
+	}
+#if SNDBG_LOG
+	g_TmgCycMix += ProfCtrGetCycle() - _tMix;
+#endif
+	PROF_LEAVE("SNSpcDspUpdate");
+
+	// ensure that all queued registers have been committed 
+	m_SpcDsp.Sync();
+
+	switch (eMode)
+	{
+		case MODE_INACCURATEDETERMINISTIC:
+			m_SpcDsp.UpdateFlags(NULL);
+			break;
+		case MODE_ACCURATENONDETERMINISTIC:
+			// update flags based on real mixer (This should produce most accurate sound, but is not deterministic)
+			m_SpcDsp.UpdateFlags(&m_SpcDspMixer);
+			break;
+		case MODE_ACCURATEDETERMINISTIC:
+			// mix silent mixer
+			PROF_ENTER("SNSpcDspUpdateSilent");
+#if SNDBG_LOG
+			_tMix = ProfCtrGetCycle();
+#endif
+			m_SpcDspSilentMixer.Mix(NULL);
+#if SNDBG_LOG
+			g_TmgCycMix += ProfCtrGetCycle() - _tMix;
+#endif
+			PROF_LEAVE("SNSpcDspUpdateSilent");
+
+			// update spc flags based on deterministic mixer
+			m_SpcDsp.UpdateFlags(&m_SpcDspSilentMixer);
+			break;
+	}
+
+#if SNDBG_LOG
+	// --- timing: fecha o frame e resume a janela ---
+	{
+		Uint32 cyc = ProfCtrGetCycle() - g_TmgFrameStart;  // ciclos de emulacao deste frame
+		g_TmgWinSumCyc += cyc;
+		g_TmgWinSumM7  += g_TmgCycM7;
+		g_TmgWinSumObj += g_TmgCycObj;
+		g_TmgWinSumPPU += g_TmgCycPPU;
+		g_TmgWinSumCPU += g_TmgCycCPU;
+		g_TmgWinSumGSU += g_TmgCycGSU;
+		g_TmgWinSumMDMA += g_TmgCycMDMA;
+		g_TmgWinSumHDMA += g_TmgCycHDMA;
+		g_TmgWinSumAPU += g_TmgCycAPU;
+		g_TmgWinSumMix += g_TmgCycMix;
+		g_TmgWinSumBlend += g_TmgCycBlend;
+		g_TmgWinSumPPUSync += g_TmgCycPPUSync;
+		g_TmgWinSumBGInfo += g_TmgCycBGInfo;
+		g_TmgWinSumBGOffset += g_TmgCycBGOffset;
+		g_TmgWinSumBGMap += g_TmgCycBGMap;
+		g_TmgWinSumBGChr += g_TmgCycBGChr;
+		g_TmgWinSumBGMain += g_TmgCycBGMain;
+		g_TmgWinSumBGSub += g_TmgCycBGSub;
+		g_TmgWinSumColorMath += g_TmgCycColorMath;
+		g_TmgWinSumObjUpdate += g_TmgCycObjUpdate;
+		g_TmgWinSumObjFetch += g_TmgCycObjFetch;
+		g_TmgWinSumObjDraw += g_TmgCycObjDraw;
+		g_TmgWinSumHDMAData += g_TmgCycHDMAData;
+		g_TmgWinSumHDMATable += g_TmgCycHDMATable;
+		if (cyc > g_TmgWinMaxCyc) g_TmgWinMaxCyc = cyc;
+		g_TmgWinFrames++;
+		g_TmgFrameNo++;
+
+		#if SNDBG_DEEP
+		// Captura pontual quando pixels OBJ caem bruscamente apesar de ainda
+		// haver sprites selecionados. Os hashes distinguem OAM/VRAM corrompida
+		// de um erro posterior de mascara/prioridade no compositor.
+		{
+			Uint32 fOAM = g_DbgOAMWrites - g_DbgFrameBaseOAM;
+			Uint32 fVRAM = g_DbgVRAMWrites - g_DbgFrameBaseVRAM;
+			Uint32 fCGRAM = g_DbgCGRAMWrites - g_DbgFrameBaseCGRAM;
+			Uint32 fEnabled = g_DbgObjEnabledLines - g_DbgFrameBaseEnabled;
+			Uint32 fRefs = g_DbgObjOamRefs - g_DbgFrameBaseRefs;
+			Uint32 fTiles = g_DbgObjTiles - g_DbgFrameBaseTiles;
+			Uint32 fOpaque = g_DbgObjOpaqueTiles - g_DbgFrameBaseOpaque;
+			Uint32 fCandidate = g_DbgObjCandidatePixels - g_DbgFrameBaseCandidate;
+			Uint32 fDrawn = g_DbgObjDrawnPixels - g_DbgFrameBaseDrawn;
+			Bool bCollapse = g_DbgPrevObjDrawn >= 512 &&
+				fDrawn * 4u < g_DbgPrevObjDrawn && fEnabled && fRefs;
+			Bool bEmpty = fEnabled && fRefs >= 64 && fTiles && !fOpaque;
+
+			if (g_DbgObjEventCooldown) g_DbgObjEventCooldown--;
+			if ((bCollapse || bEmpty) && !g_DbgObjEventCooldown)
+			{
+				const SnesPPURegsT *pr = m_PPU.GetRegs();
+				Uint32 hOAM = SnesDbgHash32(m_PPU.GetOAM(), sizeof(SnesOAMT));
+				Uint32 hVRAM = SnesDbgHash32(m_PPU.GetVramPtr(0), 0x10000);
+				Uint32 hCGRAM = SnesDbgHash32(m_PPU.GetCGData(), 512);
+				DLog("[snes-obj-event] f=%u reason=%s drawn=%u->%u candidate=%u refs/tiles/opaque=%u/%u/%u writes=%u/%u/%u",
+					(unsigned)g_TmgFrameNo, bEmpty ? "empty" : "drop",
+					(unsigned)g_DbgPrevObjDrawn, (unsigned)fDrawn,
+					(unsigned)fCandidate, (unsigned)fRefs,
+					(unsigned)fTiles, (unsigned)fOpaque,
+					(unsigned)fOAM, (unsigned)fVRAM, (unsigned)fCGRAM);
+				DLog("[snes-state] hash oam/vram/cgram=%08X/%08X/%08X regs mode/obsel/tm/ts=%02X/%02X/%02X/%02X cg=%02X/%02X first=%u bgsc=%02X/%02X/%02X/%02X",
+					(unsigned)hOAM, (unsigned)hVRAM, (unsigned)hCGRAM,
+					(unsigned)pr->bgmode, (unsigned)pr->obsel,
+					(unsigned)pr->tm, (unsigned)pr->ts,
+					(unsigned)pr->cgwsel, (unsigned)pr->cgadsub,
+					(unsigned)pr->oampri.w, (unsigned)pr->bg1sc,
+					(unsigned)pr->bg2sc, (unsigned)pr->bg3sc,
+					(unsigned)pr->bg4sc);
+				g_DbgObjEventCooldown = 30;
+			}
+			g_DbgPrevObjDrawn = fDrawn;
+		}
+		if (g_DbgCaptureActive)
+		{
+			const SnesPPURegsT *pr = m_PPU.GetRegs();
+			DLog("[snes-capture] f=%u regs inidisp/obsel/mode/tm/ts/setini=%02X/%02X/%02X/%02X/%02X/%02X oam=%04X base=%04X first=%u vmain/vmaddr/cgadd=%02X/%04X/%04X",
+				(unsigned)g_TmgFrameNo,
+				(unsigned)(Uint8)pr->inidisp, (unsigned)(Uint8)pr->obsel,
+				(unsigned)(Uint8)pr->bgmode, (unsigned)(Uint8)pr->tm,
+				(unsigned)(Uint8)pr->ts, (unsigned)(Uint8)pr->setini,
+				(unsigned)pr->oamaddr.w, (unsigned)pr->oamaddrlatch.w,
+				(unsigned)pr->oampri.w, (unsigned)(Uint8)pr->vmain,
+				(unsigned)pr->vmaddr.w, (unsigned)pr->cgadd.w);
+			DLog("[snes-capture] end f=%u", (unsigned)g_TmgFrameNo);
+		}
+		#endif
+		if (g_TmgWinFrames >= SNDBG_FRAME_PERIOD)
+		{
+			Uint32 sum   = g_TmgWinSumCyc ? g_TmgWinSumCyc : 1;
+			Uint32 avg   = g_TmgWinSumCyc / g_TmgWinFrames;
+			Uint32 ratio = avg ? (g_TmgWinMaxCyc * 100u / avg) : 0;
+			/* CP0 Count avanca a metade do clock de 294.912 MHz da EE. */
+			Uint32 fps10 = avg
+				? (Uint32)(1474560000ull / (Uint64)avg) : 0;
+			Uint32 pM7   = (Uint32)(((Uint64)g_TmgWinSumM7  * 100u) / sum);
+			Uint32 pObj  = (Uint32)(((Uint64)g_TmgWinSumObj * 100u) / sum);
+			Uint32 pPPU  = (Uint32)(((Uint64)g_TmgWinSumPPU * 100u) / sum);
+			Uint32 pCPU  = (Uint32)(((Uint64)g_TmgWinSumCPU * 100u) / sum);
+			Uint32 pGSU  = (Uint32)(((Uint64)g_TmgWinSumGSU * 100u) / sum);
+			Uint32 pMDMA = (Uint32)(((Uint64)g_TmgWinSumMDMA * 100u) / sum);
+			Uint32 pHDMA = (Uint32)(((Uint64)g_TmgWinSumHDMA * 100u) / sum);
+			Uint32 pAPU  = (Uint32)(((Uint64)g_TmgWinSumAPU * 100u) / sum);
+			Uint32 pMix  = (Uint32)(((Uint64)g_TmgWinSumMix * 100u) / sum);
+			Uint32 pBlend = (Uint32)(((Uint64)g_TmgWinSumBlend * 100u) / sum);
+			Uint32 pPPUSync = (Uint32)(((Uint64)g_TmgWinSumPPUSync * 100u) / sum);
+			Uint32 pBGInfo = (Uint32)(((Uint64)g_TmgWinSumBGInfo * 100u) / sum);
+			Uint32 pBGOffset = (Uint32)(((Uint64)g_TmgWinSumBGOffset * 100u) / sum);
+			Uint32 pBGMap = (Uint32)(((Uint64)g_TmgWinSumBGMap * 100u) / sum);
+			Uint32 pBGChr = (Uint32)(((Uint64)g_TmgWinSumBGChr * 100u) / sum);
+			Uint32 pBGMain = (Uint32)(((Uint64)g_TmgWinSumBGMain * 100u) / sum);
+			Uint32 pBGSub = (Uint32)(((Uint64)g_TmgWinSumBGSub * 100u) / sum);
+			Uint32 pColorMath = (Uint32)(((Uint64)g_TmgWinSumColorMath * 100u) / sum);
+			Uint32 pObjUpdate = (Uint32)(((Uint64)g_TmgWinSumObjUpdate * 100u) / sum);
+			Uint32 pObjFetch = (Uint32)(((Uint64)g_TmgWinSumObjFetch * 100u) / sum);
+			Uint32 pObjDraw = (Uint32)(((Uint64)g_TmgWinSumObjDraw * 100u) / sum);
+			Uint32 pHDMAData = (Uint32)(((Uint64)g_TmgWinSumHDMAData * 100u) / sum);
+			Uint32 pHDMATable = (Uint32)(((Uint64)g_TmgWinSumHDMATable * 100u) / sum);
+			Uint64 uPPUOther = g_TmgWinSumPPU;
+			if (uPPUOther > (Uint64)g_TmgWinSumObj + g_TmgWinSumBlend)
+				uPPUOther -= (Uint64)g_TmgWinSumObj + g_TmgWinSumBlend;
+			else
+				uPPUOther = 0;
+			Uint32 pPPUOther = (Uint32)((uPPUOther * 100u) / sum);
+			const SNGSUDiagT &gd = m_GSU.GetDiag();
+
+			// CPU/APU/PPU sao medidas inclusivas (podem se sobrepor quando um
+			// acesso do 65816 sincroniza outro bloco). Ainda assim identificam
+			// diretamente qual rotina esta consumindo o tempo da EE.
+			DLog("[snes-perf] diag=%s f=%u avg=%u snes=%u.%u fps peak=%u%% cpu=%u%% ppu=%u%% gsu=%u%% apu=%u%% mix=%u%% mdma=%u%% hdma=%u%%",
+				SNDBG_DEEP ? "deep" : "general",
+				(unsigned)g_TmgFrameNo, (unsigned)avg,
+				(unsigned)(fps10 / 10), (unsigned)(fps10 % 10),
+				(unsigned)ratio,
+				(unsigned)pCPU, (unsigned)pPPU, (unsigned)pGSU,
+				(unsigned)pAPU, (unsigned)pMix, (unsigned)pMDMA,
+				(unsigned)pHDMA);
+			DLog("[snes-render] bg+compose=%u%% mode7=%u%% obj=%u%% blend=%u%% dsp=%u/%u hirq=%d..%d n=%u",
+				(unsigned)pPPUOther, (unsigned)pM7, (unsigned)pObj,
+				(unsigned)pBlend,
+				(unsigned)g_TmgDspRd, (unsigned)g_TmgDspWr,
+				(int)g_TmgIrqLineMin, (int)g_TmgIrqLineMax,
+				(unsigned)g_TmgIrqCount);
+			DLog("[snes-hot-bg] schema=topgear-r29 pct sync/info/off/map/chr/main/sub/cmath=%u/%u/%u/%u/%u/%u/%u/%u",
+				(unsigned)pPPUSync, (unsigned)pBGInfo,
+				(unsigned)pBGOffset, (unsigned)pBGMap,
+				(unsigned)pBGChr, (unsigned)pBGMain,
+				(unsigned)pBGSub, (unsigned)pColorMath);
+			DLog("[snes-hot-obj] pct update/fetch/draw=%u/%u/%u hdma data/table=%u/%u",
+				(unsigned)pObjUpdate, (unsigned)pObjFetch,
+				(unsigned)pObjDraw, (unsigned)pHDMAData,
+				(unsigned)pHDMATable);
+			DLog("[snes-hot-cyc] avg sync/map/chr/main/sub/cmath/obj-u/obj-f/obj-d/hdma-d/hdma-t=%u/%u/%u/%u/%u/%u/%u/%u/%u/%u/%u",
+				(unsigned)(g_TmgWinSumPPUSync / g_TmgWinFrames),
+				(unsigned)(g_TmgWinSumBGMap / g_TmgWinFrames),
+				(unsigned)(g_TmgWinSumBGChr / g_TmgWinFrames),
+				(unsigned)(g_TmgWinSumBGMain / g_TmgWinFrames),
+				(unsigned)(g_TmgWinSumBGSub / g_TmgWinFrames),
+				(unsigned)(g_TmgWinSumColorMath / g_TmgWinFrames),
+				(unsigned)(g_TmgWinSumObjUpdate / g_TmgWinFrames),
+				(unsigned)(g_TmgWinSumObjFetch / g_TmgWinFrames),
+				(unsigned)(g_TmgWinSumObjDraw / g_TmgWinFrames),
+				(unsigned)(g_TmgWinSumHDMAData / g_TmgWinFrames),
+				(unsigned)(g_TmgWinSumHDMATable / g_TmgWinFrames));
+			DLog("[snes-raster] ppu queued/applied/full=%u/%u/%u hdma lines/active/xfer=%u/%u/%u bg layers/reloads/chrrows=%u/%u/%u",
+				(unsigned)g_DbgPPUQueuedWrites,
+				(unsigned)g_DbgPPUAppliedWrites,
+				(unsigned)g_DbgPPUQueueFull,
+				(unsigned)g_DbgHDMALines,
+				(unsigned)g_DbgHDMAActiveChannels,
+				(unsigned)g_DbgHDMATransferChannels,
+				(unsigned)g_DbgBGActiveLayers,
+				(unsigned)g_DbgBGMapReloads,
+				(unsigned)g_DbgBGChrRows);
+			DLog("[snes-obj] ports oam=%u vram=%u cgram=%u | lines=%u refs=%u tiles=%u range/time=%u/%u",
+				(unsigned)g_DbgOAMWrites, (unsigned)g_DbgVRAMWrites,
+				(unsigned)g_DbgCGRAMWrites, (unsigned)g_DbgObjEnabledLines,
+				(unsigned)g_DbgObjOamRefs, (unsigned)g_DbgObjTiles,
+				(unsigned)g_DbgObjRangeLimitLines, (unsigned)g_DbgObjLimitLines);
+			DLog("[snes-obj-cache] enabled=%u hit/miss=%u/%u",
+				(unsigned)SNPPU_OBJ_CACHE, (unsigned)g_DbgObjCacheHits,
+				(unsigned)g_DbgObjCacheMisses);
+			DLog("[snes-bg-cache] enabled=%u hit/miss=%u/%u",
+				(unsigned)SNPPU_BG_CACHE, (unsigned)g_DbgBGCacheHits,
+				(unsigned)g_DbgBGCacheMisses);
+			DLog("[snes-chr-cache] direct=1 bytes=448512 invalidated-tiles=%u",
+				(unsigned)g_DbgChrCacheInvalidations);
+			DLog("[snes-audio] samples=%u avg/frame=%u",
+				(unsigned)g_DbgAudioSamples,
+				(unsigned)(g_DbgAudioSamples / g_TmgWinFrames));
+			#if SNDBG_DEEP
+			DLog("[snes-obj-deep] opaque/empty=%u/%u pixels candidate/drawn=%u/%u edge-tiles=%u | regs obsel=%02X tm=%02X ts=%02X first=%u",
+				(unsigned)g_DbgObjOpaqueTiles, (unsigned)g_DbgObjEmptyLines,
+				(unsigned)g_DbgObjCandidatePixels, (unsigned)g_DbgObjDrawnPixels,
+				(unsigned)g_DbgObjClippedTiles,
+				(unsigned)g_DbgObjOBSEL, (unsigned)g_DbgObjTM,
+				(unsigned)g_DbgObjTS, (unsigned)g_DbgObjPriority);
+			#else
+			DLog("[snes-obj] regs obsel=%02X tm=%02X ts=%02X first=%u (pixel counters require SNES_DIAGNOSTICS=2)",
+				(unsigned)g_DbgObjOBSEL, (unsigned)g_DbgObjTM,
+				(unsigned)g_DbgObjTS, (unsigned)g_DbgObjPriority);
+			#endif
+			#if SNDBG_DEEP
+			{
+				const SnesPPURegsT *pr = m_PPU.GetRegs();
+				Uint32 hOAM = SnesDbgHash32(m_PPU.GetOAM(), sizeof(SnesOAMT));
+				Uint32 hVRAM = SnesDbgHash32(m_PPU.GetVramPtr(0), 0x10000);
+				Uint32 hCGRAM = SnesDbgHash32(m_PPU.GetCGData(), 512);
+				DLog("[snes-state] f=%u hash oam/vram/cgram=%08X/%08X/%08X regs inidisp/mode/obsel/tm/ts/setini=%02X/%02X/%02X/%02X/%02X/%02X",
+					(unsigned)g_TmgFrameNo, (unsigned)hOAM,
+					(unsigned)hVRAM, (unsigned)hCGRAM,
+					(unsigned)(Uint8)pr->inidisp,
+					(unsigned)(Uint8)pr->bgmode,
+					(unsigned)(Uint8)pr->obsel, (unsigned)(Uint8)pr->tm,
+					(unsigned)(Uint8)pr->ts, (unsigned)(Uint8)pr->setini);
+				DLog("[snes-state] addr oam/base/first=%04X/%04X/%u vmain/vmaddr/cgadd=%02X/%04X/%04X bgsc=%02X/%02X/%02X/%02X bgnba=%02X/%02X",
+					(unsigned)pr->oamaddr.w, (unsigned)pr->oamaddrlatch.w,
+					(unsigned)pr->oampri.w, (unsigned)(Uint8)pr->vmain,
+					(unsigned)pr->vmaddr.w, (unsigned)pr->cgadd.w,
+					(unsigned)(Uint8)pr->bg1sc, (unsigned)(Uint8)pr->bg2sc,
+					(unsigned)(Uint8)pr->bg3sc, (unsigned)(Uint8)pr->bg4sc,
+					(unsigned)(Uint8)pr->bg12nba, (unsigned)(Uint8)pr->bg34nba);
+			}
+			#endif
+			DLog("[snes-sync] ppu calls/lines=%u/%u dma starts=%u read=%u wrap=%u max=%u",
+				(unsigned)g_DbgPPUSyncCalls, (unsigned)g_DbgPPURenderLines,
+				(unsigned)g_DbgDMAStarts, (unsigned)g_DbgDMAReadBytes,
+				(unsigned)g_DbgDMAWraps, (unsigned)g_DbgDMAMaxBytes);
+			DLog("[snes-dma] bytes oam/vram/cgram/other=%u/%u/%u/%u modes=%u/%u/%u/%u/%u/%u/%u/%u",
+				(unsigned)g_DbgDMAOAMBytes, (unsigned)g_DbgDMAVRAMBytes,
+				(unsigned)g_DbgDMACGRAMBytes, (unsigned)g_DbgDMAOtherBytes,
+				(unsigned)g_DbgDMAModes[0], (unsigned)g_DbgDMAModes[1],
+				(unsigned)g_DbgDMAModes[2], (unsigned)g_DbgDMAModes[3],
+				(unsigned)g_DbgDMAModes[4], (unsigned)g_DbgDMAModes[5],
+				(unsigned)g_DbgDMAModes[6], (unsigned)g_DbgDMAModes[7]);
+			DLog("[snes-hdma] bytes scroll/cgram/window-color/other=%u/%u/%u/%u",
+				(unsigned)g_DbgHDMAScrollBytes,
+				(unsigned)g_DbgHDMACGRAMBytes,
+				(unsigned)g_DbgHDMAWindowColorBytes,
+				(unsigned)g_DbgHDMAOtherBytes);
+			{
+				const SnesPPURegsT *pr = m_PPU.GetRegs();
+				DLog("[snes-ppu] mode/tm/ts/cgw/cgad/bright=%02X/%02X/%02X/%02X/%02X/%u scroll bg1=%03X/%03X bg2=%03X/%03X bg3=%03X/%03X bg4=%03X/%03X m7=%04X/%04X latch hv/h/m7=%02X/%02X/%02X",
+					(unsigned)(Uint8)pr->bgmode, (unsigned)(Uint8)pr->tm,
+					(unsigned)(Uint8)pr->ts, (unsigned)(Uint8)pr->cgwsel,
+					(unsigned)(Uint8)pr->cgadsub,
+					(unsigned)(pr->inidisp & 0x0F),
+					(unsigned)pr->bg1hofs.w, (unsigned)pr->bg1vofs.w,
+					(unsigned)pr->bg2hofs.w, (unsigned)pr->bg2vofs.w,
+					(unsigned)pr->bg3hofs.w, (unsigned)pr->bg3vofs.w,
+					(unsigned)pr->bg4hofs.w, (unsigned)pr->bg4vofs.w,
+					(unsigned)pr->m7hofs.w, (unsigned)pr->m7vofs.w,
+					(unsigned)(Uint8)pr->bgofslo,
+					(unsigned)(Uint8)pr->bghofslo,
+					(unsigned)(Uint8)pr->m7latch);
+			}
+			#if SNDBG_DEEP
+			DLog("[snes-gsu] ins=%u start/stop/abort/wd=%u/%u/%u/%u max=%u cur=%u plot/rpix=%u/%u ramw=%u",
+				(unsigned)gd.Instructions, (unsigned)gd.Starts,
+				(unsigned)gd.Stops, (unsigned)gd.Aborts,
+				(unsigned)gd.Watchdogs, (unsigned)gd.MaxJobInstructions,
+				(unsigned)gd.CurrentJobInstructions, (unsigned)gd.Plots,
+				(unsigned)gd.Rpix, (unsigned)gd.RamWrites);
+			DLog("[snes-gsu] cache hit/miss=%u/%u branch=%u/%u jump=%u go=%u",
+				(unsigned)gd.CacheHits, (unsigned)gd.CacheMisses,
+				(unsigned)gd.BranchesTaken, (unsigned)gd.Branches,
+				(unsigned)gd.Jumps, (unsigned)(m_GSU.IsRunning() ? 1 : 0));
+			#else
+			DLog("[snes-gsu] detail=off start/stop/abort/wd=%u/%u/%u/%u go=%u (use SNES_DIAGNOSTICS=2 for instruction counters)",
+				(unsigned)gd.Starts, (unsigned)gd.Stops,
+				(unsigned)gd.Aborts, (unsigned)gd.Watchdogs,
+				(unsigned)(m_GSU.IsRunning() ? 1 : 0));
+			#endif
+			g_TmgWinFrames  = 0;
+			g_TmgWinSumCyc  = 0;
+			g_TmgWinMaxCyc  = 0;
+			g_TmgWinSumM7   = 0;
+			g_TmgWinSumObj  = 0;
+			g_TmgWinSumPPU  = 0;
+			g_TmgWinSumCPU  = 0;
+			g_TmgWinSumGSU  = 0;
+			g_TmgWinSumMDMA = 0;
+			g_TmgWinSumHDMA = 0;
+			g_TmgWinSumAPU  = 0;
+			g_TmgWinSumMix  = 0;
+			g_TmgWinSumBlend = 0;
+			g_TmgWinSumPPUSync = 0;
+			g_TmgWinSumBGInfo = 0;
+			g_TmgWinSumBGOffset = 0;
+			g_TmgWinSumBGMap = 0;
+			g_TmgWinSumBGChr = 0;
+			g_TmgWinSumBGMain = 0;
+			g_TmgWinSumBGSub = 0;
+			g_TmgWinSumColorMath = 0;
+			g_TmgWinSumObjUpdate = 0;
+			g_TmgWinSumObjFetch = 0;
+			g_TmgWinSumObjDraw = 0;
+			g_TmgWinSumHDMAData = 0;
+			g_TmgWinSumHDMATable = 0;
+			g_TmgDspRd      = 0;
+			g_TmgDspWr      = 0;
+			g_TmgIrqCount   = 0;
+			g_TmgIrqLineMin = 9999;
+			g_TmgIrqLineMax = -1;
+			g_DbgOAMWrites = 0;
+			g_DbgVRAMWrites = 0;
+			g_DbgCGRAMWrites = 0;
+			g_DbgObjEnabledLines = 0;
+			g_DbgObjOamRefs = 0;
+			g_DbgObjTiles = 0;
+			g_DbgObjCacheHits = 0;
+			g_DbgObjCacheMisses = 0;
+			g_DbgObjCacheRefreshes = 0;
+			g_DbgBGCacheHits = 0;
+			g_DbgBGCacheMisses = 0;
+			g_DbgBGCacheRefreshes = 0;
+			g_DbgChrCacheInvalidations = 0;
+			g_DbgAudioSamples = 0;
+			g_DbgObjOpaqueTiles = 0;
+			g_DbgObjCandidatePixels = 0;
+			g_DbgObjDrawnPixels = 0;
+			g_DbgObjClippedTiles = 0;
+			g_DbgObjEmptyLines = 0;
+			g_DbgObjRangeLimitLines = 0;
+			g_DbgObjLimitLines = 0;
+			g_DbgPPUSyncCalls = 0;
+			g_DbgPPURenderLines = 0;
+			g_DbgDMAStarts = 0;
+			g_DbgDMAReadBytes = 0;
+			g_DbgDMAOAMBytes = 0;
+			g_DbgDMAVRAMBytes = 0;
+			g_DbgDMACGRAMBytes = 0;
+			g_DbgDMAOtherBytes = 0;
+			g_DbgDMAWraps = 0;
+			g_DbgDMAMaxBytes = 0;
+			memset(g_DbgDMAModes, 0, sizeof(g_DbgDMAModes));
+			g_DbgHDMAScrollBytes = 0;
+			g_DbgHDMACGRAMBytes = 0;
+			g_DbgHDMAWindowColorBytes = 0;
+			g_DbgHDMAOtherBytes = 0;
+			g_DbgPPUQueuedWrites = 0;
+			g_DbgPPUAppliedWrites = 0;
+			g_DbgPPUQueueFull = 0;
+			g_DbgHDMALines = 0;
+			g_DbgHDMAActiveChannels = 0;
+			g_DbgHDMATransferChannels = 0;
+			g_DbgBGActiveLayers = 0;
+			g_DbgBGMapReloads = 0;
+			g_DbgBGChrRows = 0;
+			m_GSU.ClearDiagWindow();
+		}
+		g_DbgCaptureActive = FALSE;
+	}
+#endif
+
+	m_uFrame++;
+}
+
+
+Bool SnesSystem::AttachSuperGameBoyGame(
+    const Uint8 *pData, Uint32 nBytes, Bool bSgb2,
+    const Uint8 *pBootRom, Uint32 nBootRomBytes) /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908 */
+{
+    if (!m_pRom || !(m_pRom->m_Flags & SNROM_FLAG_GAMEBOY)) return FALSE;
+    if (!m_SGB.AttachGame(
+            pData, nBytes,
+            bSgb2 ? SNSuperGameBoy::MODEL_SGB2 : SNSuperGameBoy::MODEL_SGB1,
+            pBootRom, nBootRomBytes))
+        return FALSE;
+    m_uSGBSyncClock = (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_TOTAL);
+    MapSuperGameBoy();
+    return TRUE;
+}
+
+void SnesSystem::DetachSuperGameBoyGame()
+{
+    m_SGB.Detach();
+    m_uSGBSyncClock = (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_TOTAL);
+}
+
+/* AURORA_SGB_POST_FB_CLOCK_TRACE_V0_6_12_20260905 */
+extern "C" void AuroraSgbBootTrace(const char *pText);
+extern "C" Bool AuroraSgbDebugFBConsumed(void);
+
+void SnesSystem::SyncSuperGameBoy(Bool bForce)
+{
+    static Uint8 s_uAuroraPostFBSyncTrace = 0;
+    Bool bPostFB;
+    Uint32 now, delta, hz;
+
+    if (!m_SGB.IsActive()) return;
+
+    bPostFB = AuroraSgbDebugFBConsumed();
+    if (!bPostFB)
+        s_uAuroraPostFBSyncTrace = 0;
+    else if (!(s_uAuroraPostFBSyncTrace & 0x01U)) {
+        s_uAuroraPostFBSyncTrace |= 0x01U;
+        AuroraSgbBootTrace("SGB H77: SNES sync after FB");
+    }
+
+    now = (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_TOTAL);
+    delta = now - m_uSGBSyncClock;
+
+    if (delta)
+    {
+        if (bPostFB && !(s_uAuroraPostFBSyncTrace & 0x04U)) {
+            s_uAuroraPostFBSyncTrace |= 0x04U;
+            AuroraSgbBootTrace("SGB H79: SNES sync delta nonzero");
+        }
+
+        hz = (m_pRom && m_pRom->m_eVideoType == SNROM_VIDEO_PAL)
+            ? 21281370U : 21477272U;
+        m_SGB.AdvanceMasterClocks(delta, hz);
+        m_uSGBSyncClock = now;
+    }
+    else if (bPostFB && !(s_uAuroraPostFBSyncTrace & 0x02U))
+    {
+        s_uAuroraPostFBSyncTrace |= 0x02U;
+        AuroraSgbBootTrace("SGB H78: SNES sync delta zero");
+    }
+
+    /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907
+     * Normal CPU slices batch GB time; externally visible SGB MMIO flushes
+     * exactly to the current SFC timestamp. */
+    if (bForce)
+        m_SGB.FlushClocks();
+}
+
+/* AURORA_SGB_GAMBATTE_SHADE8_JOYP_SYNC_PERF_V3_20260908
+ * bsnes coprocessor contract: the GB/ICD2 is synchronized to the current
+ * S-CPU timestamp BEFORE every externally visible SGB read. No $7000
+ * consume-first exception remains. */
+Uint8 SNCPU_TRAPFUNC SnesSystem::ReadSGB(SNCpuT *pCpu, Uint32 uAddr)
+{
+    SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
+    if (!pSnes) return pCpu->uMDR;
+
+    pSnes->SyncSuperGameBoy(TRUE);
+    return pSnes->m_SGB.Read(uAddr, pCpu->uMDR);
+}
+
+void SNCPU_TRAPFUNC SnesSystem::WriteSGB(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData)
+{
+    SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
+
+    if (!pSnes) return;
+
+    /* Writes observe the GB/ICD2 at the current S-CPU timestamp, once. */
+    pSnes->SyncSuperGameBoy(TRUE); /* AURORA_SGB_CLASSIC_PLUS_LINK_V2_20260907 */
+    pSnes->m_SGB.Write(uAddr, uData);
+}
+
+Int32 SnesSystem::GetSRAMBytes()
+{
+    if (m_SGB.IsActive()) return 0; /* AURORA_SGB_RUNTIME_V0_4_20260904 */
+    /* AURORA_SWC_FLOPPY_V1_20260831 */
+    if (m_bSuperWildCard)
+        return 0x8000;
+    if (m_pRom)
+    {
+        return m_pRom->GetSRAMBytes();
+    } else
+    {
+        return 0;
+    }               
+}
+
+Uint8 *SnesSystem::GetSRAMData()
+{
+    if (m_SGB.IsActive()) return NULL; /* AURORA_SGB_RUNTIME_V0_4_20260904 */
+    /* AURORA_SWC_FLOPPY_V1_20260831 */
+    if (m_bSuperWildCard)
+        return m_SRam;
+    if (m_pRom && (m_pRom->GetSRAMBytes()>0))
+    {
+        return m_SRam;
+    } else
+    {
+        return 0;
+    }               
+
+}
+
+const char *SnesSystem::GetString(StringE eString)
+{
+	switch(eString)
+	{
+		case STRING_SHORTNAME:	
+			return (char *)"SNES";
+		case STRING_FULLNAME:	
+			return (char *)"Super Nintendo";
+		case STRING_SRAMEXT:	
+			return (char *)"srm";
+		case STRING_STATEEXT:	
+			return (char *)"sns";
+		default:
+			return NULL;
+	}
+}
+
+
+
+#ifdef SNES_DEBUG
+
+/*static*/
+const char *SnesSystem::GetRegName(Uint32 uAddr)
+{
+    uAddr &= 0xFFFF;
+
+    switch (uAddr)
+    {
+    case 0x2134: return (char *)"mpyl";
+    case 0x2135: return (char *)"mpym";
+    case 0x2136: return (char *)"mpyh";
+    case 0x2137: return (char *)"slhv";
+    case 0x2138: return (char *)"oam";
+    case 0x2139: return (char *)"vmdatal";
+    case 0x213a: return (char *)"vmdatah";
+    case 0x213b: return (char *)"cgdata";
+    case 0x213c: return (char *)"ophct";
+    case 0x213d: return (char *)"opvct";
+    case 0x213e: return (char *)"stat77";
+    case 0x213f: return (char *)"stat78";
+    case 0x2140: return (char *)"apui00";
+    case 0x2141: return (char *)"apui01";
+    case 0x2142: return (char *)"apui02";
+    case 0x2143: return (char *)"apui03";
+
+    case 0x2180: return (char *)"WMDATA";
+    case 0x2181: return (char *)"WMADDL";
+    case 0x2182: return (char *)"WMADDM";
+    case 0x2183: return (char *)"WMADDH";
+
+    case 0x4016:	return (char *)"ser0";
+    case 0x4017:	return (char *)"ser1";
+
+    case 0x4200:	return (char *)"nmitimen";
+    case 0x4201:	return (char *)"wrio";
+    case 0x4202:	return (char *)"wrmpya";
+    case 0x4203:	return (char *)"wrmpyb";
+    case 0x4204:	return (char *)"wrdivl";
+    case 0x4205:	return (char *)"wrdivh";
+    case 0x4206:	return (char *)"wrdivb";
+    case 0x4207:	return (char *)"htmel";
+    case 0x4208:	return (char *)"htmeh";
+    case 0x4209:	return (char *)"vtmel";
+    case 0x420A:	return (char *)"vtmeh";
+    case 0x420B:	return (char *)"mdmaen";
+    case 0x420C:    return (char *)"hdmaen";
+    case 0x420D:	return (char *)"memsel";
+
+    case 0x4210:	return (char *)"RDNMI";
+    case 0x4211:	return (char *)"TIMEUP";
+    case 0x4212:	return (char *)"HVBJOY";
+    case 0x4213:	return (char *)"RDIO";
+    case 0x4214:	return (char *)"RDDIVL";
+    case 0x4215:	return (char *)"RDDIVH";
+    case 0x4216:	return (char *)"RDMPYL";
+    case 0x4217:	return (char *)"RDMPYH";
+    case 0x4218:	return (char *)"JOY1L";
+    case 0x4219:	return (char *)"JOY1H";
+    case 0x421A:	return (char *)"JOY2L";
+    case 0x421B:	return (char *)"JOY2H";
+    case 0x421C:	return (char *)"JOY3L";
+    case 0x421D:	return (char *)"JOY3H";
+    case 0x421E:	return (char *)"JOY4L";
+    case 0x421F:	return (char *)"JOY4H";
+
+    default:
+        switch (uAddr & 0x430F)
+        {
+        case 0x4300:  return (char *)"dmapx";
+        case 0x4301:  return (char *)"bbadx";
+        case 0x4302:  return (char *)"a1txl";
+        case 0x4303:  return (char *)"a1txh";
+        case 0x4304:  return (char *)"a1bx";
+        case 0x4305:  return (char *)"dasxl";
+        case 0x4306:  return (char *)"dasxh";
+        case 0x4307:  return (char *)"dasbx";
+        case 0x4308:  return (char *)"a2axl";
+        case 0x4309:  return (char *)"a2axh";
+        case 0x430A:  return (char *)"ntlrx";
+        }
+        return SnesPPU::GetRegName(uAddr);
+    }
+}
+
+#endif

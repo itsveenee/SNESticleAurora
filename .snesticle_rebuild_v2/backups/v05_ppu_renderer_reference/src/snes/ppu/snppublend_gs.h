@@ -1,0 +1,71 @@
+
+#ifndef _SNPPUBLEND_GS_H
+#define _SNPPUBLEND_GS_H
+
+
+#include "snppublend.h"
+
+struct SNPPUDmaListT
+{
+    Uint128     Data[128] _ALIGN(16);
+
+    Uint64      *pFixedColor;
+    Uint64      *pAddSub;
+    Uint64      *pIntensity;
+    Uint64      *pXYOffset;
+
+    Uint32      uPalAddr;
+    Uint32      uInputAddr;
+    Uint32      uAttribMainPal;
+    Uint32      uAttribSubPal;
+    Uint32      uTempAddr;
+
+	Uint32		uOutAddr;
+};
+
+struct SNPPUBlendColorCalibT
+{
+	Float32	y_mul,y_add;
+	Float32	i_mul,i_add;
+	Float32	q_mul,q_add;
+};
+
+
+
+class SNPPUBlendGS : public ISNPPUBlend
+{
+    /* AURORA_SNES_RENDERER_PERF_V8_GS_PINGPONG */
+    SNPPUDmaListT m_DmaList[2] _ALIGN(16);
+    SNPPUDmaListT m_DmaListWithPalette[2] _ALIGN(16);
+    SNPPUBlendInfoT *m_pDmaBlendInfo[2];
+    Bool m_bPaletteDirty;
+    Bool m_bAttribPalettesUploaded;
+    Bool m_bDmaListHasIntensity[2];
+	Bool m_bDmaListDirectMain[2];
+	Uint32 m_uDmaSlot;
+	Uint32 m_uLastDmaSlot;
+	Uint32 m_uPaletteDirty[8];
+	Uint32 m_nPaletteDirty;
+	Uint32 m_uStagePaletteDirty[2][8];
+	Uint32 m_nStagePaletteDirty[2];
+
+	void MarkPaletteEntryDirty(Uint32 uAddr);
+	void MarkPaletteAllDirty();
+	Uint32 CopyDirtyPalette(PaletteT *pDest, const PaletteT *pSource, Uint32 uSlot);
+
+public:
+    SNPPUBlendGS(Uint32 uVramAddr, Uint32 uOutAddr);
+
+    virtual void Begin(class CRenderSurface *pTarget);
+    virtual void Exec(SNPPUBlendInfoT *pInfo, Int32 iLine, Uint32 uFixedColor32, SNMaskT *pColorMask, Bool bAddSub, Uint32 uIntensity);
+    virtual void Clear(SNPPUBlendInfoT *pInfo, Int32 iLine);
+    virtual void End();
+    virtual void UpdatePalette(SNPPUBlendInfoT *pInfo, Uint16 *pCGRam, Uint32 uIntensity);
+    virtual void UpdatePaletteEntry(SNPPUBlendInfoT *pInfo, Uint32 uAddr, Uint32 uData, Uint32 uIntensity);
+
+	static void ColorCalibrate(SNPPUBlendColorCalibT *pCalib);
+};
+
+
+
+#endif

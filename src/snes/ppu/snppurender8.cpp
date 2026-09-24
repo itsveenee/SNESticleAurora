@@ -14,14 +14,7 @@
 #include "prof.h"
 #include "sndbglog.h"
 #include "platform/ps2/system/aurora_snes_cost_profiler.h" /* AURORA_SNES_PPU_BREAKDOWN_V2_20260920 */
-/* AURORA_SNES_BG_LOOKUP_SCRATCHPAD_V2_20260920 */
-#if CODE_PLATFORM == CODE_PS2
-#include "ps2mem.h"
-#define SNPPU_BG_PLANE0_LOOKUP \
-    ((SnesChrLookupT *)PS2MEM_SNES_LOOKUP_ADDR)
-#else
-#define SNPPU_BG_PLANE0_LOOKUP (&_SnesPPU_PlaneLookup[0])
-#endif
+//#include "ps2mem.h"
 
 #define SNPPU_BGPLANE_SIZE 48
 #define SNPPURENDER_CHR64 (TRUE)
@@ -228,9 +221,9 @@ struct SNPPUBg8FlipT
 
 static SNPPUBg8FlipT _FlipTable8[4]=
 {
-	{0, _SnesPPU_HFlipLookup[1], SNPPU_BG_PLANE0_LOOKUP},
+	{0, _SnesPPU_HFlipLookup[1], &_SnesPPU_PlaneLookup[0]},
 	{0, _SnesPPU_HFlipLookup[0], &_SnesPPU_PlaneLookup[1]},
-	{7, _SnesPPU_HFlipLookup[1], SNPPU_BG_PLANE0_LOOKUP},
+	{7, _SnesPPU_HFlipLookup[1], &_SnesPPU_PlaneLookup[0]},
 	{7, _SnesPPU_HFlipLookup[0], &_SnesPPU_PlaneLookup[1]}
 };
 
@@ -583,29 +576,20 @@ static void _FetchCHR2_64(const Uint16 *pVram, Uint32 uBaseAddr, const SnesRende
 			const SnesPPUTile2T *pTile2 =
 				(const SnesPPUTile2T *)(pVram + uRowAddr);
 			const SnesChrLookup64T *pLookup =
-				(const SnesChrLookup64T *)SNPPU_BG_PLANE0_LOOKUP;
+				(const SnesChrLookup64T *)&_SnesPPU_PlaneLookup[0];
 			Uint32 uPlane0 = pTile2->uPlane01[0][0];
 			Uint32 uPlane1 = pTile2->uPlane01[0][1];
 
 			#if SNDBG_LOG
 			g_DbgBGCacheMisses++;
 			#endif
-			/* AURORA_SNES_RENDERER_PERF_V8_BG_BLANK_MISS
-			 * Zero source planes decode to zero data/opacity in either H orientation. */
-			const Uint32 uSourceMask = uPlane0 | uPlane1;
-			if (!uSourceMask)
-			{
-				uTile0 = 0; uMask = 0;
-				SnesPPUChrCacheStore2(&_SnesPPU_ChrCache, uRowAddr, 0, 0);
-			}
-			else
-			{
-				uMask = _SnesPPU_HFlipLookup[1][uSourceMask];
-				uTile0  = (*pLookup)[uPlane0] << 0;
-				uTile0 |= (*pLookup)[uPlane1] << 1;
-				SnesPPUChrCacheStore2(&_SnesPPU_ChrCache, uRowAddr, uTile0, uMask);
-				if (pTiles->uFlip & 1) SnesPPUChrCacheFlipRow(&uTile0, &uMask);
-			}
+			uMask = _SnesPPU_HFlipLookup[1][uPlane0 | uPlane1];
+			uTile0  = (*pLookup)[uPlane0] << 0;
+			uTile0 |= (*pLookup)[uPlane1] << 1;
+			SnesPPUChrCacheStore2(&_SnesPPU_ChrCache, uRowAddr,
+				uTile0, uMask);
+			if (pTiles->uFlip & 1)
+				SnesPPUChrCacheFlipRow(&uTile0, &uMask);
 		}
 		#else
 		{
@@ -714,7 +698,7 @@ static void _FetchCHR4_64(const Uint16 *pVram, Uint32 uBaseAddr, const SnesRende
 			const SnesPPUTile4T *pTile4 =
 				(const SnesPPUTile4T *)(pVram + uRowAddr);
 			const SnesChrLookup64T *pLookup =
-				(const SnesChrLookup64T *)SNPPU_BG_PLANE0_LOOKUP;
+				(const SnesChrLookup64T *)&_SnesPPU_PlaneLookup[0];
 			Uint32 uPlane0 = pTile4->uPlane01[0][0];
 			Uint32 uPlane1 = pTile4->uPlane01[0][1];
 			Uint32 uPlane2 = pTile4->uPlane23[0][0];
@@ -723,32 +707,23 @@ static void _FetchCHR4_64(const Uint16 *pVram, Uint32 uBaseAddr, const SnesRende
 			#if SNDBG_LOG
 			g_DbgBGCacheMisses++;
 			#endif
-			/* AURORA_SNES_RENDERER_PERF_V8_BG_BLANK_MISS
-			 * Skip four planar LUT reads and H-flip materialization for a zero row. */
-			const Uint32 uSourceMask = uPlane0 | uPlane1 | uPlane2 | uPlane3;
-			if (!uSourceMask)
+			uMask = _SnesPPU_HFlipLookup[1]
+				[uPlane0 | uPlane1 | uPlane2 | uPlane3];
+			uTile0  = (*pLookup)[uPlane0] << 0;
+			uTile0 |= (*pLookup)[uPlane1] << 1;
+			uTile0 |= (*pLookup)[uPlane2] << 2;
+			uTile0 |= (*pLookup)[uPlane3] << 3;
+			SnesPPUChrCacheStore4(&_SnesPPU_ChrCache, uRowAddr,
+				uTile0, uMask);
+			/* AURORA_BG_HFLIP_MISS_REUSE_V1 */
+			if (pTiles->uFlip & 1)
 			{
-				uTile0 = 0; uMask = 0;
-				SnesPPUChrCacheStore4(&_SnesPPU_ChrCache, uRowAddr, 0, 0);
-			}
-			else
-			{
-				uMask = _SnesPPU_HFlipLookup[1][uSourceMask];
-				uTile0  = (*pLookup)[uPlane0] << 0;
-				uTile0 |= (*pLookup)[uPlane1] << 1;
-				uTile0 |= (*pLookup)[uPlane2] << 2;
-				uTile0 |= (*pLookup)[uPlane3] << 3;
-				SnesPPUChrCacheStore4(&_SnesPPU_ChrCache, uRowAddr, uTile0, uMask);
-				/* AURORA_BG_HFLIP_MISS_REUSE_V1 */
-				if (pTiles->uFlip & 1)
-				{
 #if SNPPU_CHR_CACHE_HFLIP
-					SnesPPUChrCacheLoad4HFlip(
-						&_SnesPPU_ChrCache, uRowAddr, &uTile0, &uMask);
+				SnesPPUChrCacheLoad4HFlip(
+					&_SnesPPU_ChrCache, uRowAddr, &uTile0, &uMask);
 #else
-					SnesPPUChrCacheFlipRow(&uTile0, &uMask);
+				SnesPPUChrCacheFlipRow(&uTile0, &uMask);
 #endif
-				}
 			}
 		}
 		#else
@@ -985,32 +960,19 @@ static _INLINE void _SnesPPUMode5GetCHR2Row64(
 #endif
 
 	{
-		/* AURORA_SNES_PPU_EE_MODE56_PAIRLOAD_V1_20260922
-		 * Default BG cache is off on PS2. Mirror the proven normal-BG direct
-		 * path: fetch the two bitplanes as one VRAM word, keep exact 15-bit
-		 * word wrapping, and avoid both LUT reads for a fully transparent row.
-		 * Zero bitplanes decode to exactly zero data/opacity. */
-		const Uint16 uPair01 =
-			pVram[uRowAddr & SNPPU_VRAM_WORD_MASK];
-		const Uint32 uPlane0 = (Uint32)(uPair01 & 0x00ffu);
-		const Uint32 uPlane1 = (Uint32)(uPair01 >> 8);
-		const Uint32 uAny = uPlane0 | uPlane1;
+		const SnesPPUTile2T *pTile2 =
+			(const SnesPPUTile2T *)(pVram + uRowAddr);
+		const SnesChrLookup64T *pLookup =
+			(const SnesChrLookup64T *)&_SnesPPU_PlaneLookup[0];
+		Uint32 uPlane0 = pTile2->uPlane01[0][0];
+		Uint32 uPlane1 = pTile2->uPlane01[0][1];
 
 #if SNPPU_BG_CACHE && SNDBG_LOG
 		g_DbgBGCacheMisses++;
 #endif
-		*pOpaque = _SnesPPU_HFlipLookup[1][uAny];
-		if (uAny)
-		{
-			const SnesChrLookup64T *pLookup =
-				(const SnesChrLookup64T *)SNPPU_BG_PLANE0_LOOKUP;
-			*pData  = (*pLookup)[uPlane0] << 0;
-			*pData |= (*pLookup)[uPlane1] << 1;
-		}
-		else
-		{
-			*pData = 0;
-		}
+		*pOpaque = _SnesPPU_HFlipLookup[1][uPlane0 | uPlane1];
+		*pData  = (*pLookup)[uPlane0] << 0;
+		*pData |= (*pLookup)[uPlane1] << 1;
 
 #if SNPPU_BG_CACHE
 		SnesPPUChrCacheStore2(
@@ -1038,38 +1000,25 @@ static _INLINE void _SnesPPUMode5GetCHR4Row64(
 #endif
 
 	{
-		/* AURORA_SNES_PPU_EE_MODE56_PAIRLOAD_V1_20260922
-		 * Four planar bytes become two aligned logical VRAM-word fetches.
-		 * The +8 plane pair wraps independently at 32K words, matching SNES
-		 * VRAM addressing and the normal 4bpp hot path. A blank row skips all
-		 * four planar LUT reads with an exact zero decoded result. */
-		const Uint16 uPair01 =
-			pVram[uRowAddr & SNPPU_VRAM_WORD_MASK];
-		const Uint16 uPair23 =
-			pVram[(uRowAddr + 8u) & SNPPU_VRAM_WORD_MASK];
-		const Uint32 uPlane0 = (Uint32)(uPair01 & 0x00ffu);
-		const Uint32 uPlane1 = (Uint32)(uPair01 >> 8);
-		const Uint32 uPlane2 = (Uint32)(uPair23 & 0x00ffu);
-		const Uint32 uPlane3 = (Uint32)(uPair23 >> 8);
-		const Uint32 uAny = uPlane0 | uPlane1 | uPlane2 | uPlane3;
+		const SnesPPUTile4T *pTile4 =
+			(const SnesPPUTile4T *)(pVram + uRowAddr);
+		const SnesChrLookup64T *pLookup =
+			(const SnesChrLookup64T *)&_SnesPPU_PlaneLookup[0];
+		Uint32 uPlane0 = pTile4->uPlane01[0][0];
+		Uint32 uPlane1 = pTile4->uPlane01[0][1];
+		Uint32 uPlane2 = pTile4->uPlane23[0][0];
+		Uint32 uPlane3 = pTile4->uPlane23[0][1];
 
 #if SNPPU_BG_CACHE && SNDBG_LOG
 		g_DbgBGCacheMisses++;
 #endif
-		*pOpaque = _SnesPPU_HFlipLookup[1][uAny];
-		if (uAny)
-		{
-			const SnesChrLookup64T *pLookup =
-				(const SnesChrLookup64T *)SNPPU_BG_PLANE0_LOOKUP;
-			*pData  = (*pLookup)[uPlane0] << 0;
-			*pData |= (*pLookup)[uPlane1] << 1;
-			*pData |= (*pLookup)[uPlane2] << 2;
-			*pData |= (*pLookup)[uPlane3] << 3;
-		}
-		else
-		{
-			*pData = 0;
-		}
+		*pOpaque = _SnesPPU_HFlipLookup[1][
+			uPlane0 | uPlane1 | uPlane2 | uPlane3
+		];
+		*pData  = (*pLookup)[uPlane0] << 0;
+		*pData |= (*pLookup)[uPlane1] << 1;
+		*pData |= (*pLookup)[uPlane2] << 2;
+		*pData |= (*pLookup)[uPlane3] << 3;
 
 #if SNPPU_BG_CACHE
 		SnesPPUChrCacheStore4(
@@ -1204,80 +1153,64 @@ static void _FetchCHR4Mode5_64(
 
 static void _FetchCHR8_64(const Uint16 *pVram, Uint32 uBaseAddr, const SnesRenderTileT *pTiles, Int32 nTiles, Uint32 uScrollY, Uint8 *pDest, Uint8 *pMask)
 {
-	const SNPPUBg8FlipT *pFlip;
+	SNPPUBg8FlipT *pFlip;
 
 	PROF_ENTER("_FetchCHR8_64");
 
 	while (nTiles > 0)
 	{
-		Uint32 uTileAddr, uRowAddr;
+		SnesPPUTile8T *pTile8;
+		Uint32 uTileAddr;
 		Uint32 uPlane0, uPlane1, uPlane2, uPlane3;
 		Uint32 uPlane4, uPlane5, uPlane6, uPlane7;
 		Uint64 uTile0;
 		Uint32 uMask;
-		Uint32 uAny;
+		SnesChrLookup64T *pLookup;
+		Uint8 *pHFlip;
 
 		pFlip = &_FlipTable8[pTiles->uFlip];
 
 		// calculate tile address
 		uTileAddr = (uBaseAddr + pTiles->uTile * 32) & 0x7FFF;
-		uRowAddr = uTileAddr +
-			((uScrollY + pTiles->uOffsetY) ^ pFlip->uFlipXOR);
 
-		/* AURORA_SNES_PPU_EE_8BPP_PAIRLOAD_V2_20260922
-		 * Eight byte loads become the four native VRAM bitplane-word loads
-		 * already used by the optimized 2/4bpp paths. Each pair wraps at the
-		 * 32K-word VRAM boundary. The OR needed for opacity doubles as an exact
-		 * blank-row test, so fully transparent rows skip all eight LUT reads. */
-		{
-			const Uint16 uPair01 =
-				pVram[uRowAddr & SNPPU_VRAM_WORD_MASK];
-			const Uint16 uPair23 =
-				pVram[(uRowAddr + 8u) & SNPPU_VRAM_WORD_MASK];
-			const Uint16 uPair45 =
-				pVram[(uRowAddr + 16u) & SNPPU_VRAM_WORD_MASK];
-			const Uint16 uPair67 =
-				pVram[(uRowAddr + 24u) & SNPPU_VRAM_WORD_MASK];
+		// get pointer to tile data (y flipped)
+		pTile8 = (SnesPPUTile8T *)(pVram + uTileAddr + ((uScrollY+pTiles->uOffsetY) ^ pFlip->uFlipXOR));
 
-			uPlane0 = (Uint32)(uPair01 & 0x00ffu);
-			uPlane1 = (Uint32)(uPair01 >> 8);
-			uPlane2 = (Uint32)(uPair23 & 0x00ffu);
-			uPlane3 = (Uint32)(uPair23 >> 8);
-			uPlane4 = (Uint32)(uPair45 & 0x00ffu);
-			uPlane5 = (Uint32)(uPair45 >> 8);
-			uPlane6 = (Uint32)(uPair67 & 0x00ffu);
-			uPlane7 = (Uint32)(uPair67 >> 8);
-		}
+		// get tile plane bits
+		uPlane0 = pTile8->uPlane01[0][0];
+		uPlane1 = pTile8->uPlane01[0][1];
+		uPlane2 = pTile8->uPlane23[0][0];
+		uPlane3 = pTile8->uPlane23[0][1];
+		uPlane4 = pTile8->uPlane45[0][0];
+		uPlane5 = pTile8->uPlane45[0][1];
+		uPlane6 = pTile8->uPlane67[0][0];
+		uPlane7 = pTile8->uPlane67[0][1];
 
-		uAny = uPlane0 | uPlane1 | uPlane2 | uPlane3 |
-			uPlane4 | uPlane5 | uPlane6 | uPlane7;
-		uMask = pFlip->pFlipLookup[uAny];
+		pLookup = (SnesChrLookup64T *)pFlip->pLookup;
+		pHFlip  = pFlip->pFlipLookup;
 
-		if (uAny)
-		{
-			const SnesChrLookup64T *pLookup =
-				(const SnesChrLookup64T *)pFlip->pLookup;
-			uTile0  = (*pLookup)[uPlane0] << 0;
-			uTile0 |= (*pLookup)[uPlane1] << 1;
-			uTile0 |= (*pLookup)[uPlane2] << 2;
-			uTile0 |= (*pLookup)[uPlane3] << 3;
-			uTile0 |= (*pLookup)[uPlane4] << 4;
-			uTile0 |= (*pLookup)[uPlane5] << 5;
-			uTile0 |= (*pLookup)[uPlane6] << 6;
-			uTile0 |= (*pLookup)[uPlane7] << 7;
-		}
-		else
-		{
-			uTile0 = 0;
-		}
+		// create mask
+		uMask = uPlane0 | uPlane1 | uPlane2 | uPlane3 | uPlane4 | uPlane5 | uPlane6 | uPlane7;
+		uMask = pHFlip[uMask];
 
-		pMask[0] = uMask;
+		// decode tile
+		uTile0  = (*pLookup)[uPlane0] << 0;
+		uTile0 |= (*pLookup)[uPlane1] << 1;
+		uTile0 |= (*pLookup)[uPlane2] << 2;
+		uTile0 |= (*pLookup)[uPlane3] << 3;
+		uTile0 |= (*pLookup)[uPlane4] << 4;
+		uTile0 |= (*pLookup)[uPlane5] << 5;
+		uTile0 |= (*pLookup)[uPlane6] << 6;
+		uTile0 |= (*pLookup)[uPlane7] << 7;
+
+		pMask[ 0] = uMask;
 		pMask[SNPPU_BGPLANE_SIZE] = (pTiles->uPal & 8) ? uMask : 0;
 		pMask++;
 
+		// store tile data
 		((Uint64 *)pDest)[0] = uTile0;
 
-		pDest += 8;
+		pDest+=8;
 		pTiles++;
 		nTiles--;
 	}
@@ -1409,11 +1342,14 @@ static void _RenderBGData_O(Uint8 *pLine8, Uint8 *pSrc8, SNMaskT *pBGMask, Uint3
 		uMask = *pMaskData;
 		pMaskData++;
 
-		/* AURORA_SNES_OBJ_BG_PURE_HOTPATH_V4_1_20260920
-		 * For uMask!=0 both compositor branches below finish with a full
-		 * 16-byte sq to this same pLine8. The old leading zero sq was always
-		 * overwritten. Keep the same uMask condition and perform that zero
-		 * store only in the zero-mask alternative. */
+		// write 0 to output
+		__asm__ __volatile__ (
+			"sq        $0,0x00(%0)     \n"
+			:
+			: "r" (pLine8)
+			: "memory"
+			);
+
 		if (uMask)
 		{
 			/* GCC 15 r5900 TI-mode split: keep 128-bit value in fixed
@@ -1451,15 +1387,6 @@ static void _RenderBGData_O(Uint8 *pLine8, Uint8 *pSrc8, SNMaskT *pBGMask, Uint3
 					: "$8", "$9", "memory"
 					);
 			}
-		}
-		else
-		{
-		    __asm__ __volatile__ (
-		        "sq        $0,0x00(%0)     \n"
-		        :
-		        : "r" (pLine8)
-		        : "memory"
-		        );
 		}
 
 		pSrc8+=16;
@@ -1916,22 +1843,18 @@ static _INLINE void _DecodeOBJRow4(SnesChrLookupT *pLookup, Uint8 *pHFlip,
 	Uint32 uPlane0, Uint32 uPlane1, Uint32 uPlane2, Uint32 uPlane3,
 	Uint32 *pTile0, Uint32 *pTile1, Uint32 *pOpaque)
 {
-	/* AURORA_SNES_OBJ_BG_PURE_HOTPATH_V4_1_20260920
-	 * Audit correction over V2:
-	 * - remove V2's speculative transparent-row branch;
-	 * - PlaneLookup entries are exactly two consecutive Uint32 values,
-	 *   i.e. one Uint64 entry by the renderer's established lookup layout.
-	 * Four fixed 64-bit reads replace eight 32-bit reads and split ORs.
-	 * No data-dependent condition is added to this cache-miss path. */
-	const SnesChrLookup64T *pLookup64 =
-		(const SnesChrLookup64T *)pLookup;
-	Uint64 uTile = (*pLookup64)[uPlane0] << 0;
-	uTile |= (*pLookup64)[uPlane1] << 1;
-	uTile |= (*pLookup64)[uPlane2] << 2;
-	uTile |= (*pLookup64)[uPlane3] << 3;
+	Uint32 uTile0 = (*pLookup)[uPlane0][0] << 0;
+	Uint32 uTile1 = (*pLookup)[uPlane0][1] << 0;
 
-	*pTile0 = (Uint32)uTile;
-	*pTile1 = (Uint32)(uTile >> 32);
+	uTile0 |= (*pLookup)[uPlane1][0] << 1;
+	uTile1 |= (*pLookup)[uPlane1][1] << 1;
+	uTile0 |= (*pLookup)[uPlane2][0] << 2;
+	uTile1 |= (*pLookup)[uPlane2][1] << 2;
+	uTile0 |= (*pLookup)[uPlane3][0] << 3;
+	uTile1 |= (*pLookup)[uPlane3][1] << 3;
+
+	*pTile0 = uTile0;
+	*pTile1 = uTile1;
 	*pOpaque = pHFlip[uPlane0 | uPlane1 | uPlane2 | uPlane3];
 }
 
@@ -1964,37 +1887,26 @@ static Int32 _FetchOBJ(SnesRenderObjT *pObjBase, Uint8 *pObjList, Int32 nObjList
 	{
 		SnesRenderObjT *pObj;
 		Int32 ObjX, ObjY;
+		Uint32 uSize;
 
         // get pointer to obj
 		pObj = pObjBase + pObjList[nObjList];
 
-		/* AURORA_SNES_OBJ_FETCH_HOTPATH_V2_20260920: immutable for every fetched tile of this OBJ. */
-		const Uint16 uObjPosX = pObj->uPosX;
-		const Uint8 uObjPosY = pObj->uPosY;
-		const Uint8 uObjWidth = pObj->uWidth;
-		const Uint8 uObjHeight = pObj->uHeight;
-		const Uint8 uObjPal = pObj->uPal;
-		const Uint8 uObjPri = pObj->uPri;
-		const Bool bObjHFlip = pObj->bHFlip;
-		const Uint8 uObjVXOR = pObj->uVXOR;
-		const Uint16 uObjTile = pObj->uTile;
-		const Uint32 uObjTilesWide = (Uint32)uObjWidth >> 3;
-
-		/* AURORA_SNES_OBJ_VISIBLE_RANGE_WRAP_FAST_V1_20260921
-		 * Host-only: retain per-OBJ fields across the tile loop. */
+		uSize = pObj->uWidth;
 
 		// get obj position
-		/* AURORA_SNES_OBJ_TRANSPARENT_ROW_ELIDE_V3_20260921: exact defined 9-bit sign extension; no signed left-shift UB. */
-		ObjX = (Int32)((uObjPosX ^ 0x100u) - 0x100u);
-		ObjY = (iLine - uObjPosY) & 0xFF;
+		ObjX = pObj->uPosX;
+		ObjX<<=32-9;
+		ObjX>>=32-9;
+		ObjY = (iLine - pObj->uPosY) & 0xFF;
 		if (bObjInterlace)
 		{
 			/* One display line addresses two source rows. Vertical flip is
 			 * resolved before field parity; on the flipped field hardware
 			 * subtracts the field bit instead of adding it. */
 			ObjY <<= 1;
-			ObjY ^= uObjVXOR;
-			if (uObjVXOR)
+			ObjY ^= pObj->uVXOR;
+			if (pObj->uVXOR)
 				ObjY -= bField ? 1 : 0;
 			else
 				ObjY += bField ? 1 : 0;
@@ -2002,15 +1914,17 @@ static Int32 _FetchOBJ(SnesRenderObjT *pObjBase, Uint8 *pObjList, Int32 nObjList
 		}
 		else
 		{
-			ObjY ^= uObjVXOR;
-			ObjY &= uObjHeight - 1;
+			ObjY ^= pObj->uVXOR;
+			ObjY &= pObj->uHeight - 1;
 		}
 
+		Uint32 uTileAddr;
 		Uint32 uTile0, uTile1, uOpaque;
 #if !SNPPU_OBJ_CACHE
 		SnesChrLookupT *pLookup;
 		Uint8 *pHFlip;
 #endif
+		Uint32 uTile;
 
 #if !SNPPU_OBJ_CACHE
 		if (pObj->bHFlip)
@@ -2019,7 +1933,7 @@ static Int32 _FetchOBJ(SnesRenderObjT *pObjBase, Uint8 *pObjList, Int32 nObjList
 			pHFlip  = _SnesPPU_HFlipLookup[0];
 		} else
 		{
-			pLookup = SNPPU_BG_PLANE0_LOOKUP;
+			pLookup = &_SnesPPU_PlaneLookup[0];
 			pHFlip  = _SnesPPU_HFlipLookup[1];
 		}
 #endif
@@ -2033,23 +1947,16 @@ static Int32 _FetchOBJ(SnesRenderObjT *pObjBase, Uint8 *pObjList, Int32 nObjList
 		// embaralhando sprites grandes que cruzam essas fronteiras (bug
 		// classico em Final Fight 2 e afins).
 		{
-		Bool bSecondTable = (uObjTile & 0x100) != 0;
-		Uint32 uRow  = ((uObjTile >> 4) + (ObjY >> 3)) & 0x0F;
-		Uint32 uCol0 = uObjTile & 0x0F;
+		Bool bSecondTable = (pObj->uTile & 0x100) != 0;
+		Uint32 uRow  = ((pObj->uTile >> 4) + (ObjY >> 3)) & 0x0F;
+		Uint32 uCol0 = pObj->uTile & 0x0F;
 		Uint32 uYoff = ObjY & 7;
-		/* AURORA_SNES_OBJ_FETCH_HOTPATH_V2_20260920: row + OBSEL table base is constant for this OBJ.
-		 * AURORA_SNES_OBJ_VISIBLE_RANGE_WRAP_FAST_V1_20260921: base components are 0x100-aligned, so the 15-bit
-		 * VRAM wrap can be folded once here. The later column is <=0xF0 and
-		 * yoff <=7, therefore this row cannot cross 0x8000 afterward. */
-		const Uint32 uObjRowBase =
-			(uBaseAddr + (uRow << 8) +
-			 (bSecondTable ? uNameSelect : 0)) & 0x7FFFu;
 		Int32 iTileX;
 		Int32 nTileCount;
 		Int32 iCol;
 		Int32 iColStep;
 		/* AURORA_OBJ_PALETTE_HOIST_V1 */
-		Uint32 uPalette = _SnesPPU_Obj4PalLookup[uObjPal];
+		Uint32 uPalette = _SnesPPU_Obj4PalLookup[pObj->uPal];
 
 #if SNDBG_DEEP
 		if (bTrace)
@@ -2094,26 +2001,14 @@ static Int32 _FetchOBJ(SnesRenderObjT *pObjBase, Uint8 *pObjList, Int32 nObjList
 #endif
 
 		/* AURORA_REVIVE_A06DD_OBJ_HOTPATH_20260829
-		 * Recorta a faixa uma vez e elimina teste/source-column por tile.
-		 * AURORA_SNES_OBJ_VISIBLE_RANGE_WRAP_FAST_V1_20260921: fully-onscreen OBJ bypasses the clipping helper.
-		 * Negative X (including hardware X=$100 -> -256) fails the unsigned
-		 * test and keeps the exact old helper path. */
-		if ((Uint32)ObjX <= (Uint32)(256 - uObjWidth))
-		{
-			iTileX = 0;
-			nTileCount = (Int32)uObjTilesWide;
-		}
-		else
-		{
-			_SnesPPUOBJCountedTileRange(uObjPosX, ObjX, uObjWidth,
-				&iTileX, &nTileCount);
-		}
+		 * Recorta a faixa uma vez e elimina teste/source-column por tile. */
+		_SnesPPUOBJCountedTileRange(pObj->uPosX, ObjX, pObj->uWidth,
+			&iTileX, &nTileCount);
 		ObjX += iTileX << 3;
-		/* AURORA_SNES_OBJ_BG_PURE_HOTPATH_V4_1_20260920: nTileCount already is the exact loop trip count.
-		 * Do not convert it to pixels only to subtract eight each iteration. */
-		if (bObjHFlip)
+		uSize = (Uint32)nTileCount << 3;
+		if (pObj->bHFlip)
 		{
-			iCol = (Int32)uObjTilesWide - 1 - iTileX;
+			iCol = (pObj->uWidth >> 3) - 1 - iTileX;
 			iColStep = -1;
 		}
 		else
@@ -2122,36 +2017,21 @@ static Int32 _FetchOBJ(SnesRenderObjT *pObjBase, Uint8 *pObjList, Int32 nObjList
 			iColStep = 1;
 		}
 
-#if SNPPU_OBJ_CACHE && SNPPU_CHR_CACHE_HFLIP
-		/* AURORA_SNES_OBJ_TRIPLE_HOTPATH_V1_20260920: choose canonical or pre-flipped cache arrays once per OBJ.
-		 * uValid4 remains shared, so store/invalidation semantics are identical. */
-		SnesPPUChrCache4ViewT ObjCacheView;
-		SnesPPUChrCacheSelect4View(
-			&_SnesPPU_ChrCache, bObjHFlip, &ObjCacheView);
-#endif
-
-		while (nTileCount > 0)
+		while (uSize > 0)
 		{
 			{
-				/* AURORA_SNES_OBJ_BG_PURE_HOTPATH_V4_1_20260920: V2 already proved row+OBSEL invariant per OBJ.
-				 * Fold one-use tile/address temporaries into the wrapped row address. */
-				const Uint32 uTileColumn =
-				    (Uint32)((uCol0 + iCol) & 0x0F);
-				/* AURORA_SNES_OBJ_VISIBLE_RANGE_WRAP_FAST_V1_20260921: row base is already wrapped and cannot overflow. */
-				const Uint32 uRowAddr =
-				    uObjRowBase + (uTileColumn << 4) + uYoff;
+				uTile = (uRow << 4) | ((uCol0 + iCol) & 0x0F);
+				uTileAddr = uBaseAddr + uTile * 16;
+				if (bSecondTable)
+					uTileAddr += uNameSelect;
+				Uint32 uRowAddr = (uTileAddr & 0x7FFF) + uYoff;
 
 #if SNPPU_OBJ_CACHE
 				{
 					Uint64 uRowData;
 
-#if SNPPU_CHR_CACHE_HFLIP
-					if (SnesPPUChrCacheLookup4View(
-						&ObjCacheView, uRowAddr, &uRowData, &uOpaque))
-#else
 					if (SnesPPUChrCacheLookup4(&_SnesPPU_ChrCache,
-						uRowAddr, bObjHFlip, &uRowData, &uOpaque))
-#endif
+						uRowAddr, pObj->bHFlip, &uRowData, &uOpaque))
 					{
 #if SNDBG_LOG
 						uCacheHits++;
@@ -2168,20 +2048,18 @@ static Int32 _FetchOBJ(SnesRenderObjT *pObjBase, Uint8 *pObjList, Int32 nObjList
 #if SNDBG_LOG
 						uCacheMisses++;
 #endif
-						_DecodeOBJRow4(SNPPU_BG_PLANE0_LOOKUP,
+						_DecodeOBJRow4(&_SnesPPU_PlaneLookup[0],
 							_SnesPPU_HFlipLookup[1], uPlane0, uPlane1,
 							uPlane2, uPlane3, &uTile0, &uTile1, &uOpaque);
 						uRowData = (Uint64)uTile0 | ((Uint64)uTile1 << 32);
 						SnesPPUChrCacheStore4(&_SnesPPU_ChrCache,
 							uRowAddr, uRowData, uOpaque);
 						/* AURORA_HFLIP_MISS_REUSE_V1 */
-						if (bObjHFlip)
+						if (pObj->bHFlip)
 						{
 #if SNPPU_CHR_CACHE_HFLIP
-							/* Orientation was selected once per OBJ. This branch
-							 * now exists only on a cache MISS, not every tile hit. */
-							SnesPPUChrCacheLoad4View(
-								&ObjCacheView,
+							SnesPPUChrCacheLoad4HFlip(
+								&_SnesPPU_ChrCache,
 								uRowAddr, &uRowData, &uOpaque);
 #else
 							SnesPPUChrCacheFlipRow(&uRowData, &uOpaque);
@@ -2203,22 +2081,18 @@ static Int32 _FetchOBJ(SnesRenderObjT *pObjBase, Uint8 *pObjList, Int32 nObjList
 						uPlane2, uPlane3, &uTile0, &uTile1, &uOpaque);
 				}
 #endif
-				/* AURORA_SNES_OBJ_TRANSPARENT_ROW_ELIDE_V3_20260921
-				 * Transparent rows still count toward the physical 34-tile fetch
-				 * budget, but no later stage may observe their pixel metadata.
-				 * Store only the one byte the compositor needs to reject them. */
-				pObjLine->uData[SNPPU_BGPLANE_OPAQUE] = (Uint8)uOpaque;
-				if (uOpaque)
-				{
-					uTile0 |= uPalette;
-					uTile1 |= uPalette;
-					((Uint32 *)pObjLine->uData)[0] = uTile0;
-					((Uint32 *)pObjLine->uData)[1] = uTile1;
-					pObjLine->uPri  = uObjPri;
-					pObjLine->uPal  = uObjPal;
-					pObjLine->iPosX = ObjX;
-				}
+				uTile0 |= uPalette;
+				uTile1 |= uPalette;
 
+				// store tile data
+				((Uint32 *)pObjLine->uData)[0] = uTile0;
+				((Uint32 *)pObjLine->uData)[1] = uTile1;
+				pObjLine->uData[SNPPU_BGPLANE_OPAQUE] = (Uint8)uOpaque;
+
+				// store objline
+				pObjLine->uPri  = pObj->uPri;
+				pObjLine->uPal  = pObj->uPal;
+				pObjLine->iPosX = ObjX;
 				pObjLine++;
 				nObjLine++;
 				if (nObjLine >= MaxObj8Line) goto FetchOBJDone;
@@ -2228,7 +2102,7 @@ static Int32 _FetchOBJ(SnesRenderObjT *pObjBase, Uint8 *pObjList, Int32 nObjList
 			   source column, not the fetch position; this matters when the
 			   hardware stops at the 34-tile scanline limit. */
 			ObjX += 8;
-			--nTileCount;
+			uSize -= 8;
 			iCol += iColStep;
 		}
 		}
@@ -2274,12 +2148,6 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 	 * scanline. Snapshot fields repeatedly used across helper calls. */
 	const Uint8 uBGModeReg = pRegs->bgmode;
 	const Uint8 uBGMode = (Uint8)(uBGModeReg & 7);
-	/* AURORA_SNES_PSEUDOHIRES_CRT_MERGE_V2_20260921
-	 * SETINI.3 pseudo-hires displays the sub screen and main screen as
-	 * alternating half-pixels. Modes 5/6 are already native hires. */
-	const Bool bPseudoHires =
-		((pRegs->setini & SNESPPU_SETINI_PSEUDOHIR) != 0) &&
-		(uBGMode != 5) && (uBGMode != 6);
 	const Bool bMode7ExtBG =
 		(uBGMode == 7) && ((pRegs->setini & 0x40) != 0);
 	const Uint8 uOBSEL = pRegs->obsel;
@@ -2359,10 +2227,10 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 		tsw &= uMode7LayerMask;
 	}
 
-	/* Fixed-color math normally makes TS invisible host work, but
-	 * AURORA_SNES_PSEUDOHIRES_CRT_MERGE_V2_20260921: pseudo-hires physically displays TS as every other half-pixel,
-	 * independently of CGADSUB. Never elide it in that mode. */
-	if (!bPseudoHires && (!(cgwsel & 0x02) || cgadsub == 0))
+	/* Fixed-color math never samples the sub screen.  With no CGADSUB target,
+	   color math cannot affect a pixel at all.  Apply both facts before
+	   tile/OBJ fetch so disabled layers do no invisible EE work. */
+	if (!(cgwsel & 0x02) || cgadsub == 0)
 		ts = 0;
 	uFetchLayers = tm | ts;
 
@@ -2402,7 +2270,7 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 
 	// fetch obj chr for visible objs
 	/* PPU detail: OBJ fetch */
-	AURORA_SNES_PPU_DETAIL_BEGIN(AURORA_SNES_PPU_DETAIL_OBJ_FETCH);
+	AURORA_SNES_PPU_DETAIL_BEGIN(AURORA_SNES_PPU_DETAIL_OBJ);
 	PROF_ENTER("FetchOBJ");
 #if SNDBG_LOG
 	Uint32 _tObjA = ProfCtrGetCycle();
@@ -2465,7 +2333,7 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 	}
 #endif
 	PROF_LEAVE("FetchOBJ");
-	AURORA_SNES_PPU_DETAIL_END(AURORA_SNES_PPU_DETAIL_OBJ_FETCH);
+	AURORA_SNES_PPU_DETAIL_END(AURORA_SNES_PPU_DETAIL_OBJ);
 
 	if (uBGMode!=7)
 	{
@@ -2747,10 +2615,10 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 		Uint32 _tObjB = ProfCtrGetCycle();
 #endif
 		/* PPU detail: main OBJ draw */
-		AURORA_SNES_PPU_DETAIL_BEGIN(AURORA_SNES_PPU_DETAIL_OBJ_MAIN);
+		AURORA_SNES_PPU_DETAIL_BEGIN(AURORA_SNES_PPU_DETAIL_OBJ);
 		_SnesPPURenderOBJ8(pMain8, pMain, ObjLine, nObjLine,  (tmw&SNESPPU_MASK_OBJ) ? &pBGWindow[4] : NULL, bBG3Pri ? &BG3Pri : NULL,
 			pMainAddSubWriteMask, (cgadsub & 0x10) ? 1 : 0, pDirectAttrib, 0);
-		AURORA_SNES_PPU_DETAIL_END(AURORA_SNES_PPU_DETAIL_OBJ_MAIN);
+		AURORA_SNES_PPU_DETAIL_END(AURORA_SNES_PPU_DETAIL_OBJ);
 #if SNDBG_LOG
 		{
 			Uint32 _dObjDraw = ProfCtrGetCycle() - _tObjB;
@@ -2762,11 +2630,8 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 	AURORA_SNES_PPU_DETAIL_END(AURORA_SNES_PPU_DETAIL_BG_MAIN);
 
 #if CODE_PLATFORM == CODE_PS2
-	/* AURORA_DIRECT_MAIN_SUB_ELIDE_V3
-	 * AURORA_SNES_PSEUDOHIRES_CRT_MERGE_V2_20260921: pseudo-hires needs the rendered sub screen even when ordinary
-	 * color math is idle, so the direct-main early return is ineligible. */
-	if (!bPseudoHires &&
-	    cgadsub==0 && (cgwsel&0xC0)==0 && m_pPPU->GetIntensity()==15)
+	/* AURORA_DIRECT_MAIN_SUB_ELIDE_V3 */
+	if (cgadsub==0 && (cgwsel&0xC0)==0 && m_pPPU->GetIntensity()==15)
 	{
 		PROF_LEAVE("RenderBG");
 		/* PPU detail: close BG before direct-main return */
@@ -2835,10 +2700,10 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 		Uint32 _tObjC = ProfCtrGetCycle();
 #endif
 		/* PPU detail: sub OBJ draw */
-		AURORA_SNES_PPU_DETAIL_BEGIN(AURORA_SNES_PPU_DETAIL_OBJ_SUB);
+		AURORA_SNES_PPU_DETAIL_BEGIN(AURORA_SNES_PPU_DETAIL_OBJ);
 		_SnesPPURenderOBJ8(pSub8, pSub, ObjLine, nObjLine,  (tsw&SNESPPU_MASK_OBJ) ? &pBGWindow[4] : NULL, bBG3Pri ? &BG3Pri : NULL,
 			pSubAddSubMask, 4|1, pDirectAttrib, 4);
-		AURORA_SNES_PPU_DETAIL_END(AURORA_SNES_PPU_DETAIL_OBJ_SUB);
+		AURORA_SNES_PPU_DETAIL_END(AURORA_SNES_PPU_DETAIL_OBJ);
 #if SNDBG_LOG
 		{
 			Uint32 _dObjDraw = ProfCtrGetCycle() - _tObjC;

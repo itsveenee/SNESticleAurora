@@ -106,12 +106,6 @@ void _SnesPPURenderOBJ8(Uint8 *pLine8, SNMaskT *pLine,
 	 * uDirectShift is invariant for this compositor call. Keep the exact
 	 * original nibble mask, but do not rebuild it per tile/pixel. */
 	const Uint8 uDirectKeep = uDirectShift ? 0x0F : 0xF0;
-	/* AURORA_SNES_OBJ_TRIPLE_HOTPATH_V1_20260920
-	 * PlaneLookup[1] expands visibility bit N to byte N as 0/1.
-	 * The partial-row compositor turns that into 00/FF byte selectors with
-	 * three fixed shift/OR steps: no per-pixel branch. */
-	const SnesChrLookup64T *pObjByteMaskLookup =
-		(const SnesChrLookup64T *)&_SnesPPU_PlaneLookup[1];
 
 	PROF_ENTER("_RenderOBJPlanar");
 
@@ -144,21 +138,17 @@ void _SnesPPURenderOBJ8(Uint8 *pLine8, SNMaskT *pLine,
 	while (--nObjLine >= 0)
 	{
 		const SnesRenderObj8T *pObj = pObjLine + nObjLine;
-		/* AURORA_SNES_OBJ_TRANSPARENT_ROW_ELIDE_V3_20260921
-		 * OPAQUE is now the validity byte for materialized row metadata.
-		 * Reject a transparent fetched row before touching X/palette/priority. */
-		const Uint8 *pObjData = pObj->uData;
-		const Uint32 uOpaque = pObjData[SNPPU_BGPLANE_OPAQUE];
-		if (!uOpaque)
-			continue;
-
-		/* AURORA_SAFE_CODE_PERF_V1_OBJ */
+		/* AURORA_SAFE_CODE_PERF_V1_OBJ
+		 * Immutable per-tile metadata kept local in the hot renderer. */
 		const Int32 iPosX = pObj->iPosX;
-		if (iPosX <= -8 || iPosX >= 256)
-			continue;
-
 		const Uint32 uPri = pObj->uPri;
 		const Uint32 uPal = pObj->uPal;
+		const Uint8 *pObjData = pObj->uData;
+		Uint32 uOpaque = pObjData[SNPPU_BGPLANE_OPAQUE];
+
+		if (!uOpaque || iPosX <= -8 || iPosX >= 256)
+			continue;
+
 		const SNMaskT *pPriorityMask = &PriorityMask[uPri];
 
 #if SNDBG_DEEP
@@ -201,44 +191,43 @@ void _SnesPPURenderOBJ8(Uint8 *pLine8, SNMaskT *pLine,
 			}
 			else
 			{
-				/* AURORA_SNES_OBJ_TRIPLE_HOTPATH_V1_20260920: one 64-bit logical span replaces the split-mask
-				 * reconstruction and every uMask1 conditional. Memory stays as
-				 * naturally aligned Uint32 words; only the mask arithmetic is
-				 * 64-bit, so no unaligned EE load/store is introduced. */
-				const Uint64 uSpan = (Uint64)uOpaque << uShift;
-				const Uint32 uSpan0 = uMask0;
-				const Uint32 uSpan1 = (Uint32)(uSpan >> 32);
-				const Uint32 uBlocked0 =
-					ObjMask.uMask32[iWord] |
-					pPriorityMask->uMask32[iWord];
-				const Uint32 uBlocked1 =
-					ObjMask.uMask32[iWord + 1] |
-					pPriorityMask->uMask32[iWord + 1];
-				const Uint64 uBlocked =
-					(Uint64)uBlocked0 | ((Uint64)uBlocked1 << 32);
-				const Uint64 uVisibleSpan = uSpan & ~uBlocked;
-				const Uint32 uVisible0 = (Uint32)uVisibleSpan;
-				const Uint32 uVisible1 = (Uint32)(uVisibleSpan >> 32);
+				Uint32 uInvShift = 32 - uShift;
+				Uint32 uMask1 = uOpaque >> uInvShift;
+				Uint32 uBlocked0 = ObjMask.uMask32[iWord];
+				Uint32 uBlocked1 =
+					uMask1 ? ObjMask.uMask32[iWord + 1] : 0;
 
-				ObjMask.uMask32[iWord] |= uSpan0;
-				ObjMask.uMask32[iWord + 1] |= uSpan1;
+				ObjMask.uMask32[iWord] |= uMask0;
+				if (uMask1)
+					ObjMask.uMask32[iWord + 1] |= uMask1;
+
+				uBlocked0 |= pPriorityMask->uMask32[iWord];
+				if (uMask1)
+					uBlocked1 |= pPriorityMask->uMask32[iWord + 1];
+
+				uMask0 &= ~uBlocked0;
+				uMask1 &= ~uBlocked1;
 
 				if (pAddSubMask)
 				{
 					if ((bAddSubMask & 1) &&
 					    ((uPal | bAddSubMask) & 0x4))
 					{
-						pAddSubMask->uMask32[iWord] |= uVisible0;
-						pAddSubMask->uMask32[iWord + 1] |= uVisible1;
+						pAddSubMask->uMask32[iWord] |= uMask0;
+						if (uMask1)
+							pAddSubMask->uMask32[iWord + 1] |= uMask1;
 					}
 					else
 					{
-						pAddSubMask->uMask32[iWord] &= ~uVisible0;
-						pAddSubMask->uMask32[iWord + 1] &= ~uVisible1;
+						pAddSubMask->uMask32[iWord] &= ~uMask0;
+						if (uMask1)
+							pAddSubMask->uMask32[iWord + 1] &= ~uMask1;
 					}
 				}
 
-				uVisible = (Uint32)(uVisibleSpan >> uShift) & 0xFFu;
+				uVisible = uMask0 >> uShift;
+				uVisible |= uMask1 << uInvShift;
+				/* AURORA_SNES_SAFE_PERF_V3_20260919: recomposed value is still a subset of 8-bit uOpaque. */
 			}
 
 #if SNDBG_DEEP
@@ -269,21 +258,14 @@ void _SnesPPURenderOBJ8(Uint8 *pLine8, SNMaskT *pLine,
 			}
 			else
 			{
-				/* AURORA_SNES_OBJ_TRIPLE_HOTPATH_V1_20260920: partial 8-pixel row, branchless byte select.
-				 * __builtin_memcpy keeps unaligned pDest8/pObjData legal while
-				 * exposing the fixed 8-byte size to GCC for inline lowering. */
-				Uint64 uDst64;
-				Uint64 uSrc64;
-				Uint64 uSelect64 = (*pObjByteMaskLookup)[uVisible];
-
-				uSelect64 |= uSelect64 << 1;
-				uSelect64 |= uSelect64 << 2;
-				uSelect64 |= uSelect64 << 4;
-
-				__builtin_memcpy(&uDst64, pDest8, sizeof(uDst64));
-				__builtin_memcpy(&uSrc64, pObjData, sizeof(uSrc64));
-				uDst64 = (uDst64 & ~uSelect64) | (uSrc64 & uSelect64);
-				__builtin_memcpy(pDest8, &uDst64, sizeof(uDst64));
+				if (uVisible & 0x01) pDest8[0] = pObjData[0];
+				if (uVisible & 0x02) pDest8[1] = pObjData[1];
+				if (uVisible & 0x04) pDest8[2] = pObjData[2];
+				if (uVisible & 0x08) pDest8[3] = pObjData[3];
+				if (uVisible & 0x10) pDest8[4] = pObjData[4];
+				if (uVisible & 0x20) pDest8[5] = pObjData[5];
+				if (uVisible & 0x40) pDest8[6] = pObjData[6];
+				if (uVisible & 0x80) pDest8[7] = pObjData[7];
 			}
 		} else
 		{

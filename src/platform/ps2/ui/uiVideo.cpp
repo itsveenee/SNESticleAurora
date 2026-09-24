@@ -555,9 +555,9 @@ void VideoSettingsLoad(void)
 	if (MemCardReadFile(path, (Uint8 *)&header, sizeof(header)) &&
 	    header.magic == VIDEOCFG_MAGIC)
 	{
-		if (header.version < VIDEOCFG_VERSION)
+		if (header.version < 16)
 		{
-			/* Old config intentionally ignored: retain all fresh defaults. */
+			/* Pre-v16 layouts are unsupported; retain fresh defaults. */
 			loaded = FALSE;
 		}
 		else if (header.version == VIDEOCFG_VERSION)

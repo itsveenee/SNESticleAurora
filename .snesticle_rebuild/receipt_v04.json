@@ -1,0 +1,11 @@
+{
+  "script": "v04",
+  "source_commit": "aa3d654cd4e836d54b93bfd064d028afb55a6c63",
+  "created_at": "20260923-214141",
+  "modified": [
+    "src/snes/core/sndma.cpp"
+  ],
+  "deleted": [],
+  "backup_dir": ".snesticle_rebuild/backups/v04/20260923-214141",
+  "note": "sndma.h intentionally kept current because it adds GetActiveHDMAMask()"
+}

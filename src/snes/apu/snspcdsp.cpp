@@ -7,7 +7,6 @@
 #include "platform/ps2/system/aurora_runtime_trace.h"
 /* AURORA_SNES_BINARY_TRACE_V6D_SPARSE_HIGHSIGNAL_20260918 */
 
-/* AURORA_CPU_SPC_DSP_HOST_WORK_REDUCTION_V3_20260920 */
 #define SNSPCDSP_DETERMINISMSAFE (0)
 #define SNSPCDSP_DEBUGPRINT (CODE_DEBUG && FALSE)
 
@@ -66,11 +65,6 @@ void SNSpcDsp::Write8(Uint32 uAddr, Uint8 uData)
 
 	m_Regs[uAddr] = uData;
 
-	/* Ordinary parameter writes have no immediate semantic side effect here.
-	 * Only $4C/$5C/$6C/$7C enter the special path below. */
-	if ((uAddr & 0x0Fu) != 0x0Cu || uAddr < 0x4Cu)
-		return;
-
 	switch (uAddr)
 	{
 	case SNSPCDSP_REG_FLG:
@@ -95,15 +89,10 @@ void SNSpcDsp::Write8(Uint32 uAddr, Uint8 uData)
 			ConDebug("kon: %02X\n", uData);
 #endif
 
+			for (iChannel=0; iChannel < SNSPCDSP_CHANNEL_NUM; iChannel++)
 			{
-				Uint32 uMask = uData;
-				iChannel = 0;
-				while (uMask)
-				{
-					if (uMask & 1u) KeyOn(iChannel);
-					uMask >>= 1;
-					iChannel++;
-				}
+				if ((uData>>iChannel)&1)
+					KeyOn(iChannel);
 			}
 		}
 		break;
@@ -115,15 +104,10 @@ void SNSpcDsp::Write8(Uint32 uAddr, Uint8 uData)
 		//ConDebug("koff: %02X\n", uData);
 		if (uData != 0)
 		{
+			for (iChannel=0; iChannel < SNSPCDSP_CHANNEL_NUM; iChannel++)
 			{
-				Uint32 uMask = uData;
-				iChannel = 0;
-				while (uMask)
-				{
-					if (uMask & 1u) KeyOff(iChannel);
-					uMask >>= 1;
-					iChannel++;
-				}
+				if ((uData>>iChannel)&1)
+					KeyOff(iChannel);
 			}
 		}
 		break;
@@ -187,15 +171,12 @@ Uint16 SNSpcDsp::GetSampleDir(Uint8 uSrcN, Uint32 uOffset)
 {
 	Uint16 uSampleDir;
 	Uint16 uData;
-	Uint8 *pSpan;
 
+	// get sample dir address
 	uSampleDir =  m_Regs[SNSPCDSP_REG_DIR] * 0x100 + uSrcN * 0x04;
 	uSampleDir+= uOffset;
 
-	pSpan = GetRAMSpan(uSampleDir, 2);
-	if (pSpan)
-		return (Uint16)((Uint16)pSpan[0] | ((Uint16)pSpan[1] << 8));
-
+	// S-DSP reads physical APURAM; 16-bit address bus wraps naturally.
 	uData = ReadRAM((Uint16)(uSampleDir + 0)) << 0;
 	uData|= ReadRAM((Uint16)(uSampleDir + 1)) << 8;
 	return uData;
@@ -254,8 +235,6 @@ Bool SNSpcDsp::EnqueueWrite(Uint32 uCycle, Uint32 uAddr, Uint8 uData)
 void SNSpcDsp::Sync(Uint32 uCycle)
 {
 	SNQueueElementT *pElement;
-
-	if (m_Queue.IsEmpty()) return;
 
 	// dequeue all pending writes  up to cycle time
 	while ( (pElement=m_Queue.Dequeue(uCycle)) != NULL)

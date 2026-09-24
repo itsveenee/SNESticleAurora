@@ -1817,14 +1817,6 @@ void PicoDriveBridge_SetSkipVideo(bool skip)
     s_SkipVideoNext = skip;
 }
 
-/* AURORA_NO_32X_ELF_V4_20260921
- * Public ABI shell retained for existing frontend call sites. The native 32X
- * core is not linked, so there is deliberately no state to arm or clean up. */
-void PicoDriveBridge_Set32xAudioSacrifice(bool sacrifice)
-{
-    (void)sacrifice;
-}
-
 /* AURORA_EXTREME_CD_VIDEO_FIRST_V1_20260830 */
 void PicoDriveBridge_SetCdAudioSafeWindow(bool allowed)
 {
@@ -1981,11 +1973,6 @@ enum
     PD_GS_CLUT_TBP_OFFSET = 0x580,
     PD_GS_T8_TBW          = 384
 };
-
-bool PicoDriveBridge_Is32X(void)
-{
-    return false;
-}
 
 /* AURORA_V4_11_CD_REALTIME_PACING_PCE_TOC_OFFSETS_20260830 */
 bool PicoDriveBridge_IsSegaCD(void)

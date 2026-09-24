@@ -1,0 +1,20 @@
+{
+  "composite": "src/snes/ppu/snppurender.cpp",
+  "files_ref32": [
+    "src/snes/ppu/snppublend_gs.cpp",
+    "src/snes/ppu/snppublend_gs.h",
+    "src/snes/ppu/snppuchrcache.h",
+    "src/snes/ppu/snppuobj.cpp",
+    "src/snes/ppu/snppurender8.cpp"
+  ],
+  "files_ref88": [
+    "src/platform/ps2/lowlevel/ps2mem.h",
+    "src/snes/ppu/snppu.cpp"
+  ],
+  "head": "07f1ed8c05b930c3a8554f3a1e472ac6dc0bfb1d",
+  "label": "v05_ppu_renderer_reference",
+  "ref32": "32a0cb56cfacbe03425695c0d80e71d46f0443f7",
+  "ref88": "88ac80f3e531bfbdea1aff2fea65386d6e18f004",
+  "render_ref": "11290a5577fd76c44baa8d00b057b0e89d754c33",
+  "time_unix": 1790210542
+}

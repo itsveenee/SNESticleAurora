@@ -1,0 +1,13 @@
+{
+  "script": "v02",
+  "source_commit": "aa3d654cd4e836d54b93bfd064d028afb55a6c63",
+  "created_at": "20260923-214141",
+  "modified": [
+    "src/snes/cpu/op65816.h",
+    "src/snes/cpu/op65816_mips.h",
+    "src/snes/cpu/sn65816.S",
+    "src/snes/cpu/sncpu_c.c"
+  ],
+  "deleted": [],
+  "backup_dir": ".snesticle_rebuild/backups/v02/20260923-214141"
+}

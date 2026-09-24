@@ -167,11 +167,6 @@ void SNPPURenderSetObjLimitMode(Uint8 uMode)
 SnesChrLookupT _SnesPPU_PlaneLookup[2] _ALIGN(32);
 Uint8 _SnesPPU_HFlipLookup[2][256] _ALIGN(32);
 
-#if CODE_PLATFORM == CODE_PS2
-/* AURORA_SNES_BG_LOOKUP_SCRATCHPAD_V2_20260920: only PlaneLookup[0] is published to scratchpad. */
-typedef char SNPPULookupScratchSizeCheck[
-    (sizeof(_SnesPPU_PlaneLookup[0]) == PS2MEM_SNES_LOOKUP_SIZE) ? 1 : -1];
-#endif
 
 static Bool _SnesPPU_bInitialized=FALSE;
 
@@ -216,13 +211,6 @@ static void _BuildPlaneLookup()
 		_SnesPPU_HFlipLookup[1][i] = _HFlipBits(i);
 	}
 
-#if CODE_PLATFORM == CODE_PS2
-	/* AURORA_SNES_BG_LOOKUP_SCRATCHPAD_V2_20260920
-	 * Build all tables in ordinary storage exactly as before, then publish
-	 * only PlaneLookup[0] once to the disjoint 14..16 KiB scratch region. */
-	memcpy((void *)PS2MEM_SNES_LOOKUP_ADDR,
-	       _SnesPPU_PlaneLookup[0], sizeof(_SnesPPU_PlaneLookup[0]));
-#endif
 }
 
 void _DrawMask(Uint32 *pDest, SNMaskT *pMask, Int32 nPixels)

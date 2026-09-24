@@ -34,24 +34,19 @@ struct SNPPUBlendColorCalibT
 
 class SNPPUBlendGS : public ISNPPUBlend
 {
-    /* AURORA_SNES_RENDERER_PERF_V8_GS_PINGPONG */
-    SNPPUDmaListT m_DmaList[2] _ALIGN(16);
-    SNPPUDmaListT m_DmaListWithPalette[2] _ALIGN(16);
-    SNPPUBlendInfoT *m_pDmaBlendInfo[2];
+    SNPPUDmaListT m_DmaList _ALIGN(16);
+    SNPPUDmaListT m_DmaListWithPalette _ALIGN(16);
+    SNPPUBlendInfoT *m_pDmaBlendInfo;
     Bool m_bPaletteDirty;
     Bool m_bAttribPalettesUploaded;
-    Bool m_bDmaListHasIntensity[2];
-	Bool m_bDmaListDirectMain[2];
-	Uint32 m_uDmaSlot;
-	Uint32 m_uLastDmaSlot;
+    Bool m_bDmaListHasIntensity;
+	Bool m_bDmaListDirectMain;
 	Uint32 m_uPaletteDirty[8];
 	Uint32 m_nPaletteDirty;
-	Uint32 m_uStagePaletteDirty[2][8];
-	Uint32 m_nStagePaletteDirty[2];
 
 	void MarkPaletteEntryDirty(Uint32 uAddr);
 	void MarkPaletteAllDirty();
-	Uint32 CopyDirtyPalette(PaletteT *pDest, const PaletteT *pSource, Uint32 uSlot);
+	Uint32 CopyDirtyPalette(PaletteT *pDest, const PaletteT *pSource);
 
 public:
     SNPPUBlendGS(Uint32 uVramAddr, Uint32 uOutAddr);

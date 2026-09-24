@@ -17,7 +17,6 @@ extern "C" {
 #include "platform/ps2/system/aurora_runtime_trace.h"
 
 #define SNESDMA_DEBUG 0
-/* AURORA_CPU_SPC_DSP_PPU_HOST_WORK_REDUCTION_V4_20260920_HDMA */
 
 static Uint8	_SNDma_MDMATransfer[8][4]=
 {
@@ -158,11 +157,8 @@ static _INLINE Bool SnesHDMATryQueuePPUWrite(
         if (uPortB == 0x04 || uPortB == 0x18 ||
             uPortB == 0x19 || uPortB == 0x22)
         {
-            /* HDMA is fixed at H=1104. CGRAM active-dot contention
-             * ended at H=1096, so only vertical VRAM/OAM ownership remains. */
             uMemoryAccessFlags =
-                (uLine <= pPPU->GetFrameVisibleLineCount())
-                    ? SNESPPU_MEMBUS_VRAM_OAM_BUSY : 0;
+                pPPU->BuildMemoryAccessFlags(uLine, SNES_HDMA_START_CYCLE);
         }
         return pPPU->EnqueueWrite(
             uLine, 0x2100u | (Uint32)uPortB, uData, FALSE,
@@ -1091,31 +1087,20 @@ void SnesDMAC::ProcessHDMACh(Uint32 uChan, Uint32 uLine)
 {
 	SnesDMAChT *pChan;
 	Uint8 *pTransfer;
-	Uint8 uDmap;
 	Uint32 uMode;
 	Uint32 nBytes;
-	Uint32 uHClock;
-	Uint32 uTableBank;
-	Uint32 uIndirectBank;
-	Bool bIndirect;
-	Bool bReverse;
 
 	assert(uChan < SNESDMAC_CHANNEL_NUM);
 	pChan = &m_Channels[uChan];
-	uDmap = pChan->dmapx;
-	bIndirect = (uDmap & 0x40u) ? TRUE : FALSE;
-	bReverse = (uDmap & 0x80u) ? TRUE : FALSE;
-	uTableBank = (Uint32)pChan->a1bx << 16;
-	uIndirectBank = (Uint32)pChan->dasbx << 16;
-	uHClock = (Uint32)SNCPUGetCounter(m_pCPU, SNCPU_COUNTER_LINE);
-	/* MDMA cancellation/phase reset are performed by ProcessHDMA() before
-	 * this private helper is entered. */
+	m_MDMAEnable &= (Uint8)~(1 << uChan);  // HDMA owns/cancels DMA on this channel
+	m_MDMAChannelStartup &= (Uint8)~(1 << uChan);
+	m_MDMAPhase[uChan] = 0;
 	/* AURORA_V82_LOST_VIKINGS_HDMA_FIXED_DECREMENT
 	 * The Lost Vikings is a canonical compatibility case here: DMAP bits
 	 * 3 (fixed) and 4 (decrement) affect MDMA only. HDMA direct A2A and
 	 * indirect DAS addresses ALWAYS advance after each transferred byte.
 	 * Deliberately do not call _SNDma_MDMAInc from this function. */
-	uMode = uDmap & 7u;
+	uMode = pChan->dmapx & 7;
 	nBytes = _SNDma_HDMABytes[uMode];
 	pTransfer = _SNDma_MDMATransfer[uMode];
 
@@ -1125,12 +1110,12 @@ void SnesDMAC::ProcessHDMACh(Uint32 uChan, Uint32 uLine)
 		Uint8 uPortB = (Uint8)(pChan->bbadx + pTransfer[i]);
 		Uint8 uData;
 
-		if (bIndirect)
-			uAddrA = uIndirectBank | pChan->dasx;
+		if (pChan->dmapx & 0x40)
+			uAddrA = ((Uint32)pChan->dasbx << 16) | pChan->dasx;
 		else
-			uAddrA = uTableBank | pChan->a2ax;
+			uAddrA = ((Uint32)pChan->a1bx << 16) | pChan->a2ax;
 
-		if (bReverse)
+		if (pChan->dmapx & 0x80)
 		{
 			uData = SnesDMAReadB(m_pCPU, uAddrA, uPortB);
 			SnesDMAWriteA(m_pCPU, uAddrA, uData);
@@ -1145,7 +1130,7 @@ void SnesDMAC::ProcessHDMACh(Uint32 uChan, Uint32 uLine)
 			 * remains below, unchanged. */
 			if (!SnesHDMATryQueuePPUWrite(
 			        m_pPPU, uLine,
-			        uHClock,
+			        (Uint32)SNCPUGetCounter(m_pCPU, SNCPU_COUNTER_LINE),
 			        uPortB, uData))
 			{
 				SnesDMAWriteB(m_pCPU, uAddrA, uPortB, uData);
@@ -1165,13 +1150,11 @@ void SnesDMAC::ProcessHDMACh(Uint32 uChan, Uint32 uLine)
 #endif
 		}
 
-		if (bIndirect)
+		if (pChan->dmapx & 0x40)
 			pChan->dasx++;
 		else
 			pChan->a2ax++;
 		SNCPUConsumeCycles(m_pCPU, SNCPU_CYCLE_SLOW);
-		/* Counter[LINE]-Cycles advances by exactly the cycles just consumed. */
-		uHClock += SNCPU_CYCLE_SLOW;
 	}
 }
 
@@ -1242,12 +1225,6 @@ void SnesDMAC::ProcessHDMA(Uint32 uLine)
 	   channel's counter/table phase.  Interleaving those phases changes both
 	   B-bus side effects and the point at which IRQ/NMI can be observed. */
 	SNCPUConsumeCycles(m_pCPU, SNCPU_CYCLE_SLOW);
-
-	/* Every active HDMA channel cancels pending MDMA before testing its
-	 * transfer latch. Clearing the same active mask in bulk is identical. */
-	m_MDMAEnable &= (Uint8)~uActive;
-	m_MDMAChannelStartup &= (Uint8)~uActive;
-
 	for (Uint32 uChan = 0; uChan < SNESDMAC_CHANNEL_NUM; uChan++)
 	{
 		Uint8 uMask = (Uint8)(1 << uChan);
@@ -1255,8 +1232,10 @@ void SnesDMAC::ProcessHDMA(Uint32 uLine)
 			continue;
 
 		/* AURORA_V7_HDMA_CANCELS_MDMA_ON_SKIP
-		 * Bulk MDMA/startup cancellation was performed above for the same
-		 * active mask. Keep the per-channel phase reset unchanged. */
+		 * Hardware cancels MDMA on an active HDMA channel before testing
+		 * hdmaDoTransfer.  Repeat/skip lines therefore cancel it too. */
+		m_MDMAEnable &= (Uint8)~uMask;
+		m_MDMAChannelStartup &= (Uint8)~uMask;
 		m_MDMAPhase[uChan] = 0;
 
 		if (m_HDMADoTransfer & uMask)
@@ -1307,9 +1286,8 @@ void SnesDMAC::ProcessHDMA(Uint32 uLine)
 			if (pChan->dmapx & 0x40)
 			{
 				Uint8 uHigherMask = (Uint8)~((1u << (uChan + 1)) - 1u);
-				/* Higher channels have not yet run their table phase, so the
-				 * start-of-line active snapshot is exactly the same set here. */
-				Bool bLastActive = !(uActive & uHigherMask);
+				Bool bLastActive =
+					!((m_HDMAEnable & ~m_HDMAEnded) & uHigherMask);
 				Uint8 uLow;
 
 				uLow = SnesHDMARead8(m_pCPU,

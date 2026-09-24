@@ -3,8 +3,6 @@
 #ifndef _SNSPCMIX_H
 #define _SNSPCMIX_H
 
-/* AURORA_CPU_SPC_DSP_HOST_WORK_REDUCTION_V3_20260920_HEADER */
-
 #if CODE_PLATFORM == CODE_PS2
 //#define SNSPCDSP_MAXSAMPLES 400
 //#define SNSPCDSP_BUFFERSIZE 400
@@ -77,8 +75,8 @@ class    SNSpcDspMixFull : public SNSpcDspMix
 	 * Separate PMON path: ordinary voices keep the proven fast path. */
 	Int32	OutputSampleModulated(Int32 iChannel, Int16 *pOut, Uint16 *pFrac,
 			const Int16 *pPitchMod, Int32 nSamples, Int32 nSampleRate);
-	Int32   OutputNoise(Int16 *pOut, Uint16 *pFrac, Int32 nSamples, Uint32 uRate);
-	void	FilterEcho(Int16 *pLeftEcho, Int16 *pRightEcho, Int32 nSamples, Int32 nSampleRate, Bool bEchoWrite, Bool bEchoInputZero);
+	Int32   OutputNoise(Int16 *pOut, Uint16 *pFrac, Int32 nSamples, Int32 nSampleRate);
+	void	FilterEcho(Int16 *pLeftEcho, Int16 *pRightEcho, Int32 nSamples, Int32 nSampleRate, Bool bEchoWrite);
 public:
 	void	Reset();
 	void	Mix(class CMixBuffer *pOutBuffer);

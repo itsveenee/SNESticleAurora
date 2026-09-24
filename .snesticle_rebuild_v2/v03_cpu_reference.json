@@ -1,0 +1,12 @@
+{
+  "files": [
+    "src/snes/cpu/op65816.h",
+    "src/snes/cpu/op65816_mips.h",
+    "src/snes/cpu/sn65816.S",
+    "src/snes/cpu/sncpu_c.c"
+  ],
+  "head": "07f1ed8c05b930c3a8554f3a1e472ac6dc0bfb1d",
+  "label": "v03_cpu_reference",
+  "ref": "88ac80f3e531bfbdea1aff2fea65386d6e18f004",
+  "time_unix": 1790210541
+}

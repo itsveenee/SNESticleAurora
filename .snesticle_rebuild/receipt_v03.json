@@ -1,0 +1,17 @@
+{
+  "script": "v03",
+  "source_commit": "aa3d654cd4e836d54b93bfd064d028afb55a6c63",
+  "created_at": "20260923-214141",
+  "modified": [
+    "src/snes/ppu/snppu.cpp",
+    "src/snes/ppu/snppubg.cpp",
+    "src/snes/ppu/snppublend_gs.cpp",
+    "src/snes/ppu/snppuchrcache.h",
+    "src/snes/ppu/snppuobj.cpp",
+    "src/snes/ppu/snppurender.cpp",
+    "src/snes/ppu/snppurender8.cpp"
+  ],
+  "deleted": [],
+  "backup_dir": ".snesticle_rebuild/backups/v03/20260923-214141",
+  "note": "public PPU headers intentionally remain current"
+}

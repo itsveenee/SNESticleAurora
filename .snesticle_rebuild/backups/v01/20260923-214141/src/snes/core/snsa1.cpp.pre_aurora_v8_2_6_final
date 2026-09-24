@@ -1,0 +1,1246 @@
+#include <string.h>
+#include "types.h"
+#include "snsa1.h"
+#include "snes.h"
+#include "sncpudefs.h"
+
+/* AURORA_SA1_V1_REFERENCE_LOGIC_20260902
+ * Behavioural reference: reference emulator sa1.cpp / sa1cpu.cpp.
+ * CPU execution itself is NOT copied: the Aurora SNCpuT core is instantiated
+ * a second time.  One S-CPU master-clock slice gives SA-1 a 3x cycle budget,
+ * matching reference emulator's SA1.Cycles < CPU.Cycles * 3 scheduler relationship.
+ */
+
+static Uint16 _SA1LE16(const Uint8 *p)
+{
+    return (Uint16)p[0] | ((Uint16)p[1] << 8);
+}
+
+SNSA1::SNSA1()
+{
+    memset(this, 0, sizeof(*this));
+    SNCPUNew(&m_Cpu);
+    m_Cpu.pUserData = this;
+}
+
+SNSA1::~SNSA1()
+{
+    SNCPUDelete(&m_Cpu);
+}
+
+Bool SNSA1::Attach(SnesSystem *pOwner,
+                   const Uint8 *pRom, Uint32 nRomBytes,
+                   Uint8 *pBWRAM, Uint32 nBWRAMBytes,
+                   Bool bMapMainRom, Bool bDonorBWRAM)
+{
+    if (!pOwner || !pRom || !nRomBytes)
+        return FALSE;
+
+    m_pOwner = pOwner;
+    m_pRom = pRom;
+    m_nRomBytes = nRomBytes;
+    m_pBWRAM = pBWRAM;
+    m_nBWRAMBytes = nBWRAMBytes;
+    if (m_nBWRAMBytes > 0x40000u)
+        m_nBWRAMBytes = 0x40000u;
+    m_bMapMainRom = bMapMainRom;
+    m_bDonorBWRAM = bDonorBWRAM;
+    m_bActive = TRUE;
+
+    Reset();
+    MapSA1CPU();
+    return TRUE;
+}
+
+void SNSA1::Detach()
+{
+    if (m_pOwner)
+        m_pOwner->SetSA1IRQ(FALSE);
+    m_bActive = FALSE;
+    m_bMapMainRom = FALSE;
+    m_bDonorBWRAM = FALSE;
+    m_pOwner = NULL;
+    m_pRom = NULL;
+    m_nRomBytes = 0;
+    m_pBWRAM = NULL;
+    m_nBWRAMBytes = 0;
+}
+
+void SNSA1::Reset()
+{
+    if (!m_bActive)
+        return;
+
+    memset(m_Reg, 0, sizeof(m_Reg));
+    memset(m_IRAM, 0, sizeof(m_IRAM));
+    memset(m_CharData, 0, sizeof(m_CharData));
+
+    /* Same power-on values used by reference emulator SA-1 init. */
+    m_Reg[0x00] = 0x20; /* CCNT: SA-1 held in reset */
+    m_Reg[0x20] = 0x00;
+    m_Reg[0x21] = 0x01;
+    m_Reg[0x22] = 0x02;
+    m_Reg[0x23] = 0x03;
+    m_Reg[0x28] = 0x0F;
+
+    m_uOp1 = m_uOp2 = 0;
+    m_uArithmeticOp = 0;
+    m_uSum = 0;
+    m_bArithmeticOverflow = FALSE;
+    m_uVariableBitPos = 0;
+    m_uCharIndex = 0;
+    m_bCharDMA = FALSE;
+    m_uBitmapFormat = 4;
+    m_uHCounter = m_uVCounter = m_uPrevHCounter = 0;
+    m_uLatchedHCounter = m_uLatchedVCounter = 0;
+    m_bTimerLastState = FALSE;
+
+    SNCPUResetCounters(&m_Cpu);
+    SNCPUResetRegs(&m_Cpu);
+    m_Cpu.uSignal = 0;
+    m_Cpu.uNmiDmaDelay = 0;
+    m_Cpu.Regs.rE = 1;
+    m_Cpu.Regs.rP = SNCPU_FLAG_M | SNCPU_FLAG_X | SNCPU_FLAG_I;
+    m_Cpu.Regs.rS.w = 0x01FF;
+    m_Cpu.Regs.rPC = 0;
+    m_Cpu.uMDR = 0;
+
+    UpdateMainIRQ();
+}
+
+Uint32 SNSA1::MirrorRomOffset(Uint32 uPos) const
+{
+    Uint32 uMask;
+    if (!m_nRomBytes || uPos < m_nRomBytes)
+        return m_nRomBytes ? uPos : 0;
+
+    uMask = 0x80000000u;
+    while (uMask && !(uPos & uMask))
+        uMask >>= 1;
+    if (!uMask)
+        return 0;
+    if (m_nRomBytes <= (uPos & uMask))
+        return MirrorRomOffset(uPos - uMask);
+
+    /* Aurora's cartridge mirror rule, written iteratively for this object. */
+    {
+        Uint32 uBase = uMask;
+        Uint32 uSize = m_nRomBytes - uMask;
+        Uint32 uSub = uPos - uMask;
+        while (uSize && uSub >= uSize)
+        {
+            Uint32 m = 0x80000000u;
+            while (m && !(uSub & m)) m >>= 1;
+            if (!m) { uSub = 0; break; }
+            if (uSize <= (uSub & m)) uSub -= m;
+            else { uBase += m; uSize -= m; uSub -= m; }
+        }
+        return uBase + uSub;
+    }
+}
+
+Uint32 SNSA1::RomOffset(Uint8 uBank, Uint16 uAddr) const
+{
+    Uint32 uSegment;
+    Uint32 uWithin;
+    Uint32 uGroup;
+
+    if (uBank >= 0xC0)
+    {
+        uGroup = (uBank - 0xC0) >> 4;
+        uSegment = m_Reg[0x20 + uGroup] & 7;
+        uWithin = ((Uint32)(uBank & 0x0F) << 16) | uAddr;
+        return MirrorRomOffset(uSegment * 0x100000u + uWithin);
+    }
+
+    if (uAddr >= 0x8000 &&
+        (uBank <= 0x3F || (uBank >= 0x80 && uBank <= 0xBF)))
+    {
+        Uint32 uIndex;
+        if (uBank <= 0x1F) { uGroup = 0; uIndex = uBank; }
+        else if (uBank <= 0x3F) { uGroup = 1; uIndex = uBank - 0x20; }
+        else if (uBank <= 0x9F) { uGroup = 2; uIndex = uBank - 0x80; }
+        else { uGroup = 3; uIndex = uBank - 0xA0; }
+
+        uSegment = (m_Reg[0x20 + uGroup] & 0x80)
+            ? (m_Reg[0x20 + uGroup] & 7) : uGroup;
+        uWithin = uIndex * 0x8000u + (uAddr & 0x7FFFu);
+        return MirrorRomOffset(uSegment * 0x100000u + uWithin);
+    }
+
+    return MirrorRomOffset(((Uint32)(uBank & 0x7F) << 15) |
+                           (uAddr & 0x7FFFu));
+}
+
+void SNSA1::MapRomPage(SNCpuT *pCpu, Uint32 uBus, Bool bMainCpu)
+{
+    Uint8 uBank = (Uint8)(uBus >> 16);
+    Uint16 uAddr = (Uint16)uBus;
+    Uint32 uOff = RomOffset(uBank, uAddr);
+    Uint32 uEnd = RomOffset(uBank, (Uint16)(uAddr + 0x1FFF));
+
+    if (m_pRom && m_nRomBytes && uEnd == uOff + 0x1FFFu &&
+        uOff + 0x2000u <= m_nRomBytes)
+    {
+        SNCPUSetBank(pCpu, uBus, 0x2000, (Uint8 *)(m_pRom + uOff), FALSE);
+    }
+    else
+    {
+        if (bMainCpu)
+            SNCPUSetTrap(pCpu, uBus, 0x2000,
+                         SnesSystem::ReadSA1ROM, SnesSystem::WriteSA1ROM);
+        else
+            SNCPUSetTrap(pCpu, uBus, 0x2000, ReadCPU, WriteCPU);
+    }
+
+    /* SA-1 ROM fetches use the fast 10.74 MHz execution domain in this V1;
+       BW-RAM separately receives the 2-cycle penalty used by reference emulator. */
+    SNCPUSetMemSpeed(pCpu, uBus, 0x2000, SNCPU_CYCLE_FAST);
+}
+
+void SNSA1::MapRomWindows(SNCpuT *pCpu, Bool bMainCpu)
+{
+    Uint32 uBank, uAddr;
+    for (uBank = 0; uBank <= 0x3F; ++uBank)
+        for (uAddr = 0x8000; uAddr < 0x10000; uAddr += 0x2000)
+            MapRomPage(pCpu, (uBank << 16) | uAddr, bMainCpu);
+    for (uBank = 0x80; uBank <= 0xBF; ++uBank)
+        for (uAddr = 0x8000; uAddr < 0x10000; uAddr += 0x2000)
+            MapRomPage(pCpu, (uBank << 16) | uAddr, bMainCpu);
+    for (uBank = 0xC0; uBank <= 0xFF; ++uBank)
+        for (uAddr = 0; uAddr < 0x10000; uAddr += 0x2000)
+            MapRomPage(pCpu, (uBank << 16) | uAddr, bMainCpu);
+}
+
+void SNSA1::MapSA1CPU()
+{
+    Uint32 uBank;
+    if (!m_bActive)
+        return;
+
+    SNCPUSetTrap(&m_Cpu, 0, SNCPU_MEM_SIZE, ReadCPU, WriteCPU);
+    SNCPUSetMemSpeed(&m_Cpu, 0, SNCPU_MEM_SIZE, SNCPU_CYCLE_FAST);
+
+    MapRomWindows(&m_Cpu, FALSE);
+
+    /* BW-RAM is a two-SA-1-cycle region in reference emulator. */
+    for (uBank = 0x40; uBank <= 0x5F; ++uBank)
+        SNCPUSetMemSpeed(&m_Cpu, uBank << 16, 0x10000, 12);
+    for (uBank = 0x60; uBank <= 0x7F; ++uBank)
+        SNCPUSetMemSpeed(&m_Cpu, uBank << 16, 0x10000, 12);
+    for (uBank = 0; uBank <= 0x3F; ++uBank)
+    {
+        SNCPUSetMemSpeed(&m_Cpu, (uBank << 16) | 0x6000, 0x2000, 12);
+        SNCPUSetMemSpeed(&m_Cpu, ((uBank | 0x80) << 16) | 0x6000, 0x2000, 12);
+    }
+    SNCPUMirror24BitBus(&m_Cpu);
+}
+
+void SNSA1::MapMainCPU(SNCpuT *pMainCpu)
+{
+    Uint32 uBank, uAddr;
+    if (!m_bActive || !pMainCpu)
+        return;
+
+    if (m_bMapMainRom)
+        MapRomWindows(pMainCpu, TRUE);
+
+    /* S-CPU BW-RAM window $6000-$7FFF. CC1 needs trapped reads. */
+    for (uBank = 0; uBank <= 0x3F; ++uBank)
+    {
+        Uint32 a = (uBank << 16) | 0x6000;
+        Uint32 b = ((uBank | 0x80) << 16) | 0x6000;
+        SNCPUSetTrap(pMainCpu, a, 0x2000,
+                     SnesSystem::ReadSA1BWRAM, SnesSystem::WriteSA1BWRAM);
+        SNCPUSetTrap(pMainCpu, b, 0x2000,
+                     SnesSystem::ReadSA1BWRAM, SnesSystem::WriteSA1BWRAM);
+        SNCPUSetMemSpeed(pMainCpu, a, 0x2000, SNCPU_CYCLE_SLOW);
+        SNCPUSetMemSpeed(pMainCpu, b, 0x2000, SNCPU_CYCLE_SLOW);
+    }
+
+    /* Linear BW-RAM $40-$4F. Keep writes trapped for protection/dirty state. */
+    for (uBank = 0x40; uBank <= 0x4F; ++uBank)
+    {
+        for (uAddr = 0; uAddr < 0x10000; uAddr += 0x2000)
+        {
+            Uint32 bus = (uBank << 16) | uAddr;
+            Uint32 off = ((uBank & 3u) << 16) | uAddr;
+            SNCPUSetTrap(pMainCpu, bus, 0x2000,
+                         SnesSystem::ReadSA1BWRAM, SnesSystem::WriteSA1BWRAM);
+            if (m_pBWRAM && m_nBWRAMBytes >= 0x2000 &&
+                (off % m_nBWRAMBytes) + 0x2000 <= m_nBWRAMBytes)
+                SNCPUSetBank(pMainCpu, bus, 0x2000,
+                             m_pBWRAM + (off % m_nBWRAMBytes), FALSE);
+            SNCPUSetMemSpeed(pMainCpu, bus, 0x2000, SNCPU_CYCLE_SLOW);
+        }
+    }
+
+    SNCPUMirror24BitBus(pMainCpu);
+}
+
+Uint32 SNSA1::MainBWRAMOffset(Uint32 uAddr, Bool *pOK) const
+{
+    Uint8 bank = (Uint8)(uAddr >> 16);
+    Uint16 addr = (Uint16)uAddr;
+    if (pOK) *pOK = FALSE;
+    if (!m_nBWRAMBytes)
+        return 0;
+
+    if ((bank <= 0x3F || (bank >= 0x80 && bank <= 0xBF)) &&
+        addr >= 0x6000 && addr <= 0x7FFF)
+    {
+        Uint32 off = (Uint32)(m_Reg[0x24] & 0x1F) * 0x2000u +
+                     (addr - 0x6000u);
+        if (pOK) *pOK = TRUE;
+        return off % m_nBWRAMBytes;
+    }
+    if (bank >= 0x40 && bank <= 0x4F)
+    {
+        Uint32 off = ((Uint32)(bank & 3) << 16) | addr;
+        if (pOK) *pOK = TRUE;
+        return off % m_nBWRAMBytes;
+    }
+    return 0;
+}
+
+Uint32 SNSA1::SA1BWRAMOffset(Uint32 uAddr, Bool *pOK, Bool *pBitmap) const
+{
+    Uint8 bank = (Uint8)(uAddr >> 16);
+    Uint16 addr = (Uint16)uAddr;
+    if (pOK) *pOK = FALSE;
+    if (pBitmap) *pBitmap = FALSE;
+    if (!m_nBWRAMBytes)
+        return 0;
+
+    if ((bank <= 0x3F || (bank >= 0x80 && bank <= 0xBF)) &&
+        addr >= 0x6000 && addr <= 0x7FFF)
+    {
+        Uint32 local = addr - 0x6000u;
+        if (m_Reg[0x25] & 0x80)
+        {
+            Uint32 base = (Uint32)(m_Reg[0x25] & 0x7F) * 0x2000u / 4u;
+            if (pOK) *pOK = TRUE;
+            if (pBitmap) *pBitmap = TRUE;
+            return base + local; /* pixel address relative to selected base */
+        }
+        if (pOK) *pOK = TRUE;
+        return ((Uint32)(m_Reg[0x25] & 0x1F) * 0x2000u + local) %
+               m_nBWRAMBytes;
+    }
+
+    if (bank >= 0x40 && bank <= 0x5F)
+    {
+        if (pOK) *pOK = TRUE;
+        return ((((Uint32)bank & 3u) << 16) | addr) % m_nBWRAMBytes;
+    }
+
+    if (bank >= 0x60 && bank <= 0x7F)
+    {
+        if (pOK) *pOK = TRUE;
+        if (pBitmap) *pBitmap = TRUE;
+        return (uAddr & 0x1FFFFFu) - 0x600000u; /* virtual pixel address */
+    }
+    return 0;
+}
+
+Uint8 SNSA1::ReadBWRAMLinear(Uint32 uOffset, Uint8 uOpenBus) const
+{
+    if (!m_pBWRAM || !m_nBWRAMBytes)
+        return uOpenBus;
+    return m_pBWRAM[uOffset % m_nBWRAMBytes];
+}
+
+Bool SNSA1::BWRAMWriteProtected(Uint32 uOffset) const
+{
+    Uint32 limit;
+    if ((m_Reg[0x26] & 0x80) || (m_Reg[0x27] & 0x80))
+        return FALSE;
+    limit = 0x100u << (m_Reg[0x28] & 0x0F);
+    return ((uOffset & 0x3FFFFu) < limit) ? TRUE : FALSE;
+}
+
+void SNSA1::MarkBWRAMDirty()
+{
+    if (m_pOwner)
+        m_pOwner->MarkSA1BWRAMDirty();
+}
+
+void SNSA1::WriteBWRAMLinear(Uint32 uOffset, Uint8 uData)
+{
+    if (!m_pBWRAM || !m_nBWRAMBytes)
+        return;
+    uOffset %= m_nBWRAMBytes;
+    if (BWRAMWriteProtected(uOffset))
+        return;
+    m_pBWRAM[uOffset] = uData;
+    MarkBWRAMDirty();
+}
+
+Uint8 SNSA1::ReadBitmap(Uint32 uPixelAddr, Uint8 uOpenBus) const
+{
+    Uint32 byteOff, shift;
+    if (!m_pBWRAM || !m_nBWRAMBytes)
+        return uOpenBus;
+    if (m_uBitmapFormat == 2)
+    {
+        byteOff = (uPixelAddr >> 2) % m_nBWRAMBytes;
+        shift = (uPixelAddr & 3) << 1;
+        return (m_pBWRAM[byteOff] >> shift) & 3;
+    }
+    byteOff = (uPixelAddr >> 1) % m_nBWRAMBytes;
+    shift = (uPixelAddr & 1) << 2;
+    return (m_pBWRAM[byteOff] >> shift) & 15;
+}
+
+void SNSA1::WriteBitmap(Uint32 uPixelAddr, Uint8 uData)
+{
+    Uint32 byteOff, shift;
+    Uint8 mask;
+    if (!m_pBWRAM || !m_nBWRAMBytes)
+        return;
+    if (m_uBitmapFormat == 2)
+    {
+        byteOff = (uPixelAddr >> 2) % m_nBWRAMBytes;
+        shift = (uPixelAddr & 3) << 1;
+        mask = (Uint8)(3u << shift);
+        m_pBWRAM[byteOff] = (Uint8)((m_pBWRAM[byteOff] & ~mask) |
+                              ((uData & 3u) << shift));
+    }
+    else
+    {
+        byteOff = (uPixelAddr >> 1) % m_nBWRAMBytes;
+        shift = (uPixelAddr & 1) << 2;
+        mask = (Uint8)(15u << shift);
+        m_pBWRAM[byteOff] = (Uint8)((m_pBWRAM[byteOff] & ~mask) |
+                              ((uData & 15u) << shift));
+    }
+    /* reference emulator/ares protection applies to linear BW-RAM, not bitmap writes. */
+    MarkBWRAMDirty();
+}
+
+Bool SNSA1::IRAMWriteAllowed(Bool bSA1, Uint32 uOffset) const
+{
+    Uint8 reg = m_Reg[bSA1 ? 0x2A : 0x29];
+    Uint8 bit = (Uint8)(1u << ((uOffset & 0x7FFu) >> 8));
+    return (reg & bit) ? TRUE : FALSE;
+}
+
+Uint8 SNSA1::ReadMainIRAM(Uint16 uAddr, Uint8 uOpenBus) const
+{
+    if (!m_bActive || uAddr < 0x3000 || uAddr > 0x37FF)
+        return uOpenBus;
+    return m_IRAM[uAddr & 0x7FF];
+}
+
+void SNSA1::WriteMainIRAM(Uint16 uAddr, Uint8 uData)
+{
+    Uint32 off;
+    if (!m_bActive || uAddr < 0x3000 || uAddr > 0x37FF)
+        return;
+    off = uAddr & 0x7FF;
+    if (IRAMWriteAllowed(FALSE, off))
+        m_IRAM[off] = uData;
+}
+
+Uint8 SNSA1::ReadCC1(Uint32 bwoffset)
+{
+    Uint32 charmask, bpp, bpl, tile, ty, tx, bwaddr, dsa, dda;
+    Uint32 y, x, byte;
+    Int32 dmacb = m_Reg[0x31] & 3;
+    Int32 dmasize = (m_Reg[0x31] >> 2) & 7;
+    if (dmacb > 2) dmacb = 2;
+    if (dmasize > 5) dmasize = 5;
+
+    dsa = (Uint32)m_Reg[0x32] | ((Uint32)m_Reg[0x33] << 8) |
+          ((Uint32)m_Reg[0x34] << 16);
+    dda = (Uint32)m_Reg[0x35] | ((Uint32)m_Reg[0x36] << 8);
+    charmask = (1u << (6 - dmacb)) - 1u;
+
+    if ((bwoffset & charmask) == 0 && m_nBWRAMBytes)
+    {
+        bpp = 2u << (2 - dmacb);
+        bpl = (8u << dmasize) >> dmacb;
+        tile = ((bwoffset - dsa) % m_nBWRAMBytes) >> (6 - dmacb);
+        ty = tile >> dmasize;
+        tx = tile & ((1u << dmasize) - 1u);
+        bwaddr = dsa + ty * 8u * bpl + tx * bpp;
+
+        for (y = 0; y < 8; ++y)
+        {
+            unsigned long long bits = 0;
+            Uint8 out[8];
+            memset(out, 0, sizeof(out));
+            for (byte = 0; byte < bpp; ++byte)
+                bits |= (unsigned long long)ReadBWRAMLinear(bwaddr + byte, 0) << (byte << 3);
+            bwaddr += bpl;
+            for (x = 0; x < 8; ++x)
+            {
+                out[0] |= (Uint8)((bits & 1u) << (7 - x)); bits >>= 1;
+                out[1] |= (Uint8)((bits & 1u) << (7 - x)); bits >>= 1;
+                if (dmacb != 2)
+                {
+                    out[2] |= (Uint8)((bits & 1u) << (7 - x)); bits >>= 1;
+                    out[3] |= (Uint8)((bits & 1u) << (7 - x)); bits >>= 1;
+                    if (dmacb != 1)
+                    {
+                        out[4] |= (Uint8)((bits & 1u) << (7 - x)); bits >>= 1;
+                        out[5] |= (Uint8)((bits & 1u) << (7 - x)); bits >>= 1;
+                        out[6] |= (Uint8)((bits & 1u) << (7 - x)); bits >>= 1;
+                        out[7] |= (Uint8)((bits & 1u) << (7 - x)); bits >>= 1;
+                    }
+                }
+            }
+            for (byte = 0; byte < bpp; ++byte)
+            {
+                Uint32 p = dda + (y << 1) + ((byte & 6u) << 3) + (byte & 1u);
+                m_IRAM[p & 0x7FF] = out[byte];
+            }
+        }
+    }
+    return m_IRAM[(dda + (bwoffset & charmask)) & 0x7FF];
+}
+
+Uint8 SNSA1::ReadMainBWRAM(Uint32 uAddr, Uint8 uOpenBus)
+{
+    Bool ok = FALSE;
+    Uint32 off = MainBWRAMOffset(uAddr, &ok);
+    Uint16 a = (Uint16)uAddr;
+    if (!ok)
+        return uOpenBus;
+    if (m_bCharDMA && a >= 0x6000 && a <= 0x7FFF)
+        return ReadCC1(off);
+    return ReadBWRAMLinear(off, uOpenBus);
+}
+
+void SNSA1::WriteMainBWRAM(Uint32 uAddr, Uint8 uData)
+{
+    Bool ok = FALSE;
+    Uint32 off = MainBWRAMOffset(uAddr, &ok);
+    if (ok)
+        WriteBWRAMLinear(off, uData);
+}
+
+Uint8 SNSA1::ReadMainROM(Uint32 uAddr, Uint8 uOpenBus) const
+{
+    if (!m_bActive || !m_pRom || !m_nRomBytes)
+        return uOpenBus;
+    return m_pRom[RomOffset((Uint8)(uAddr >> 16), (Uint16)uAddr)];
+}
+
+Uint8 SNCPU_TRAPFUNC SNSA1::ReadCPU(SNCpuT *pCpu, Uint32 uAddr)
+{
+    SNSA1 *p = (SNSA1 *)pCpu->pUserData;
+    Uint8 v = p ? p->ReadBus(uAddr, pCpu->uMDR) : pCpu->uMDR;
+    pCpu->uMDR = v;
+    return v;
+}
+
+void SNCPU_TRAPFUNC SNSA1::WriteCPU(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData)
+{
+    SNSA1 *p = (SNSA1 *)pCpu->pUserData;
+    pCpu->uMDR = uData;
+    if (p) p->WriteBus(uAddr, uData);
+}
+
+Uint8 SNSA1::ReadBus(Uint32 uAddr, Uint8 uOpenBus)
+{
+    Uint8 bank = (Uint8)(uAddr >> 16);
+    Uint16 addr = (Uint16)uAddr;
+    Bool ok = FALSE, bitmap = FALSE;
+    Uint32 off;
+
+    if (bank <= 0x3F || (bank >= 0x80 && bank <= 0xBF))
+    {
+        if (addr <= 0x07FF) return m_IRAM[addr & 0x7FF];
+        if (addr >= 0x2200 && addr <= 0x23FF)
+        {
+            if (addr >= 0x2301 && addr <= 0x230D)
+                return ReadRegister(addr, uOpenBus);
+            return uOpenBus;
+        }
+        if (addr >= 0x3000 && addr <= 0x37FF) return m_IRAM[addr & 0x7FF];
+        if (addr >= 0x6000 && addr <= 0x7FFF)
+        {
+            off = SA1BWRAMOffset(uAddr, &ok, &bitmap);
+            if (!ok) return uOpenBus;
+            if (bitmap)
+            {
+                Uint32 baseBytes = (Uint32)(m_Reg[0x25] & 0x7F) * 0x2000u / 4u;
+                Uint32 pixel = (off - baseBytes);
+                if (m_uBitmapFormat == 2) pixel += baseBytes * 4u;
+                else pixel += baseBytes * 2u;
+                return ReadBitmap(pixel, uOpenBus);
+            }
+            return ReadBWRAMLinear(off, uOpenBus);
+        }
+        if (addr >= 0x8000 && m_pRom)
+            return m_pRom[RomOffset(bank, addr)];
+        return uOpenBus;
+    }
+
+    if (bank >= 0x40 && bank <= 0x5F)
+    {
+        off = SA1BWRAMOffset(uAddr, &ok, &bitmap);
+        return ok ? ReadBWRAMLinear(off, uOpenBus) : uOpenBus;
+    }
+    if (bank >= 0x60 && bank <= 0x7F)
+    {
+        off = SA1BWRAMOffset(uAddr, &ok, &bitmap);
+        return ok ? ReadBitmap(off, uOpenBus) : uOpenBus;
+    }
+    if (bank >= 0xC0 && m_pRom)
+        return m_pRom[RomOffset(bank, addr)];
+    return uOpenBus;
+}
+
+void SNSA1::WriteBus(Uint32 uAddr, Uint8 uData)
+{
+    Uint8 bank = (Uint8)(uAddr >> 16);
+    Uint16 addr = (Uint16)uAddr;
+    Bool ok = FALSE, bitmap = FALSE;
+    Uint32 off;
+
+    if (bank <= 0x3F || (bank >= 0x80 && bank <= 0xBF))
+    {
+        if (addr <= 0x07FF)
+        {
+            if (IRAMWriteAllowed(TRUE, addr)) m_IRAM[addr & 0x7FF] = uData;
+            return;
+        }
+        if (addr >= 0x2200 && addr <= 0x23FF)
+        {
+            if (SA1CanWriteRegister(addr)) WriteRegister(addr, uData);
+            return;
+        }
+        if (addr >= 0x3000 && addr <= 0x37FF)
+        {
+            off = addr & 0x7FF;
+            if (IRAMWriteAllowed(TRUE, off)) m_IRAM[off] = uData;
+            return;
+        }
+        if (addr >= 0x6000 && addr <= 0x7FFF)
+        {
+            off = SA1BWRAMOffset(uAddr, &ok, &bitmap);
+            if (!ok) return;
+            if (bitmap)
+            {
+                Uint32 baseBytes = (Uint32)(m_Reg[0x25] & 0x7F) * 0x2000u / 4u;
+                Uint32 pixel = off - baseBytes;
+                pixel += baseBytes * (m_uBitmapFormat == 2 ? 4u : 2u);
+                WriteBitmap(pixel, uData);
+            }
+            else WriteBWRAMLinear(off, uData);
+            return;
+        }
+        return;
+    }
+
+    if (bank >= 0x40 && bank <= 0x5F)
+    {
+        off = SA1BWRAMOffset(uAddr, &ok, &bitmap);
+        if (ok) WriteBWRAMLinear(off, uData);
+        return;
+    }
+    if (bank >= 0x60 && bank <= 0x7F)
+    {
+        off = SA1BWRAMOffset(uAddr, &ok, &bitmap);
+        if (ok) WriteBitmap(off, uData);
+    }
+}
+
+/* AURORA_SA1_ACCURACY_REVIEW_V2_20260902
+ * Real SA-1 I/O is asymmetric. S-CPU and C-CPU own different write ports;
+ * only $2231-$2237 are shared. Keeping this in two predicates prevents a
+ * write from the wrong CPU from changing live SA-1 state. */
+Bool SNSA1::MainCanWriteRegister(Uint16 a)
+{
+    return ((a >= 0x2200 && a <= 0x2208) ||
+            (a >= 0x2220 && a <= 0x2224) ||
+            a == 0x2226 || a == 0x2228 || a == 0x2229 ||
+            (a >= 0x2231 && a <= 0x2237)) ? TRUE : FALSE;
+}
+
+Bool SNSA1::SA1CanWriteRegister(Uint16 a)
+{
+    return ((a >= 0x2209 && a <= 0x2215) ||
+            a == 0x2225 || a == 0x2227 || a == 0x222A ||
+            (a >= 0x2230 && a <= 0x2239) || a == 0x223F ||
+            (a >= 0x2240 && a <= 0x224F) ||
+            (a >= 0x2250 && a <= 0x2254) ||
+            (a >= 0x2258 && a <= 0x225B)) ? TRUE : FALSE;
+}
+
+Uint8 SNSA1::ReadMainRegister(Uint16 uAddr, Uint8 uOpenBus)
+{
+    if (!m_bActive)
+        return uOpenBus;
+    if (uAddr == 0x2300)
+        return ReadRegister(uAddr, uOpenBus);
+    return uOpenBus;
+}
+
+void SNSA1::WriteMainRegister(Uint16 uAddr, Uint8 uData)
+{
+    if (m_bActive && MainCanWriteRegister(uAddr))
+        WriteRegister(uAddr, uData);
+}
+
+Uint8 SNSA1::ReadRegister(Uint16 uAddr, Uint8 uOpenBus)
+{
+    Uint16 i;
+    if (uAddr < 0x2200 || uAddr > 0x23FF)
+        return uOpenBus;
+    i = (Uint16)(uAddr - 0x2200);
+
+    switch (uAddr)
+    {
+        case 0x2300:
+            return (Uint8)((m_Reg[0x09] & 0x5F) | (m_Reg[0x100] & 0xA0));
+        case 0x2301:
+            return (Uint8)((m_Reg[0x00] & 0x0F) | (m_Reg[0x101] & 0xF0));
+        case 0x2302:
+            m_uLatchedHCounter = (Uint16)(m_uHCounter / 4u);
+            m_uLatchedVCounter = (Uint16)m_uVCounter;
+            return (Uint8)m_uLatchedHCounter;
+        case 0x2303: return (Uint8)(m_uLatchedHCounter >> 8);
+        case 0x2304: return (Uint8)m_uLatchedVCounter;
+        case 0x2305: return (Uint8)(m_uLatchedVCounter >> 8);
+        case 0x2306: return (Uint8)(m_uSum >> 0);
+        case 0x2307: return (Uint8)(m_uSum >> 8);
+        case 0x2308: return (Uint8)(m_uSum >> 16);
+        case 0x2309: return (Uint8)(m_uSum >> 24);
+        case 0x230A: return (Uint8)(m_uSum >> 32);
+        case 0x230B: return m_bArithmeticOverflow ? 0x80 : 0;
+        case 0x230C: return m_Reg[0x10C];
+        case 0x230D:
+        {
+            Uint8 v = m_Reg[0x10D];
+            if (m_Reg[0x58] & 0x80) ReadVariableLength(TRUE, FALSE);
+            return v;
+        }
+        case 0x230E:
+            return uOpenBus; /* real carts: version register is not decoded */
+        default:
+            return m_Reg[i];
+    }
+}
+
+void SNSA1::DoArithmetic()
+{
+    switch (m_uArithmeticOp)
+    {
+        case 0:
+            m_uSum = (unsigned long long)(Int32)((Int16)m_uOp1 * (Int16)m_uOp2);
+            m_uOp2 = 0;
+            break;
+        case 1:
+        {
+            Int16 dividend = (Int16)m_uOp1;
+            Uint16 divisor = m_uOp2;
+            if (!divisor)
+            {
+                Uint16 remainder = (dividend < 0)
+                    ? (Uint16)(-(Int32)dividend) : (Uint16)dividend;
+                Uint16 quotient = (dividend < 0) ? 0x0001u : 0xFFFFu;
+                m_uSum = ((Uint32)remainder << 16) | quotient;
+            }
+            else
+            {
+                Uint32 ext = (Uint32)((Int32)dividend + (Uint32)divisor * 65536u);
+                Uint16 rem = (Uint16)(ext % divisor);
+                Uint16 quo = (Uint16)(ext / divisor);
+                m_uSum = ((Uint32)rem << 16) | quo;
+            }
+            m_uOp1 = m_uOp2 = 0;
+            break;
+        }
+        default:
+        case 2:
+            m_uSum += (unsigned long long)((Int16)m_uOp1 * (Int16)m_uOp2);
+            m_bArithmeticOverflow = (m_uSum >= (1ULL << 40)) ? TRUE : FALSE;
+            m_uSum &= ((1ULL << 40) - 1ULL);
+            m_uOp2 = 0;
+            break;
+    }
+}
+
+void SNSA1::ReadVariableLength(Bool bInc, Bool bNoShift)
+{
+    Uint32 addr = (Uint32)m_Reg[0x59] | ((Uint32)m_Reg[0x5A] << 8) |
+                  ((Uint32)m_Reg[0x5B] << 16);
+    Uint8 shift = m_Reg[0x58] & 15;
+    Uint8 s;
+    Uint32 data;
+
+    if (bNoShift) shift = 0;
+    else if (!shift) shift = 16;
+    s = (Uint8)(shift + m_uVariableBitPos);
+    if (s >= 16)
+    {
+        addr += (Uint32)(s >> 4) << 1;
+        s &= 15;
+    }
+
+    data = (Uint32)ReadBus(addr, 0) |
+           ((Uint32)ReadBus((addr & 0xFF0000u) | ((addr + 1) & 0xFFFFu), 0) << 8) |
+           ((Uint32)ReadBus((addr + 2) & 0xFFFFFFu, 0) << 16) |
+           ((Uint32)ReadBus((addr + 3) & 0xFFFFFFu, 0) << 24);
+    data >>= s;
+    m_Reg[0x10C] = (Uint8)data;
+    m_Reg[0x10D] = (Uint8)(data >> 8);
+
+    if (bInc)
+    {
+        m_uVariableBitPos = (Uint8)((m_uVariableBitPos + shift) & 15);
+        m_Reg[0x59] = (Uint8)addr;
+        m_Reg[0x5A] = (Uint8)(addr >> 8);
+        m_Reg[0x5B] = (Uint8)(addr >> 16);
+    }
+}
+
+void SNSA1::DoCC2()
+{
+    Uint32 dest = (Uint32)m_Reg[0x35] | ((Uint32)m_Reg[0x36] << 8);
+    Uint32 offset = (m_uCharIndex & 7) ? 0u : 1u;
+    Int32 depth = (m_Reg[0x31] & 3) == 0 ? 8 :
+                  (m_Reg[0x31] & 3) == 1 ? 4 : 2;
+    Int32 bytesPerChar = 8 * depth;
+    Uint8 *q = m_CharData + offset * 64;
+    Int32 l, b;
+    Uint32 p = (dest & 0x7FFu) + offset * (Uint32)bytesPerChar;
+
+    for (l = 0; l < 8; ++l, q += 8)
+    {
+        Uint8 plane[8];
+        memset(plane, 0, sizeof(plane));
+        for (b = 0; b < 8; ++b)
+        {
+            Uint8 r = q[b];
+            Int32 bit;
+            for (bit = 0; bit < depth; ++bit)
+                plane[bit] = (Uint8)((plane[bit] << 1) | ((r >> bit) & 1));
+        }
+        m_IRAM[(p + 0) & 0x7FF] = plane[0];
+        m_IRAM[(p + 1) & 0x7FF] = plane[1];
+        if (depth >= 4)
+        {
+            m_IRAM[(p + 16) & 0x7FF] = plane[2];
+            m_IRAM[(p + 17) & 0x7FF] = plane[3];
+        }
+        if (depth >= 8)
+        {
+            m_IRAM[(p + 32) & 0x7FF] = plane[4];
+            m_IRAM[(p + 33) & 0x7FF] = plane[5];
+            m_IRAM[(p + 48) & 0x7FF] = plane[6];
+            m_IRAM[(p + 49) & 0x7FF] = plane[7];
+        }
+        p += 2;
+    }
+}
+
+void SNSA1::DoDMA()
+{
+    Uint32 src = (Uint32)m_Reg[0x32] | ((Uint32)m_Reg[0x33] << 8) |
+                 ((Uint32)m_Reg[0x34] << 16);
+    Uint32 dst = (Uint32)m_Reg[0x35] | ((Uint32)m_Reg[0x36] << 8) |
+                 ((Uint32)m_Reg[0x37] << 16);
+    Uint32 len = (Uint32)m_Reg[0x38] | ((Uint32)m_Reg[0x39] << 8);
+    Uint32 n;
+
+    for (n = 0; n < len; ++n)
+    {
+        Uint8 v = 0;
+        switch (m_Reg[0x30] & 3)
+        {
+            case 0: v = ReadBus((src + n) & 0xFFFFFFu, 0); break;
+            case 1: v = ReadBWRAMLinear(src + n, 0); break;
+            default:
+            case 2: v = m_IRAM[(src + n) & 0x7FF]; break;
+        }
+
+        if (m_Reg[0x30] & 4)
+        {
+            if (m_pBWRAM && m_nBWRAMBytes)
+                m_pBWRAM[(dst + n) % m_nBWRAMBytes] = v;
+        }
+        else
+            m_IRAM[(dst + n) & 0x7FF] = v;
+    }
+    if ((m_Reg[0x30] & 4) && len)
+        MarkBWRAMDirty();
+
+    m_Reg[0x101] |= 0x20;
+    if (m_Reg[0x0A] & 0x20)
+        m_Reg[0x0B] &= (Uint8)~0x20;
+}
+
+void SNSA1::WriteRegister(Uint16 uAddr, Uint8 uData)
+{
+    Uint16 i;
+    Uint8 old;
+    if (uAddr < 0x2200 || uAddr > 0x22FF)
+        return;
+    i = (Uint16)(uAddr - 0x2200);
+    old = m_Reg[i];
+
+    switch (uAddr)
+    {
+        case 0x2200:
+            m_Reg[0x00] = uData;
+            if ((old & 0x20) && !(uData & 0x20))
+            {
+                m_Reg[0x2A] = 0; /* CIWP is cleared on reset release. */
+                ResetCPUToVector((Uint16)m_Reg[0x03] | ((Uint16)m_Reg[0x04] << 8));
+            }
+            if (uData & 0x80)
+            {
+                m_Reg[0x101] |= 0x80;
+                if (m_Reg[0x0A] & 0x80) m_Reg[0x0B] &= (Uint8)~0x80;
+            }
+            if (uData & 0x10)
+            {
+                m_Reg[0x101] |= 0x10;
+                if (m_Reg[0x0A] & 0x10) m_Reg[0x0B] &= (Uint8)~0x10;
+            }
+            return;
+        case 0x2201:
+            m_Reg[0x01] = uData;
+            if (((old ^ uData) & 0x80) && (m_Reg[0x100] & uData & 0x80))
+                m_Reg[0x02] &= (Uint8)~0x80;
+            if (((old ^ uData) & 0x20) && (m_Reg[0x100] & uData & 0x20))
+                m_Reg[0x02] &= (Uint8)~0x20;
+            UpdateMainIRQ();
+            return;
+        case 0x2202:
+            m_Reg[0x100] &= (Uint8)~uData;
+            m_Reg[0x02] = uData;
+            UpdateMainIRQ();
+            return;
+        case 0x2209:
+            m_Reg[0x09] = uData;
+            if (uData & 0x80)
+            {
+                m_Reg[0x100] |= 0x80;
+                if (m_Reg[0x01] & 0x80) m_Reg[0x02] &= (Uint8)~0x80;
+            }
+            UpdateMainIRQ();
+            return;
+        case 0x220A:
+            if (((old ^ uData) & 0x80) && (m_Reg[0x101] & uData & 0x80))
+                m_Reg[0x0B] &= (Uint8)~0x80;
+            if (((old ^ uData) & 0x40) && (m_Reg[0x101] & uData & 0x40))
+                m_Reg[0x0B] &= (Uint8)~0x40;
+            if (((old ^ uData) & 0x20) && (m_Reg[0x101] & uData & 0x20))
+                m_Reg[0x0B] &= (Uint8)~0x20;
+            if (((old ^ uData) & 0x10) && (m_Reg[0x101] & uData & 0x10))
+                m_Reg[0x0B] &= (Uint8)~0x10;
+            m_Reg[0x0A] = uData;
+            return;
+        case 0x220B:
+            m_Reg[0x101] &= (Uint8)~uData;
+            m_Reg[0x0B] = uData;
+            return;
+        case 0x2211:
+            m_uHCounter = m_uVCounter = m_uPrevHCounter = 0;
+            m_bTimerLastState = FALSE;
+            m_Reg[i] = uData;
+            return;
+        case 0x2220: case 0x2221: case 0x2222: case 0x2223:
+            /* AURORA_SA1_SUPERMMC_FETCH_ABORT_V5_20260903
+             *
+             * CXB/DB/EB/FB change the physical ROM decode immediately.
+             * The PS2 MIPS 65816 executor caches the current direct-fetch
+             * bank while it is inside SNCPUExecute(). Rebuilding Bank[]
+             * from this S-CPU MMIO trap is therefore not sufficient: after
+             * returning from the trap the same execution slice could keep
+             * fetching through the pre-write host pointer.
+             *
+             * Skip a no-op register write. On a real mapping change, install
+             * both SA-1 and S-CPU maps first, then abort only the current
+             * S-CPU slice. SNCPUExecute() restores the unspent cycle budget;
+             * its next entry resolves PC using the new map. */
+            if (old == uData)
+                return;
+
+            m_Reg[i] = uData;
+            MapRomWindows(&m_Cpu, FALSE);
+
+            if (m_bMapMainRom && m_pOwner)
+            {
+                SNCpuT *pMainCpu = m_pOwner->GetCpu();
+                MapRomWindows(pMainCpu, TRUE);
+                SNCPUAbort(pMainCpu);
+            }
+            return;
+        case 0x2224: case 0x2225:
+        case 0x2226: case 0x2227: case 0x2228:
+        case 0x2229: case 0x222A:
+        case 0x2230:
+            m_Reg[i] = uData;
+            return;
+        case 0x2231:
+            m_Reg[i] = uData;
+            if (uData & 0x80) m_bCharDMA = FALSE;
+            return;
+        case 0x2232: case 0x2233: case 0x2234:
+        case 0x2235:
+            m_Reg[i] = uData;
+            return;
+        case 0x2236:
+            m_Reg[i] = uData;
+            if ((m_Reg[0x30] & 0xA4) == 0x80)
+                DoDMA();
+            else if ((m_Reg[0x30] & 0xB0) == 0xB0)
+            {
+                m_Reg[0x100] |= 0x20;
+                m_bCharDMA = TRUE;
+                UpdateMainIRQ();
+            }
+            return;
+        case 0x2237:
+            m_Reg[i] = uData;
+            if ((m_Reg[0x30] & 0xA4) == 0x84)
+                DoDMA();
+            return;
+        case 0x2238: case 0x2239:
+            m_Reg[i] = uData;
+            return;
+        case 0x223F:
+            m_Reg[i] = uData;
+            m_uBitmapFormat = (uData & 0x80) ? 2 : 4;
+            return;
+        case 0x2240: case 0x2241: case 0x2242: case 0x2243:
+        case 0x2244: case 0x2245: case 0x2246: case 0x2247:
+        case 0x2248: case 0x2249: case 0x224A: case 0x224B:
+        case 0x224C: case 0x224D: case 0x224E:
+            m_Reg[i] = uData;
+            return;
+        case 0x224F:
+            m_Reg[i] = uData;
+            if ((m_Reg[0x30] & 0xB0) == 0xA0)
+            {
+                memcpy(m_CharData + (m_uCharIndex & 7) * 16,
+                       &m_Reg[0x40], 16);
+                m_uCharIndex = (Uint8)((m_uCharIndex + 1) & 7);
+                if ((m_uCharIndex & 3) == 0) DoCC2();
+            }
+            return;
+        case 0x2250:
+            if (uData & 2) m_uSum = 0;
+            m_uArithmeticOp = uData & 3;
+            m_Reg[i] = uData;
+            return;
+        case 0x2251:
+            m_uOp1 = (Uint16)((m_uOp1 & 0xFF00) | uData); m_Reg[i] = uData; return;
+        case 0x2252:
+            m_uOp1 = (Uint16)((m_uOp1 & 0x00FF) | ((Uint16)uData << 8)); m_Reg[i] = uData; return;
+        case 0x2253:
+            m_uOp2 = (Uint16)((m_uOp2 & 0xFF00) | uData); m_Reg[i] = uData; return;
+        case 0x2254:
+            m_uOp2 = (Uint16)((m_uOp2 & 0x00FF) | ((Uint16)uData << 8));
+            m_Reg[i] = uData; DoArithmetic(); return;
+        case 0x2258:
+            m_Reg[i] = uData; ReadVariableLength(TRUE, FALSE); return;
+        case 0x2259: case 0x225A: case 0x225B:
+            m_Reg[i] = uData;
+            m_uVariableBitPos = 0;
+            ReadVariableLength(FALSE, TRUE);
+            return;
+        default:
+            m_Reg[i] = uData;
+            return;
+    }
+}
+
+void SNSA1::UpdateMainIRQ()
+{
+    Bool b = ((m_Reg[0x100] & m_Reg[0x01] & 0xA0) != 0) ? TRUE : FALSE;
+    if (m_pOwner)
+        m_pOwner->SetSA1IRQ(b);
+}
+
+void SNSA1::ResetCPUToVector(Uint16 uVector)
+{
+    SNCPUResetCounters(&m_Cpu);
+    SNCPUResetRegs(&m_Cpu);
+    m_Cpu.uSignal = 0;
+    m_Cpu.Regs.rE = 1;
+    m_Cpu.Regs.rP = SNCPU_FLAG_M | SNCPU_FLAG_X | SNCPU_FLAG_I;
+    m_Cpu.Regs.rS.w = 0x01FF;
+    m_Cpu.Regs.rPC = uVector;
+    m_Cpu.uMDR = (Uint8)(uVector >> 8);
+}
+
+Bool SNSA1::EnterInterrupt(SNCpuT *pCpu, Uint16 uVector, Bool bNMI)
+{
+    if (!pCpu) return FALSE;
+
+    if (pCpu->uSignal & SNCPU_SIGNAL_WAI)
+        pCpu->uSignal &= (Uint8)~SNCPU_SIGNAL_WAI;
+
+    if (!bNMI && (pCpu->Regs.rP & SNCPU_FLAG_I))
+        return TRUE;
+
+    if (pCpu->Regs.rE)
+    {
+        SNCPUPush8(pCpu, (Uint8)(pCpu->Regs.rPC >> 8));
+        SNCPUPush8(pCpu, (Uint8)pCpu->Regs.rPC);
+        SNCPUPush8(pCpu, bNMI ? (pCpu->Regs.rP & (Uint8)~SNCPU_FLAG_B)
+                              : (pCpu->Regs.rP & (Uint8)~SNCPU_FLAG_B));
+    }
+    else
+    {
+        SNCPUPush8(pCpu, (Uint8)(pCpu->Regs.rPC >> 16));
+        SNCPUPush8(pCpu, (Uint8)(pCpu->Regs.rPC >> 8));
+        SNCPUPush8(pCpu, (Uint8)pCpu->Regs.rPC);
+        SNCPUPush8(pCpu, pCpu->Regs.rP);
+    }
+    pCpu->Regs.rPC = uVector;
+    pCpu->Regs.rP &= (Uint8)~SNCPU_FLAG_D;
+    pCpu->Regs.rP |= SNCPU_FLAG_I;
+    SNCPUConsumeCycles(pCpu,
+        SNCPU_CYCLE_SLOW * (pCpu->Regs.rE ? 5 : 6) + SNCPU_CYCLE_FAST * 2);
+    return TRUE;
+}
+
+Bool SNSA1::EnterMainIRQOverride(SNCpuT *pMainCpu)
+{
+    if (!m_bActive || !(m_Reg[0x09] & 0x40))
+        return FALSE;
+    EnterInterrupt(pMainCpu,
+        (Uint16)m_Reg[0x0E] | ((Uint16)m_Reg[0x0F] << 8), FALSE);
+    return TRUE;
+}
+
+Bool SNSA1::EnterMainNMIOverride(SNCpuT *pMainCpu)
+{
+    if (!m_bActive || !(m_Reg[0x09] & 0x10))
+        return FALSE;
+    EnterInterrupt(pMainCpu,
+        (Uint16)m_Reg[0x0C] | ((Uint16)m_Reg[0x0D] << 8), TRUE);
+    return TRUE;
+}
+
+void SNSA1::ServiceInterrupts()
+{
+    /* AURORA_SA1_SMRPG_IRQ_FLAG_CURE_V3_20260902
+     * CCNT ($2200) requests latch into CFR ($2301). CIE ($220A)
+     * gates delivery; CIC ($220B) acknowledges it. Testing the live
+     * CCNT bit loses pulse-style S-CPU -> SA-1 IRQ/NMI handshakes. */
+    if ((m_Reg[0x0A] & 0x10) && (m_Reg[0x101] & 0x10) &&
+        !(m_Reg[0x0B] & 0x10))
+    {
+        m_Reg[0x101] |= 0x10;
+        m_Reg[0x0B] |= 0x10;
+        EnterInterrupt(&m_Cpu,
+            (Uint16)m_Reg[0x05] | ((Uint16)m_Reg[0x06] << 8), TRUE);
+        return;
+    }
+
+    if (!(m_Cpu.Regs.rP & SNCPU_FLAG_I))
+    {
+        if ((m_Reg[0x0A] & 0x40) && (m_Reg[0x101] & 0x40) && !(m_Reg[0x0B] & 0x40))
+            EnterInterrupt(&m_Cpu, (Uint16)m_Reg[0x07] | ((Uint16)m_Reg[0x08] << 8), FALSE);
+        else if ((m_Reg[0x0A] & 0x20) && (m_Reg[0x101] & 0x20) && !(m_Reg[0x0B] & 0x20))
+            EnterInterrupt(&m_Cpu, (Uint16)m_Reg[0x07] | ((Uint16)m_Reg[0x08] << 8), FALSE);
+        else if ((m_Reg[0x0A] & 0x80) && (m_Reg[0x101] & 0x80) &&
+                 !(m_Reg[0x0B] & 0x80))
+        {
+            m_Reg[0x101] |= 0x80;
+            EnterInterrupt(&m_Cpu, (Uint16)m_Reg[0x07] | ((Uint16)m_Reg[0x08] << 8), FALSE);
+        }
+    }
+}
+
+void SNSA1::UpdateTimer(Uint32 nSA1Cycles)
+{
+    Bool thisIRQ;
+    Uint32 hMax = (m_Reg[0x10] & 0x80) ? 0x800u : 1364u;
+    Uint32 vMax = (m_Reg[0x10] & 0x80) ? 0x200u : 262u;
+    Uint32 hTarget = ((Uint32)m_Reg[0x12] | ((Uint32)m_Reg[0x13] << 8)) * 4u;
+    Uint32 vTarget = (Uint32)m_Reg[0x14] | ((Uint32)m_Reg[0x15] << 8);
+
+    m_uPrevHCounter = m_uHCounter;
+    m_uHCounter += nSA1Cycles;
+    while (m_uHCounter >= hMax)
+    {
+        m_uHCounter -= hMax;
+        if (++m_uVCounter >= vMax) m_uVCounter = 0;
+    }
+
+    thisIRQ = (m_Reg[0x10] & 3) ? TRUE : FALSE;
+    if (m_Reg[0x10] & 1)
+    {
+        Bool crossed = (m_uPrevHCounter <= hTarget && m_uHCounter >= hTarget) ||
+                       (m_uHCounter < m_uPrevHCounter &&
+                        (hTarget >= m_uPrevHCounter || hTarget <= m_uHCounter));
+        if (!crossed) thisIRQ = FALSE;
+    }
+    if ((m_Reg[0x10] & 2) && m_uVCounter != vTarget)
+        thisIRQ = FALSE;
+
+    if (!m_bTimerLastState && thisIRQ)
+    {
+        m_Reg[0x101] |= 0x40;
+        if (m_Reg[0x0A] & 0x40) m_Reg[0x0B] &= (Uint8)~0x40;
+    }
+    m_bTimerLastState = thisIRQ;
+}
+
+void SNSA1::Run(Int32 nMainMasterCycles)
+{
+    Int32 nSA1;
+    Uint8 oldInternal, oldSlow;
+    if (!m_bActive || nMainMasterCycles <= 0)
+        return;
+
+    nSA1 = nMainMasterCycles * 3;
+    UpdateTimer((Uint32)nSA1);
+
+    if (m_Reg[0x00] & 0x60) /* reset or wait */
+        return;
+
+    ServiceInterrupts();
+    if (m_Cpu.uSignal & (SNCPU_SIGNAL_WAI | SNCPU_SIGNAL_STP))
+        return;
+
+    /* CPU overclock is an S-CPU user option; do not leak it into SA-1. */
+    oldInternal = g_SnesCpuInternalCycle;
+    oldSlow = g_SnesCpuSlowCycle;
+    g_SnesCpuInternalCycle = SNCPU_CYCLE_FAST;
+    g_SnesCpuSlowCycle = SNCPU_CYCLE_SLOW;
+
+    SNCPUAddCycles(&m_Cpu, nSA1);
+
+    /* AURORA_SA1_BOUNDED_EXECUTOR_V4_20260902
+     * Preserve the same SA-1 cycle budget, but return to the C-CPU
+     * dispatcher at instruction boundaries. SA-1 software changes Super MMC,
+     * MMIO and WAI/STP state while it runs; a monolithic host batch can hide
+     * those transitions until too late and may pin the EE in a bad path.
+     *
+     * This is SA-1-only. Normal S-CPU execution is untouched.
+     */
+    while (m_Cpu.Cycles > 0)
+    {
+        Int32 before = m_Cpu.Cycles;
+
+        ServiceInterrupts();
+        if (m_Cpu.uSignal & (SNCPU_SIGNAL_WAI | SNCPU_SIGNAL_STP))
+        {
+            m_Cpu.Cycles = 0;
+            break;
+        }
+
+        if (!SNCPUExecuteOne(&m_Cpu))
+            break;
+
+        /* A valid execution step must consume clocks. If an unexpected
+         * opcode/trap path makes no progress, consume one fast quantum so
+         * the SA-1 path cannot hold the PS2 main thread forever. */
+        if (m_Cpu.Cycles >= before)
+            SNCPUConsumeCycles(&m_Cpu, SNCPU_CYCLE_FAST);
+    }
+
+    g_SnesCpuInternalCycle = oldInternal;
+    g_SnesCpuSlowCycle = oldSlow;
+}

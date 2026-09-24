@@ -1,0 +1,3587 @@
+#include <string.h>
+#include <strings.h> /* AURORA_SWC_FLOPPY_V2_20260831: strcasecmp/strncasecmp */
+/* AURORA_SWC_FLOPPY_V3_20260831 */
+/* AURORA_SWC_FLOPPY_V4_20260831: writable IMG + isolated states. */
+static char s_SwcExternalCartPath[1024] = {0}; /* AURORA_SWC_FLOPPY_V5_20260831 */
+static char s_SmdExternalCartPath[1024] = {0}; /* AURORA_SUPER_MAGIC_DRIVE_V1_20260902 */
+#include <stdio.h>
+#include <stdlib.h>
+#include <malloc.h>
+#include <dirent.h> /* AURORA_SWC_FLOPPY_V1_20260831 */
+#include <sys/stat.h>
+#define NEWLIB_PORT_AWARE
+#include <io_common.h>
+#include <fileXio.h>
+#include <fileXio_rpc.h>
+#undef NEWLIB_PORT_AWARE
+#include "types.h"
+#include "console.h"
+#include "file.h"
+#include "dataio.h"
+#include "pathext.h"
+#include "snppucolor.h"
+#include "emurom.h"
+#include "mainloop.h"
+#include "mainloop_shared.h"
+/* AURORA_FCEUMM_FDS_V4_TURBO_PAL_PERF_20260827 */
+#include "nes/quicknes/quicknes_bridge.h"
+#include "nes/fceumm/fceumm_fds_bridge.h"
+#include "sega/picodrive/picodrive_bridge.h"
+/* AURORA_PCE_EXPERIMENTAL_V1 */
+#include "pce/beetle/pce_bridge.h"
+#include "mainloop_state.h"
+#include "mainloop_ui.h"
+#include "mainloop_bgm.h" /* AURORA_V4_16_SAFE_GAME_SWITCH_FLUSH_20260830 */
+#include "snes.h"
+#include "rendersurface.h"
+#include "texture.h"
+#include "audmixbuffer.h"
+#include "emumovie.h"
+#include "mainloop_load.h"
+#include "mainloop_menu.h"
+#include "embedded_irx.h"   /* HddMapPath (hdd0:/PART -> pfs0:) */
+#include "sndbglog.h"
+
+extern "C" {
+#include "miniz.h"
+#include "miniz_compat.h"
+}
+
+void _MainLoopGetName(Char *pName, const Char *pPath)
+{
+        const Char *pFileName;
+
+        pFileName = strrchr(pPath, '/');
+        if (pFileName==NULL)
+        {
+                pFileName = pPath;
+        } else
+        {
+                // skip /
+                pFileName = pFileName + 1;
+        }
+        strcpy(pName, pFileName);
+}
+
+/* AURORA_MD_PRELOAD_RASTER_PROBE_V2
+ * Decide the 240p physical raster before PicoDrive is initialised.
+ *
+ * This is deliberately conservative. Known 8-bit/32X images stay on
+ * Aurora's 256x240 raster. Standard MD images use 320x240. Ambiguous
+ * .bin images get one additional 68000-vector probe (V4) before the safe
+ * 256 fallback, so 240p does not unnecessarily lose PicoDrive's direct-T8
+ * path while the same title can use it in 480i. */
+static int _MainLoopAsciiLower(int c)
+{
+    if (c >= 'A' && c <= 'Z')
+        return c + ('a' - 'A');
+    return c;
+}
+
+static Bool _MainLoopSegaExtEquals(const char *pName, const char *pExt)
+{
+    const char *p;
+
+    if (!pName || !pExt)
+        return FALSE;
+
+    p = strrchr(pName, '.');
+    if (!p || !p[1])
+        return FALSE;
+    ++p;
+
+    while (*p && *pExt)
+    {
+        if (_MainLoopAsciiLower((unsigned char)*p) !=
+            _MainLoopAsciiLower((unsigned char)*pExt))
+            return FALSE;
+        ++p;
+        ++pExt;
+    }
+
+    return (*p == '\0' && *pExt == '\0') ? TRUE : FALSE;
+}
+
+/* AURORA_MD_PRELOAD_VECTOR_PROBE_V4_2
+ *
+ * Mega Drive begins with big-endian 68000 reset vectors. A normal initial
+ * stack pointer is in $FF0000-$FFFFFF, and the even reset PC points into the
+ * cartridge image. This is only a fallback for ambiguous .bin content:
+ * explicit SMS/GG/SG/SC/32X tests below still win first.
+ */
+static Uint32 _MainLoopReadBE32(const Uint8 *p)
+{
+    return ((Uint32)p[0] << 24) |
+           ((Uint32)p[1] << 16) |
+           ((Uint32)p[2] << 8)  |
+           (Uint32)p[3];
+}
+
+static Bool _MainLoopLooksLikeMegaDriveVectors(
+    const Uint8 *pData, Int32 nBytes, Uint32 uFileBase)
+{
+    Uint32 sp, pc, payloadBytes;
+
+    if (!pData || nBytes <= 0 ||
+        uFileBase > (Uint32)nBytes ||
+        (Uint32)nBytes - uFileBase < 8U)
+        return FALSE;
+
+    payloadBytes = (Uint32)nBytes - uFileBase;
+    sp = _MainLoopReadBE32(pData + uFileBase);
+    pc = _MainLoopReadBE32(pData + uFileBase + 4U);
+
+    if ((sp & 0xFFFF0000U) != 0x00FF0000U)
+        return FALSE;
+
+    if ((pc & 1U) != 0U || pc < 0x100U || pc >= payloadBytes)
+        return FALSE;
+
+    return TRUE;
+}
+
+/* AURORA_PCE_CDRDAO_TOC_SUPPORT_V4_8_20260830
+ *
+ * Load-time-only syntax sniff. cdrdao TOC and MMC CUE are different
+ * grammars even when somebody has accidentally named the TOC ".cue".
+ *
+ * Strong TOC-only signatures:
+ *   CD_ROM / CD_DA / CD_ROM_XA
+ *   DATAFILE / AUDIOFILE / ZERO
+ *   TRACK <format>        (cdrdao)
+ * versus CUE:
+ *   TRACK <number> <format>
+ *
+ * No frame-time checks and no HuCard path changes.
+ */
+static Bool _MainLoopLooksLikeCdrdaoToc(const char *pPath)
+{
+    FILE *fp;
+    char line[1024];
+    int lines = 0;
+
+    if (!pPath || !*pPath)
+        return FALSE;
+
+    if (_MainLoopSegaExtEquals(pPath, "toc"))
+        return TRUE;
+
+    fp = fopen(pPath, "rb");
+    if (!fp)
+        return FALSE;
+
+    while (lines++ < 48 && fgets(line, sizeof(line), fp))
+    {
+        char *p = line;
+        char token[64];
+        char *comment;
+
+        if (lines == 1 &&
+            (unsigned char)p[0] == 0xEF &&
+            (unsigned char)p[1] == 0xBB &&
+            (unsigned char)p[2] == 0xBF)
+            p += 3;
+
+        while (*p == ' ' || *p == '\t' ||
+               *p == '\r' || *p == '\n')
+            ++p;
+
+        comment = strstr(p, "//");
+        if (comment)
+            *comment = '\0';
+
+        if (!*p)
+            continue;
+
+        if (!strncasecmp(p, "CD_ROM", 6) &&
+            (p[6] == '\0' || p[6] == ' ' || p[6] == '\t' ||
+             p[6] == '\r' || p[6] == '\n'))
+        {
+            fclose(fp);
+            return TRUE;
+        }
+        if (!strncasecmp(p, "CD_DA", 5) &&
+            (p[5] == '\0' || p[5] == ' ' || p[5] == '\t' ||
+             p[5] == '\r' || p[5] == '\n'))
+        {
+            fclose(fp);
+            return TRUE;
+        }
+        if (!strncasecmp(p, "CD_ROM_XA", 9) &&
+            (p[9] == '\0' || p[9] == ' ' || p[9] == '\t' ||
+             p[9] == '\r' || p[9] == '\n'))
+        {
+            fclose(fp);
+            return TRUE;
+        }
+
+        if (!strncasecmp(p, "DATAFILE", 8) &&
+            (p[8] == ' ' || p[8] == '\t'))
+        {
+            fclose(fp);
+            return TRUE;
+        }
+        if (!strncasecmp(p, "AUDIOFILE", 9) &&
+            (p[9] == ' ' || p[9] == '\t'))
+        {
+            fclose(fp);
+            return TRUE;
+        }
+        if (!strncasecmp(p, "ZERO", 4) &&
+            (p[4] == ' ' || p[4] == '\t'))
+        {
+            fclose(fp);
+            return TRUE;
+        }
+
+        if (!strncasecmp(p, "TRACK", 5) &&
+            (p[5] == ' ' || p[5] == '\t'))
+        {
+            token[0] = '\0';
+            if (sscanf(p + 5, "%63s", token) == 1 &&
+                (token[0] < '0' || token[0] > '9'))
+            {
+                fclose(fp);
+                return TRUE;
+            }
+        }
+    }
+
+    fclose(fp);
+    return FALSE;
+}
+
+static Bool _MainLoopSegaWantsNative320(
+    const Uint8 *pData, Int32 nBytes, const char *pName)
+{
+    static const Uint32 smsHeaderOffsets[] =
+    {
+        0x7ff0U, 0x3ff0U, 0x1ff0U
+    };
+
+    /* Explicit extensions can choose the raster before ROM allocation. */
+    if (_MainLoopSegaExtEquals(pName, "sms") ||
+        _MainLoopSegaExtEquals(pName, "gg")  ||
+        _MainLoopSegaExtEquals(pName, "sg")  ||
+        _MainLoopSegaExtEquals(pName, "sc")  ||
+        _MainLoopSegaExtEquals(pName, "pco"))
+        return FALSE;
+
+    /* AURORA_SEGA_CD_32X_MD_SCALING_V2R1_20260828
+     * 32X uses the same H32/H40 physical presentation as Mega Drive. */
+    if (_MainLoopSegaExtEquals(pName, "md")  ||
+        _MainLoopSegaExtEquals(pName, "gen") ||
+        _MainLoopSegaExtEquals(pName, "smd") ||
+        _MainLoopSegaExtEquals(pName, "32x"))
+        return TRUE;
+
+    if (!pData || nBytes <= 0)
+        return FALSE;
+
+    /* A .bin may actually be SMS/GG. Mirror PicoDrive's TMR SEGA test
+     * before assuming Mega Drive. Also accept a conventional 0x200-byte
+     * copier header when probing ambiguous .bin content. */
+    for (unsigned i = 0;
+         i < sizeof(smsHeaderOffsets) / sizeof(smsHeaderOffsets[0]);
+         ++i)
+    {
+        Uint32 off = smsHeaderOffsets[i];
+
+        if ((Uint32)nBytes >= off + 8U &&
+            memcmp(pData + off, "TMR SEGA", 8) == 0)
+            return FALSE;
+
+        if ((Uint32)nBytes >= off + 0x200U + 8U &&
+            memcmp(pData + off + 0x200U, "TMR SEGA", 8) == 0)
+            return FALSE;
+    }
+
+    /* 32X/Pico use Mega-Drive-style headers too, so reject their explicit
+     * signatures before the generic SEGA/vector tests. Check both raw and
+     * conventional +0x200 header locations. */
+    if ((nBytes >= 0x108 &&
+         memcmp(pData + 0x100, "SEGA 32X", 8) == 0) ||
+        (nBytes >= 0x308 &&
+         memcmp(pData + 0x300, "SEGA 32X", 8) == 0))
+        return FALSE;
+
+    if ((nBytes >= 0x109 &&
+         memcmp(pData + 0x100, "SEGA PICO", 9) == 0) ||
+        (nBytes >= 0x309 &&
+         memcmp(pData + 0x300, "SEGA PICO", 9) == 0))
+        return FALSE;
+
+    /* Normal commercial .bin MD dumps identify themselves here. */
+    if (_MainLoopSegaExtEquals(pName, "bin") &&
+        nBytes >= 0x104 &&
+        (memcmp(pData + 0x100, "SEGA", 4) == 0 ||
+         memcmp(pData + 0x100, " SEG", 4) == 0))
+        return TRUE;
+
+    /* AURORA_MD_PRELOAD_VECTOR_PROBE_V4_2
+     *
+     * Some valid/headerless MD .bin files do not carry the SEGA console
+     * string. 480i can learn they are MD after PicoDrive starts and still
+     * use direct T8; 240p must know before core init so its physical raster
+     * is already 320 wide.
+     *
+     * Try raw 68000 vectors first. A conventional +0x200 copier header is
+     * accepted only when the file-size shape also matches +0x200.
+     * Ambiguous content that fails both probes deliberately stays 256/RGBA.
+     */
+    if (_MainLoopSegaExtEquals(pName, "bin"))
+    {
+        if (_MainLoopLooksLikeMegaDriveVectors(pData, nBytes, 0))
+            return TRUE;
+
+        if ((((Uint32)nBytes & 0x3FFFU) == 0x0200U) &&
+            _MainLoopLooksLikeMegaDriveVectors(
+                pData, nBytes, 0x200U))
+        {
+            return TRUE;
+        }
+    }
+
+    /* Safe fallback: 256/RGBA is preferable to rebuilding the GS
+     * after PicoDrive has already allocated its machine. */
+    return FALSE;
+}
+
+
+int _MainLoopReadBinaryData(Uint8 *pBuffer, Int32 nBufferBytes, const char *pRomFile)
+{
+        int fd;
+        int total = 0;
+
+        if (!pBuffer || nBufferBytes <= 0)
+                return -1;
+
+        fd = fileXioOpen(pRomFile, FIO_O_RDONLY, 0);
+        if (fd < 0)
+                return -1;
+
+        /* AURORA_DYNAMIC_ROM_BUFFER_V1_20260823
+         * fileXioRead may legally return short; finish the payload. */
+        while (total < nBufferBytes)
+        {
+                int n = fileXioRead(fd, pBuffer + total, nBufferBytes - total);
+                if (n < 0)
+                {
+                        fileXioClose(fd);
+                        return -1;
+                }
+                if (n == 0)
+                        break;
+                total += n;
+        }
+
+        fileXioClose(fd);
+        return total;
+}
+
+int _MainLoopReadGZData(Uint8 *pBuffer, Int32 nBufferBytes, const char *pRomFile)
+{
+        return MinizReadGZToBuffer(pRomFile, pBuffer, nBufferBytes);
+}
+
+/* AURORA_PD_MEGA_FIX_20260820
+ * ZIP selection must be stricter than "PathExtResolve knows the suffix".
+ * Otherwise a recognised auxiliary file can win MinizReadZipFirstMatch()
+ * before the actual cartridge. */
+static int _MainLoopZipNameIsRom(const char *pName)
+{
+        PathExtTypeE eType;
+
+        if (!pName || !PathExtResolve((char *)pName, &eType, FALSE))
+                return 0;
+
+        switch (eType)
+        {
+                case MAINLOOP_ENTRYTYPE_SNESROM:
+                case MAINLOOP_ENTRYTYPE_NESROM:
+                case MAINLOOP_ENTRYTYPE_NESFDSDISK:
+                case MAINLOOP_ENTRYTYPE_NESFDSBIOS:
+                case MAINLOOP_ENTRYTYPE_SEGAROM:
+                case MAINLOOP_ENTRYTYPE_PCEROM:
+                        return 1;
+                default:
+                        return 0;
+        }
+}
+
+
+/* AURORA_DYNAMIC_ROM_BUFFER_V1_20260823 */
+#define MAINLOOP_LEGACY_ROM_MAX_BYTES (8U * 1024U * 1024U + 1024U)
+#define MAINLOOP_SEGA_ROM_MAX_BYTES   (16U * 1024U * 1024U)
+#define MAINLOOP_PCE_ROM_MAX_BYTES    (4U * 1024U * 1024U + 512U)
+#define MAINLOOP_SEGA_PROBE_BYTES     0x8200U
+/* AURORA_FDS_V4_ZIP_LIMITS_20260828 */
+#define MAINLOOP_FDS_SIDE_BYTES       65500U
+#define MAINLOOP_FDS_MAX_SIDES        8U
+#define MAINLOOP_FDS_ZIP_MIN_BYTES    MAINLOOP_FDS_SIDE_BYTES
+#define MAINLOOP_FDS_ZIP_MAX_BYTES    (16U + MAINLOOP_FDS_MAX_SIDES * MAINLOOP_FDS_SIDE_BYTES)
+
+
+/* AURORA_FDS_ZIP_FULLPATH_TMP_V2_20260828
+ * This pinned FCEUmm advertises need_fullpath=true and retro_load_game()
+ * calls FCEUI_LoadGame(game->path), ignoring game->data. ZIP therefore has
+ * to become a real temporary .fds path for the lifetime of the loaded disk.
+ */
+static Char s_FdsZipTempPath[1024] = {0};
+
+static void _MainLoopRemoveFdsZipTemp(void)
+{
+    if (s_FdsZipTempPath[0])
+    {
+        remove(s_FdsZipTempPath);
+        s_FdsZipTempPath[0] = 0;
+    }
+}
+
+static void _MainLoopFreeRomBuffer(void)
+{
+    if (_RomData)
+        free(_RomData);
+    _RomData = NULL;
+    _RomDataCapacity = 0;
+}
+
+static Bool _MainLoopAllocRomBuffer(Uint32 capacity)
+{
+    Uint8 *p;
+    if (capacity == 0 || _RomData || _RomDataCapacity)
+        return FALSE;
+
+    p = (Uint8 *)memalign(64, (size_t)capacity);
+    if (!p)
+        return FALSE;
+
+    _RomData = p;
+    _RomDataCapacity = capacity;
+    return TRUE;
+}
+
+static Int32 _MainLoopGetBinarySize(const char *pRomFile)
+{
+    int fd = fileXioOpen(pRomFile, FIO_O_RDONLY, 0);
+    int size;
+    if (fd < 0)
+        return -1;
+    size = fileXioLseek(fd, 0, FIO_SEEK_END);
+    fileXioClose(fd);
+    return (size > 0) ? (Int32)size : -1;
+}
+
+static Int32 _MainLoopReadBinaryPrefix(
+    Uint8 *pBuffer, Int32 nBufferBytes, const char *pRomFile)
+{
+    int fd, total = 0;
+    if (!pBuffer || nBufferBytes <= 0)
+        return -1;
+
+    fd = fileXioOpen(pRomFile, FIO_O_RDONLY, 0);
+    if (fd < 0)
+        return -1;
+
+    while (total < nBufferBytes)
+    {
+        int n = fileXioRead(fd, pBuffer + total, nBufferBytes - total);
+        if (n <= 0)
+            break;
+        total += n;
+    }
+    fileXioClose(fd);
+    return total;
+}
+
+static Uint32 _MainLoopRomPayloadLimit(PathExtTypeE eType)
+{
+    if (eType == MAINLOOP_ENTRYTYPE_SEGAROM) return MAINLOOP_SEGA_ROM_MAX_BYTES;
+    if (eType == MAINLOOP_ENTRYTYPE_PCEROM) return MAINLOOP_PCE_ROM_MAX_BYTES;
+    return MAINLOOP_LEGACY_ROM_MAX_BYTES;
+}
+
+static int _MainLoopZipDynamicEntryFilter(
+    const char *pName, unsigned int nBytes)
+{
+    PathExtTypeE eType;
+    if (!pName || !PathExtResolve((char *)pName, &eType, FALSE))
+        return 0;
+
+    switch (eType)
+    {
+        case MAINLOOP_ENTRYTYPE_SNESROM:
+        case MAINLOOP_ENTRYTYPE_NESROM:
+        case MAINLOOP_ENTRYTYPE_NESFDSBIOS:
+            return nBytes <= MAINLOOP_LEGACY_ROM_MAX_BYTES;
+        case MAINLOOP_ENTRYTYPE_NESFDSDISK:
+            /* AURORA_FDS_V4_ZIP_FILTER_20260828 */
+            return nBytes >= MAINLOOP_FDS_ZIP_MIN_BYTES &&
+                   nBytes <= MAINLOOP_FDS_ZIP_MAX_BYTES;
+        case MAINLOOP_ENTRYTYPE_SEGAROM:
+            return nBytes <= MAINLOOP_SEGA_ROM_MAX_BYTES;
+        case MAINLOOP_ENTRYTYPE_PCEROM:
+            return nBytes <= MAINLOOP_PCE_ROM_MAX_BYTES;
+        default:
+            return 0;
+    }
+}
+
+static void _MainLoopAbortPreCoreLoad(void)
+{
+    _MainLoopFreeRomBuffer();
+    if (!MainLoopEnsureGameplayRasterWidth(256))
+        printf("[video] warning: could not restore 256 raster after load failure\n");
+}
+
+
+int _MainLoopReadZipData(Uint8 *pBuffer, Int32 nBufferBytes, const char *pZipFile, char *pFileName)
+{
+        int nBytes;
+
+        nBytes = MinizReadZipFirstMatch(
+                pZipFile,
+                pBuffer,
+                nBufferBytes,
+                pFileName,
+                256,
+                _MainLoopZipNameIsRom);
+
+        if (nBytes > 0)
+        {
+                printf("ZIP: read %s (%d)\n", pFileName ? pFileName : "", nBytes);
+        }
+        else
+        {
+                printf("ZIP: no compatible entry in %s\n", pZipFile ? pZipFile : "");
+        }
+        return nBytes;
+}
+
+Bool _MainLoopLoadRomData(Emu::Rom *pRom, Uint8 *pRomData, Int32 nRomBytes)
+{
+        CMemFileIO romfile;
+        Emu::Rom::LoadErrorE eError;
+
+        // open memoryfile for rom data
+        romfile.Open(pRomData, nRomBytes);
+
+        // load rom
+        /* AURORA_PICODRIVE_STAGE2_ROM_BUFFER: Sega attaches Aurora's
+           already-loaded _RomData directly. No duplicate buffer and no
+           in-place CMemFileIO memcpy. SNES/NES retain the old path. */
+        if (pRom == _pSegaRom)
+            eError = _pSegaRom->AttachBuffer(
+                pRomData, (Uint32)nRomBytes, _RomDataCapacity);
+        else if (pRom == _pPceRom)
+            eError = _pPceRom->AttachBuffer(
+                pRomData, (Uint32)nRomBytes, _RomDataCapacity);
+        else
+            eError = pRom->LoadRom(&romfile);
+        romfile.Close();
+
+        if (eError!=Emu::Rom::LoadErrorE::LOADERROR_NONE)
+        {
+                ConPrint("ERROR: loading rom %d\n", eError);
+                return FALSE;
+        }
+        return TRUE;
+}
+
+Bool _MainLoopLoadBios(Emu::Rom *pRom, const Char *pFilePath)
+{
+        CFileIO romfile;
+        Emu::Rom::LoadErrorE eError;
+
+        // open memoryfile for rom data
+        if (!romfile.Open(pFilePath, "rb"))
+        {
+                ConPrint("ERROR: loading fds bios!\n");
+                return FALSE;
+        }
+
+        // load rom
+        eError = pRom->LoadRom(&romfile);
+        romfile.Close();
+
+        if (eError!=Emu::Rom::LoadErrorE::LOADERROR_NONE)
+        {
+                ConPrint("ERROR: loading rom %d\n", eError);
+                return FALSE;
+        }
+        return TRUE;
+}
+
+/* AURORA_FCEUMM_FDS_V4_TURBO_PAL_PERF_20260827: shared standard NES .pal, exactly 64 RGB triples. */
+Bool _MainLoopLoadNesPalette(const char *pFileName)
+{
+    Uint8 rgb[64 * 3], extra;
+    FILE *fp;
+    size_t got;
+    if (!pFileName) return FALSE;
+    fp = fopen(pFileName, "rb");
+    if (!fp) { MainLoopModalPrintf(60 * 3, "ERROR: cannot open NES palette"); return FALSE; }
+    got = fread(rgb, 1, sizeof(rgb), fp);
+    if (got != sizeof(rgb) || fread(&extra, 1, 1, fp) != 0)
+    {
+        fclose(fp);
+        MainLoopModalPrintf(60 * 3, "ERROR: NES .pal must be exactly 192 bytes");
+        return FALSE;
+    }
+    fclose(fp);
+    if (!QuicknesBridge_SetPalette(rgb) || !FceummFdsBridge_SetPalette(rgb))
+    {
+        MainLoopModalPrintf(60 * 3, "ERROR: could not apply NES palette");
+        return FALSE;
+    }
+    MainLoopStatusPrintf(120, "NES palette loaded.");
+    return TRUE;
+}
+
+Bool _MainLoopLoadSnesPalette(const char *pFileName)
+{
+        Uint32 *pPalData;
+        pPalData = SNPPUColorGetPalette();
+
+        return _MainLoopReadBinaryData((Uint8 *)pPalData, SNPPUCOLOR_NUM * sizeof(Uint32), pFileName) > 0;
+}
+
+
+/* AURORA_V4_12_PRIVATE_FILEXIO_CDDA_PCE_TOC2CUE_20260830 */
+static char s_PceCdrdaoTempCue[1024];
+
+void _MainLoopUnloadRom()
+{
+    /* AURORA_AUDIO_HARDCUT_ROM_UNLOAD_V1 */
+    MainLoopAudioHardCut();
+
+    /* AURORA_COPIER_SRAM_FLUSH_V10_16_20260831
+     *
+     * Classic Front copiers have 256 Kbit / 32 KiB battery-backed SRAM.
+     * Aurora deliberately does not poll SNES SRAM during gameplay, so a
+     * direct game/core switch could otherwise detach the copier before the
+     * menu-open checksum/save path notices the last writes.
+     *
+     * Flush only the real copier SRAM, only at an unload boundary:
+     * - no gameplay polling or periodic I/O;
+     * - no effect on ordinary SNES cartridges or any other core;
+     * - no write at all when the 32 KiB contents are unchanged.
+     *
+     * Do this before SetRom(NULL), while _pSystem, _RomName and the live
+     * SRAM buffer still identify the departing Magicom/SWC instance.
+     */
+    if (_pSystem == _pSnes && _pSnes &&
+        _pSnes->IsSuperWildCard() &&
+        _pSystem->GetSRAMBytes() == 0x8000)
+    {
+        /* AURORA_FINAL_V1_7_D88_DUAL_SRAM_PERSIST_20260901
+         * This is a real power/lifetime boundary. Persist the copier B-RAM
+         * and the inserted battery cart SRAM even when neither dirty detector
+         * changed since the previous save. */
+        (void)_MainLoopForceCheckSRAM();
+        {
+            Bool bSaved = _MainLoopSaveSRAM(TRUE);
+            ConPrint("Copier + cart SRAM unload flush: %s\n",
+                     bSaved ? "saved" : "FAILED");
+            MainLoopStatusPrintf(
+                bSaved ? 120 : 240,
+                bSaved ? "Copier/cart SRAM saved."
+                       : "WARNING: copier/cart SRAM save failed!");
+        }
+    }
+
+    /* AURORA_SWC_CART_SRAM_MEMORY_FINAL_V5_3_20260901
+     * The flush above calls _MainLoopForceCheckSRAM/_MainLoopSaveSRAM while
+     * the cart backing and cartridge filename still exist. Detach only now. */
+    _MainLoopSwcCartSRAMDetach();
+
+    /* AURORA_V4_16_SAFE_GAME_SWITCH_FLUSH_20260830
+     * BgmStop intentionally retains libxmp for fast menu reopen.
+     * A real game switch prefers maximum free EE heap. */
+    BgmReleaseDecoderForGameSwitch();
+
+    // stop recording if we are recording
+    if (s_pMovieClip->IsRecording())
+    {
+        printf("Movie: Record End\n");
+        s_pMovieClip->RecordEnd();
+    } 
+    // stop playing if we are playing
+    if (s_pMovieClip->IsPlaying())
+    {
+        printf("Movie: Play End\n");
+        s_pMovieClip->PlayEnd();
+    } 
+    /* V6.2: recordings belong to the departing ROM. Releasing their lazy
+     * buffers here also guarantees maximum EE heap before the next core. */
+    s_pMovieClip->Discard();
+
+	// unload old rom
+	_pSnes->SetRom(NULL);
+    s_SwcExternalCartPath[0] = 0; /* AURORA_SWC_MEGA_V9_20260831 */
+	_pSnesRom->Unload();
+
+	/* Phase 2: NES unload mirrors the SNES path. NesDisk is unloaded
+	   even though disk-swap input is still gated for Phase 5 - the
+	   wrapper itself exists and owns memory. */
+	_pNes->SetRom(NULL);
+	if (_pFds) _pFds->SetRom(NULL); /* AURORA_FCEUMM_FDS_V0_5_UNLOAD */
+    /* AURORA_FDS_ZIP_FULLPATH_TMP_V2_20260828: FCEUmm has closed the
+     * disk now, so the extracted full-path backing file is no longer needed. */
+    _MainLoopRemoveFdsZipTemp();
+	_pNesRom->Unload();
+	_pNesFDSDisk->Unload();
+	/* AURORA_PICODRIVE_STAGE2_UNLOAD: SetRom(NULL) fully deinitializes PicoDrive. */
+	if (_pSega) _pSega->SetRom(NULL);
+	if (_pSegaRom) _pSegaRom->Unload();
+	if (_pPce) _pPce->SetRom(NULL);
+	if (_pPceRom) _pPceRom->Unload();
+
+    if (s_PceCdrdaoTempCue[0])
+    {
+        remove(s_PceCdrdaoTempCue);
+        s_PceCdrdaoTempCue[0] = 0;
+    }
+
+    /* The cores are detached now; release ROM RAM before gsKit reallocates. */
+    _MainLoopFreeRomBuffer();
+
+    /* AURORA_MD_STABLE_RASTER_V2
+     * Only rebuild the 240p GS after PicoDrive has been shut down.
+     * Browser/SNES/NES/SMS/GG use Aurora's normal physical raster. */
+    /* AURORA_GAME_SWITCH_CLEAR_V1_20260823
+     * System-agnostic: every ROM switch starts from black presentation state.
+     *
+     * The raster helper re-uploads _fbTexture[0] after a gsKit rebuild.
+     * Therefore clear BEFORE the rebuild, otherwise the previous game's last
+     * frame gets copied into the new _OutTex and flashes during next boot. */
+    if (_fbTexture[0]) _fbTexture[0]->Clear();
+    if (_fbTexture[1]) _fbTexture[1]->Clear();
+
+    /* Also cover same-raster switches where no GS rebuild occurs. */
+    if (_fbTexture[0])
+        TextureUpload(&_OutTex, _fbTexture[0]->GetLinePtr(0));
+
+    if (!MainLoopEnsureGameplayRasterWidth(256))
+        printf("[video] warning: could not restore 256 raster after unload\n");
+
+    _bStateSaved = FALSE;
+    _pSystem = NULL;
+    _RomPath[0] = 0;
+    MainLoopStateOnRomChanged();
+
+}
+
+/* AURORA_V4_12_PRIVATE_FILEXIO_CDDA_PCE_TOC2CUE_20260830 */
+typedef struct AuroraPceTocTrack
+{
+    char cueType[16];
+    char dataFile[768];
+    long fileOffsetBytes;
+    long dataSectors;
+    int hasOffset;
+    int generatedPregap;
+    int startSectors;
+    int hasStart;
+    int haveData;
+} AuroraPceTocTrack;
+
+static int _MainLoopPceParseMsf(const char *s)
+{
+    unsigned m, sec, f;
+    if (!s || sscanf(s, "%u:%u:%u", &m, &sec, &f) != 3 ||
+        sec > 59 || f > 74)
+        return -1;
+    return (int)((m * 60u + sec) * 75u + f);
+}
+
+static void _MainLoopPceFormatMsf(long sectors,
+                                  char *out, size_t outBytes)
+{
+    long m, sec, f;
+    if (sectors < 0) sectors = 0;
+    m = sectors / (60 * 75);
+    sectors %= 60 * 75;
+    sec = sectors / 75;
+    f = sectors % 75;
+    snprintf(out, outBytes, "%02ld:%02ld:%02ld", m, sec, f);
+}
+
+static const char *_MainLoopPceTocToken(const char *p,
+                                        char *out, size_t outBytes)
+{
+    size_t n = 0;
+    if (!p || !out || !outBytes)
+        return NULL;
+
+    while (*p == ' ' || *p == '\t')
+        ++p;
+
+    if (*p == '"')
+    {
+        ++p;
+        while (*p && *p != '"')
+        {
+            if (n + 1 < outBytes)
+                out[n++] = *p;
+            ++p;
+        }
+        if (*p == '"') ++p;
+    }
+    else
+    {
+        while (*p && *p != ' ' && *p != '\t' &&
+               *p != '\r' && *p != '\n')
+        {
+            if (n + 1 < outBytes)
+                out[n++] = *p;
+            ++p;
+        }
+    }
+
+    out[n] = 0;
+    return p;
+}
+
+static Bool _MainLoopBuildPceCueFromCdrdao(
+    const char *pTocPath,
+    const char *pSystemDirectory,
+    char *pOutCue,
+    size_t nOutCue)
+{
+    AuroraPceTocTrack tr[99];
+    FILE *in = NULL, *out = NULL;
+    char line[1536];
+    char commonFile[768];
+    char binPath[1024];
+    char tocDir[1024];
+    int trackCount = 0;
+    int active = -1;
+    long expectedOffset = 0;      /* cdrdao virtual byte cursor */
+    long generatedGapBytes = 0;
+    long physicalCueSectors = 0;
+    long actualBinBytes = -1;
+    Bool compactGeneratedGaps = FALSE;
+    const char *slash;
+    int i;
+    Bool ok = FALSE;
+
+    memset(tr, 0, sizeof(tr));
+    commonFile[0] = 0;
+
+    if (!pTocPath || !*pTocPath ||
+        !pSystemDirectory || !*pSystemDirectory ||
+        !pOutCue || nOutCue < 32)
+        return FALSE;
+
+    in = fopen(pTocPath, "rb");
+    if (!in)
+        return FALSE;
+
+    while (fgets(line, sizeof(line), in))
+    {
+        const char *p = line;
+        char *comment = strstr(line, "//");
+        char a0[768], a1[128], a2[128];
+
+        if (comment) *comment = 0;
+        while (*p == ' ' || *p == '\t') ++p;
+        if (!*p || *p == '\r' || *p == '\n')
+            continue;
+
+        if (!strncasecmp(p, "TRACK", 5) &&
+            (p[5] == ' ' || p[5] == '\t'))
+        {
+            char fmt[64];
+            p = _MainLoopPceTocToken(p + 5, fmt, sizeof(fmt));
+            if (!p || trackCount >= 99)
+                goto done;
+
+            active = trackCount++;
+            if (!strcasecmp(fmt, "AUDIO"))
+                strcpy(tr[active].cueType, "AUDIO");
+            else if (!strcasecmp(fmt, "MODE1_RAW"))
+                strcpy(tr[active].cueType, "MODE1/2352");
+            else if (!strcasecmp(fmt, "MODE2_RAW"))
+                strcpy(tr[active].cueType, "MODE2/2352");
+            else
+                goto done;
+            continue;
+        }
+
+        if (active < 0)
+            continue;
+
+        if ((!strncasecmp(p, "ZERO", 4) &&
+             (p[4] == ' ' || p[4] == '\t')) ||
+            (!strncasecmp(p, "SILENCE", 7) &&
+             (p[7] == ' ' || p[7] == '\t')))
+        {
+            const char *q = strchr(p, ' ');
+            int msf = -1;
+            if (!q) q = strchr(p, '\t');
+            if (!q) goto done;
+
+            q = _MainLoopPceTocToken(q, a0, sizeof(a0));
+            q = _MainLoopPceTocToken(q, a1, sizeof(a1));
+
+            if (a1[0] && strchr(a1, ':'))
+                msf = _MainLoopPceParseMsf(a1);
+            else if (a0[0] && strchr(a0, ':'))
+                msf = _MainLoopPceParseMsf(a0);
+
+            if (msf < 0)
+                goto done;
+            tr[active].generatedPregap += msf;
+            continue;
+        }
+
+        if (!strncasecmp(p, "START", 5) &&
+            (p[5] == ' ' || p[5] == '\t'))
+        {
+            int msf;
+            p = _MainLoopPceTocToken(p + 5, a0, sizeof(a0));
+            msf = _MainLoopPceParseMsf(a0);
+            if (msf < 0) goto done;
+            tr[active].startSectors = msf;
+            tr[active].hasStart = 1;
+            continue;
+        }
+
+        if (!strncasecmp(p, "DATAFILE", 8) &&
+            (p[8] == ' ' || p[8] == '\t'))
+        {
+            const char *q = _MainLoopPceTocToken(
+                p + 8, a0, sizeof(a0));
+            q = _MainLoopPceTocToken(q, a1, sizeof(a1));
+            q = _MainLoopPceTocToken(q, a2, sizeof(a2));
+
+            if (!a0[0])
+                goto done;
+
+            snprintf(tr[active].dataFile,
+                     sizeof(tr[active].dataFile), "%s", a0);
+
+            if (!commonFile[0])
+                snprintf(commonFile, sizeof(commonFile), "%s", a0);
+            else if (strcmp(commonFile, a0))
+                goto done;
+
+            if (a1[0] == '#')
+            {
+                char *endp = NULL;
+                tr[active].fileOffsetBytes =
+                    strtol(a1 + 1, &endp, 10);
+                if (!endp || *endp || tr[active].fileOffsetBytes < 0)
+                    goto done;
+                tr[active].hasOffset = 1;
+                tr[active].dataSectors = _MainLoopPceParseMsf(a2);
+            }
+            else
+            {
+                tr[active].fileOffsetBytes = expectedOffset;
+                tr[active].hasOffset = 0;
+                tr[active].dataSectors = _MainLoopPceParseMsf(a1);
+            }
+
+            if (tr[active].dataSectors <= 0)
+                goto done;
+
+            tr[active].haveData = 1;
+
+            if (tr[active].hasOffset &&
+                tr[active].fileOffsetBytes != expectedOffset)
+                goto done;
+
+            expectedOffset += tr[active].dataSectors * 2352L;
+            continue;
+        }
+
+        if (!strncasecmp(p, "INDEX", 5) &&
+            (p[5] == ' ' || p[5] == '\t'))
+            goto done;
+    }
+
+    if (trackCount < 2 || !commonFile[0])
+        goto done;
+
+    for (i = 0; i < trackCount; ++i)
+    {
+        if (!tr[i].haveData)
+            goto done;
+
+        if (tr[i].generatedPregap < 0 ||
+            tr[i].generatedPregap > tr[i].dataSectors)
+            goto done;
+
+        generatedGapBytes +=
+            (long)tr[i].generatedPregap * 2352L;
+    }
+
+    for (i = 0; i < trackCount; ++i)
+    {
+        if (tr[i].generatedPregap && tr[i].hasStart &&
+            tr[i].generatedPregap != tr[i].startSectors)
+            goto done;
+    }
+
+    slash = strrchr(pTocPath, '/');
+    if (strchr(commonFile, ':') || commonFile[0] == '/')
+    {
+        snprintf(binPath, sizeof(binPath), "%s", commonFile);
+    }
+    else
+    {
+        size_t dirLen;
+        if (!slash)
+            snprintf(tocDir, sizeof(tocDir), ".");
+        else
+        {
+            dirLen = (size_t)(slash - pTocPath);
+            if (dirLen >= sizeof(tocDir))
+                goto done;
+            memcpy(tocDir, pTocPath, dirLen);
+            tocDir[dirLen] = 0;
+        }
+
+        if (snprintf(binPath, sizeof(binPath), "%s/%s",
+                     tocDir, commonFile) >= (int)sizeof(binPath))
+            goto done;
+    }
+
+    /* Decide from the real BIN size whether generated ZERO/SILENCE
+     * sectors are physically stored or only exist in the logical TOC. */
+    {
+        FILE *bin = fopen(binPath, "rb");
+        const long virtualBytes = expectedOffset;
+        const long compactBytes = virtualBytes - generatedGapBytes;
+
+        if (!bin)
+            goto done;
+        if (fseek(bin, 0, SEEK_END) != 0)
+        {
+            fclose(bin);
+            goto done;
+        }
+
+        actualBinBytes = ftell(bin);
+        fclose(bin);
+
+        if (actualBinBytes == compactBytes)
+            compactGeneratedGaps = TRUE;
+        else if (actualBinBytes == virtualBytes)
+            compactGeneratedGaps = FALSE;
+        else
+        {
+            printf("[PCE/CD] cdrdao size mismatch: actual=%ld virtual=%ld compact=%ld\n",
+                   actualBinBytes, virtualBytes, compactBytes);
+            goto done;
+        }
+
+        printf("[PCE/CD] cdrdao geometry: actual=%ld virtual=%ld compact=%ld mode=%s\n",
+               actualBinBytes, virtualBytes, compactBytes,
+               compactGeneratedGaps ? "compact-gaps" : "stored-gaps");
+    }
+
+    if (snprintf(pOutCue, nOutCue,
+                 "%s/__AURORA_PCE_CDRDAO_TMP__.cue",
+                 pSystemDirectory) >= (int)nOutCue)
+        goto done;
+
+    remove(pOutCue);
+    out = fopen(pOutCue, "wb");
+    if (!out)
+        goto done;
+
+    fprintf(out, "FILE \"%s\" BINARY\n", binPath);
+
+    /* AURORA_V4_15_PCE_CDRDAO_AUDIO_ENDIAN_20260830
+     * Ordinary CUE has no flag for cdrdao raw AUDIO byte order.
+     * cdrdao raw PCM is MSB-first; preserve it explicitly. */
+    fprintf(out, "REM AURORA_CDRDAO_RAW_AUDIO_MSB_FIRST\n");
+
+    physicalCueSectors = 0;
+    for (i = 0; i < trackCount; ++i)
+    {
+        char msf0[32], msf1[32], pg[32];
+        long index0 = physicalCueSectors;
+        long index1 = index0;
+        long storedSectors = tr[i].dataSectors;
+
+        fprintf(out, "  TRACK %02d %s\n", i + 1, tr[i].cueType);
+
+        if (tr[i].generatedPregap > 0)
+        {
+            if (compactGeneratedGaps)
+            {
+                _MainLoopPceFormatMsf(
+                    tr[i].generatedPregap, pg, sizeof(pg));
+                fprintf(out, "    PREGAP %s\n", pg);
+                storedSectors -= tr[i].generatedPregap;
+            }
+            else
+            {
+                /* AURORA_V4_14_FILEXIO_OPENFLAG_PCE_STORED_PREGAPS_20260830
+                 * Gap sectors are physically stored in this single BIN.
+                 * Represent them as INDEX 00 -> INDEX 01. */
+                index1 += tr[i].generatedPregap;
+                _MainLoopPceFormatMsf(index0, msf0, sizeof(msf0));
+                fprintf(out, "    INDEX 00 %s\n", msf0);
+            }
+        }
+        else if (tr[i].hasStart && tr[i].startSectors > 0)
+        {
+            index1 += tr[i].startSectors;
+            _MainLoopPceFormatMsf(index0, msf0, sizeof(msf0));
+            fprintf(out, "    INDEX 00 %s\n", msf0);
+        }
+
+        if (storedSectors < 0)
+            goto done;
+
+        _MainLoopPceFormatMsf(index1, msf1, sizeof(msf1));
+        fprintf(out, "    INDEX 01 %s\n", msf1);
+
+        printf("[PCE/CD] cue track %02d: INDEX01=%s logical=%ld stored=%ld pregap=%d\n",
+               i + 1, msf1, tr[i].dataSectors,
+               storedSectors, tr[i].generatedPregap);
+
+        physicalCueSectors += storedSectors;
+    }
+
+    if (physicalCueSectors * 2352L != actualBinBytes)
+    {
+        printf("[PCE/CD] generated CUE geometry mismatch: sectors=%ld bytes=%ld actual=%ld\n",
+               physicalCueSectors,
+               physicalCueSectors * 2352L,
+               actualBinBytes);
+        goto done;
+    }
+
+    if (fflush(out) != 0 || fclose(out) != 0)
+    {
+        out = NULL;
+        remove(pOutCue);
+        goto done;
+    }
+    out = NULL;
+
+    printf("[PCE/CD] cdrdao single-BIN converted to CUE: %s -> %s\n",
+           pTocPath, pOutCue);
+    ok = TRUE;
+
+done:
+    if (out) fclose(out);
+    if (in) fclose(in);
+    if (!ok && pOutCue && *pOutCue)
+    {
+        remove(pOutCue);
+        pOutCue[0] = 0;
+    }
+    return ok;
+}
+
+/* AURORA_CD_SRAM_NOTICES_20260824
+ * A CUE and its BIN/audio tracks stay on storage. This path allocates no
+ * frontend ROM buffer, which is essential inside the EE's 32 MiB budget. */
+static Bool _MainLoopExecuteDisc(const char *pMappedPath,
+                                 const char *pOriginalPath,
+                                 const char *pBasePath,
+                                 Bool bLoadSRAM)
+{
+    Char SystemDirectory[512];
+    Emu::System *pSystem = NULL;
+    const char *pName;
+    const char *pPceLoadPath = pMappedPath;
+    int eDisc;
+    Bool bLoaded;
+
+    if (!pMappedPath || !*pMappedPath ||
+        !pOriginalPath || !pBasePath)
+        return FALSE;
+
+    if (!MainLoopEnsureSystemDirectory(
+            SystemDirectory, (Int32)sizeof(SystemDirectory)))
+    {
+        MainLoopModalPrintf(60 * 4,
+            "ERROR: cannot create SNESticle/SYSTEM");
+        return FALSE;
+    }
+
+    /* AURORA_PCE_CDRDAO_TOC_SUPPORT_V4_8_20260830
+     * PicoDrive's classifier is intentionally CUE-only. A cdrdao TOC is a
+     * PCE-supported image format and must reach Beetle without being parsed
+     * by PicoDrive first. Mislabeled TOC-as-.cue is accepted by syntax too. */
+    if (_MainLoopLooksLikeCdrdaoToc(pMappedPath))
+        eDisc = 0;
+    else
+        eDisc = PicoDriveBridge_ProbeSegaCd(pMappedPath);
+
+    if (eDisc < 0)
+    {
+        MainLoopModalPrintf(60 * 4,
+            "ERROR: CUE/TOC or its first track is unreadable");
+        return FALSE;
+    }
+
+    if (eDisc == 0 && _MainLoopLooksLikeCdrdaoToc(pMappedPath))
+    {
+        s_PceCdrdaoTempCue[0] = 0;
+        if (_MainLoopBuildPceCueFromCdrdao(
+                pMappedPath, SystemDirectory,
+                s_PceCdrdaoTempCue,
+                sizeof(s_PceCdrdaoTempCue)))
+        {
+            pPceLoadPath = s_PceCdrdaoTempCue;
+        }
+        else
+        {
+            pPceLoadPath = pMappedPath;
+            printf("[PCE/CD] cdrdao TOC not convertible; using native parser\n");
+        }
+    }
+
+    /* AURORA_SEGA_CD_32X_MD_SCALING_V2R1_20260828
+     * Sega CD uses the same Genesis/MD H32/H40 output. Choose the native
+     * 320-wide raster before PicoDrive allocates MCD; PCE CD stays 256. */
+    /* AURORA_PCE_PRECORE512_V13_20260830
+     * Sega CD keeps MD's 320 raster; PCE CD uses the same fixed 512 storage
+     * raster as HuCards before Beetle is initialized. */
+    if (!MainLoopEnsureGameplayRasterWidth(eDisc > 0 ? 320 : 512))
+    {
+        MainLoopModalPrintf(60 * 3,
+            "ERROR: cannot configure CD video raster");
+        return FALSE;
+    }
+
+    _MainLoop_fOutputIntensity = 1.0f;
+    if (eDisc > 0)
+    {
+        pSystem = _pSega;
+        PicoDriveBridge_SetRegion((int)g_SnesForceRegion);
+        bLoaded = _pSega && _pSega->LoadDisc(
+            pMappedPath, SystemDirectory);
+    }
+    else
+    {
+        pSystem = _pPce;
+        bLoaded = _pPce && _pPce->LoadDisc(
+            pPceLoadPath, SystemDirectory);
+    }
+
+    if (!bLoaded || !pSystem ||
+        (pSystem == _pSega && !_pSega->IsRomReady()) ||
+        (pSystem == _pPce && !_pPce->IsRomReady()))
+    {
+        _MainLoopUnloadRom();
+        if (eDisc > 0)
+            MainLoopModalPrintf(60 * 5,
+                "ERROR: Sega CD failed; put its region BIOS .bin in SYSTEM");
+        else
+            MainLoopModalPrintf(60 * 5,
+                "ERROR: PCE CD failed; put syscard3.pce in SYSTEM");
+        return FALSE;
+    }
+
+    _pSystem = pSystem;
+    pSystem->Reset();
+
+    pName = strrchr(pBasePath, '/');
+    if (!pName)
+        pName = strrchr(pBasePath, '\\');
+    pName = pName ? pName + 1 : pBasePath;
+    snprintf(_RomName, sizeof(_RomName), "%s", pName);
+    snprintf(_RomPath, sizeof(_RomPath), "%s", pOriginalPath);
+    MainLoopStateOnRomChanged();
+
+    ConPrint("CD Loaded: %s (%s)\n", pMappedPath,
+             pSystem == _pSega ? "Sega CD" : "PC Engine CD");
+    _MainLoopSetSampleRate(pSystem->GetSampleRate());
+    if (bLoadSRAM)
+        _MainLoopLoadSRAM();
+
+    _fbTexture[0]->Clear();
+    TextureUpload(&_OutTex, _fbTexture[0]->GetLinePtr(0));
+    return TRUE;
+}
+
+
+/* AURORA_FCEUMM_FDS_V0_5_PATH_BOOT
+ * FCEUmm's pinned libretro frontend requires a real full path. Keep the FDS
+ * image on storage and point the core at Aurora's existing SYSTEM directory.
+ */
+static Bool _MainLoopExecuteFdsPath(const char *pMappedPath,
+                                    const char *pOriginalPath,
+                                    Bool bLoadSRAM)
+{
+    Char SystemDirectory[512];
+    Char BiosPath[1024];
+    FILE *pBios;
+    long nBiosBytes;
+
+    if (!pMappedPath || !*pMappedPath || !pOriginalPath || !*pOriginalPath || !_pFds)
+        return FALSE;
+
+    if (!MainLoopEnsureGameplayRasterWidth(256))
+    {
+        MainLoopModalPrintf(60 * 3, "ERROR: cannot configure FDS video raster");
+        return FALSE;
+    }
+
+    /* AURORA_SYSTEM_BIOS_PATH_FIX_V1_20260826
+     * Prefer an already-existing disksys.rom, with mass0:/SNESticle/SYSTEM
+     * first. Only if no BIOS is found do we fall back to ensuring the normal
+     * firmware directory, so the subsequent error reports the intended path.
+     */
+    if (!MainLoopFindSystemFileDirectory(
+            SystemDirectory, (Int32)sizeof(SystemDirectory), "disksys.rom") &&
+        !MainLoopEnsureSystemDirectory(
+            SystemDirectory, (Int32)sizeof(SystemDirectory)))
+    {
+        MainLoopModalPrintf(60 * 4, "ERROR: cannot create SNESticle/SYSTEM");
+        return FALSE;
+    }
+
+    if (snprintf(BiosPath, sizeof(BiosPath), "%s/disksys.rom", SystemDirectory) >=
+        (int)sizeof(BiosPath))
+    {
+        MainLoopModalPrintf(60 * 4, "ERROR: FDS BIOS path is too long");
+        return FALSE;
+    }
+
+    printf("[FDS] BIOS probe: %s\n", BiosPath);
+    pBios = fopen(BiosPath, "rb");
+    if (!pBios)
+    {
+        printf("[FDS] BIOS fopen failed: %s\n", BiosPath);
+        MainLoopModalPrintf(60 * 5, "ERROR: put disksys.rom in SNESticle/SYSTEM");
+        return FALSE;
+    }
+    if (fseek(pBios, 0, SEEK_END) != 0)
+    {
+        fclose(pBios);
+        MainLoopModalPrintf(60 * 5, "ERROR: cannot read SYSTEM/disksys.rom");
+        return FALSE;
+    }
+    nBiosBytes = ftell(pBios);
+    fclose(pBios);
+    if (nBiosBytes != 8192)
+    {
+        MainLoopModalPrintf(60 * 5, "ERROR: disksys.rom must be exactly 8192 bytes");
+        return FALSE;
+    }
+
+    _MainLoop_fOutputIntensity = 0.8f;
+    if (!_pFds->LoadDisk(pMappedPath, SystemDirectory) || !_pFds->IsRomReady())
+    {
+        _MainLoopUnloadRom();
+        MainLoopModalPrintf(60 * 5,
+            "ERROR: FCEUmm could not boot FDS; check SYSTEM/disksys.rom");
+        return FALSE;
+    }
+
+    _pSystem = _pFds;
+    _pFds->Reset();
+    _MainLoopGetName(_RomName, pOriginalPath);
+    snprintf(_RomPath, sizeof(_RomPath), "%s", pOriginalPath);
+    MainLoopStateOnRomChanged();
+    _MainLoopSetSampleRate(_pFds->GetSampleRate());
+    if (bLoadSRAM)
+        _MainLoopLoadSRAM();
+
+    if (_fbTexture[0]) _fbTexture[0]->Clear();
+    if (_fbTexture[1]) _fbTexture[1]->Clear();
+    if (_fbTexture[0]) TextureUpload(&_OutTex, _fbTexture[0]->GetLinePtr(0));
+
+    _MainLoop_iDisk = 0;
+    _MainLoop_bDiskInserted = TRUE;
+    ConPrint("FDS Loaded via FCEUmm: %s\n", pMappedPath);
+    return TRUE;
+}
+
+
+/* AURORA_FDS_V4_ZIP_LOADER_20260828 */
+/* AURORA_FDS_ZIP_FULLPATH_TMP_V2_20260828 */
+static Bool _MainLoopExecuteFdsZip(const char *pZipPath,
+                                   const char *pOriginalZipPath,
+                                   const char *pMemberName,
+                                   unsigned int uZipIndex,
+                                   Int32 nExpectedBytes,
+                                   Bool bLoadSRAM)
+{
+    Char SystemDirectory[512];
+    Char BiosPath[1024];
+    Char TempPath[1024];
+    char LoadedName[512];
+    FILE *pBios;
+    FILE *pTemp;
+    long nBiosBytes;
+    Uint8 *pData;
+    Int32 nRead;
+    size_t nWritten;
+    Bool bWriteOK;
+    Bool bLoaded;
+
+    if (!pZipPath || !*pZipPath ||
+        !pOriginalZipPath || !*pOriginalZipPath ||
+        !pMemberName || !*pMemberName || !_pFds ||
+        nExpectedBytes < (Int32)MAINLOOP_FDS_ZIP_MIN_BYTES ||
+        (Uint32)nExpectedBytes > MAINLOOP_FDS_ZIP_MAX_BYTES)
+        return FALSE;
+
+    if (!MainLoopEnsureGameplayRasterWidth(256))
+        return FALSE;
+
+    if (!MainLoopFindSystemFileDirectory(
+            SystemDirectory, (Int32)sizeof(SystemDirectory), "disksys.rom") &&
+        !MainLoopEnsureSystemDirectory(
+            SystemDirectory, (Int32)sizeof(SystemDirectory)))
+        return FALSE;
+
+    if (snprintf(BiosPath, sizeof(BiosPath), "%s/disksys.rom",
+                 SystemDirectory) >= (int)sizeof(BiosPath))
+        return FALSE;
+
+    pBios = fopen(BiosPath, "rb");
+    if (!pBios)
+    {
+        MainLoopModalPrintf(60 * 5,
+            "ERROR: put disksys.rom in SNESticle/SYSTEM");
+        return FALSE;
+    }
+    if (fseek(pBios, 0, SEEK_END) != 0)
+    {
+        fclose(pBios);
+        return FALSE;
+    }
+    nBiosBytes = ftell(pBios);
+    fclose(pBios);
+    if (nBiosBytes != 8192)
+    {
+        MainLoopModalPrintf(60 * 5,
+            "ERROR: disksys.rom must be exactly 8192 bytes");
+        return FALSE;
+    }
+
+    pData = (Uint8 *)memalign(64, (size_t)nExpectedBytes);
+    if (!pData)
+    {
+        MainLoopModalPrintf(60 * 3,
+            "ERROR: not enough memory for FDS ZIP");
+        return FALSE;
+    }
+
+    LoadedName[0] = 0;
+    nRead = MinizReadZipEntryToBuffer(
+        pZipPath, uZipIndex, pData, nExpectedBytes,
+        LoadedName, (int)sizeof(LoadedName));
+
+    if (nRead != nExpectedBytes || strcmp(LoadedName, pMemberName) != 0)
+    {
+        free(pData);
+        MainLoopModalPrintf(60 * 4,
+            "ERROR: cannot extract complete FDS from ZIP");
+        return FALSE;
+    }
+
+    if (snprintf(TempPath, sizeof(TempPath), "%s/__AURORA_FDS_TMP__.fds",
+                 SystemDirectory) >= (int)sizeof(TempPath))
+    {
+        free(pData);
+        return FALSE;
+    }
+
+    /* A previous crash may have left the temp file behind. It is never a
+     * user's source image, so replacing this fixed private name is safe. */
+    remove(TempPath);
+    pTemp = fopen(TempPath, "wb");
+    if (!pTemp)
+    {
+        free(pData);
+        MainLoopModalPrintf(60 * 4,
+            "ERROR: SYSTEM must be writable for FDS ZIP");
+        return FALSE;
+    }
+
+    nWritten = fwrite(pData, 1, (size_t)nRead, pTemp);
+    bWriteOK = (nWritten == (size_t)nRead && fflush(pTemp) == 0)
+        ? TRUE : FALSE;
+    if (fclose(pTemp) != 0)
+        bWriteOK = FALSE;
+    free(pData);
+
+    if (!bWriteOK)
+    {
+        remove(TempPath);
+        MainLoopModalPrintf(60 * 4,
+            "ERROR: cannot write temporary FDS image");
+        return FALSE;
+    }
+
+    _MainLoop_fOutputIntensity = 0.8f;
+    bLoaded = _pFds->LoadDisk(TempPath, SystemDirectory);
+
+    if (!bLoaded || !_pFds->IsRomReady())
+    {
+        _MainLoopUnloadRom();
+        remove(TempPath);
+        MainLoopModalPrintf(60 * 5,
+            "ERROR: FCEUmm could not boot FDS from ZIP");
+        return FALSE;
+    }
+
+    snprintf(s_FdsZipTempPath, sizeof(s_FdsZipTempPath), "%s", TempPath);
+
+    _pSystem = _pFds;
+    _pFds->Reset();
+    _MainLoopGetName(_RomName, pMemberName);
+    snprintf(_RomPath, sizeof(_RomPath), "%s", pOriginalZipPath);
+    MainLoopStateOnRomChanged();
+    _MainLoopSetSampleRate(_pFds->GetSampleRate());
+    if (bLoadSRAM)
+        _MainLoopLoadSRAM();
+
+    if (_fbTexture[0]) _fbTexture[0]->Clear();
+    if (_fbTexture[1]) _fbTexture[1]->Clear();
+    if (_fbTexture[0])
+        TextureUpload(&_OutTex, _fbTexture[0]->GetLinePtr(0));
+
+    _MainLoop_iDisk = 0;
+    _MainLoop_bDiskInserted = TRUE;
+    ConPrint("FDS Loaded from ZIP/fullpath: %s -> %s (%d bytes)\n",
+             pZipPath, pMemberName, nRead);
+    return TRUE;
+}
+
+
+
+/* AURORA_SWC_FLOPPY_V1_20260831 */
+static Bool _MainLoopSwcIsFirmwareName(const char *pName);
+
+static const char *_MainLoopSwcBaseName(const char *pPath)
+{
+    const char *p;
+    const char *pName;
+
+    if (!pPath)
+        return NULL;
+
+    p = pPath;
+    pName = pPath;
+    while (*p)
+    {
+        if (*p == '/' || *p == '\\')
+            pName = p + 1;
+        ++p;
+    }
+    return pName;
+}
+
+/* AURORA_SWC_FLOPPY_V5_20260831 */
+static Bool _MainLoopSwcPathIsFirmware(const char *pPath)
+{
+    const char *pName = _MainLoopSwcBaseName(pPath);
+
+    if (!pName)
+        return FALSE;
+
+    if (!strcasecmp(pName, "dsk.rom") ||
+        !strcasecmp(pName, "dsk.sfc") ||
+        !strcasecmp(pName, "dsk.smc"))
+        return TRUE;
+
+    return _MainLoopSwcIsFirmwareName(pName);
+}
+
+static Bool _MainLoopSwcIsFirmwareName(const char *pName)
+{
+    const char *pExt;
+    if (!pName) return FALSE;
+
+    if (strncasecmp(pName, "Super Wild Card", 15) != 0)
+        return FALSE;
+
+    /* AURORA_CLASSIC_COPIER_FIRMWARE_V10_15B_20260831
+     * DX/DX2 are later hardware families, not BIOS revisions of this model. */
+    if (!strncasecmp(pName, "Super Wild Card DX", 18))
+        return FALSE;
+
+    pExt = strrchr(pName, '.');
+    if (!pExt) return FALSE;
+
+    return (!strcasecmp(pExt, ".rom") ||
+            !strcasecmp(pExt, ".sfc") ||
+            !strcasecmp(pExt, ".smc")) ? TRUE : FALSE;
+}
+
+/* AURORA_V6_MAGICOM_FRONT_FAREAST_20260831: classic Super Magicom V1H/V31 frontend recognition. */
+static Bool _MainLoopMagicomNameIsV3H(const char *pName)
+{
+    if (!pName) return FALSE;
+    for (const char *p=pName; p[0] && p[1] && p[2]; ++p)
+        if (!strncasecmp(p,"V3H",3)) return TRUE;
+    return FALSE;
+}
+
+static Bool _MainLoopMagicomPathIsFirmware(const char *pPath)
+{
+    const char *pName=_MainLoopSwcBaseName(pPath);
+    const char *pExt;
+    if (!pName) return FALSE;
+    if (!strcasecmp(pName,"magicom.rom") ||
+        !strcasecmp(pName,"magicom.sfc") ||
+        !strcasecmp(pName,"magicom.smc")) return TRUE;
+    if (strncasecmp(pName,"Super Magicom",13)!=0) return FALSE;
+    pExt=strrchr(pName,'.');
+    if (!pExt) return FALSE;
+    return (!strcasecmp(pExt,".rom") || !strcasecmp(pExt,".sfc") ||
+            !strcasecmp(pExt,".smc")) ? TRUE : FALSE;
+}
+
+static Bool _MainLoopMagicomFirmwareFileLooksValid(const char *pPath)
+{
+    FILE *fp; long nBytes,nBase; Uint8 v[2];
+    const char *pName=_MainLoopSwcBaseName(pPath);
+    if (!pPath || !*pPath || !pName || !_MainLoopMagicomPathIsFirmware(pPath) ||
+        _MainLoopMagicomNameIsV3H(pName)) return FALSE;
+    fp=fopen(pPath,"rb"); if (!fp) return FALSE;
+    if (fseek(fp,0,SEEK_END)!=0) { fclose(fp); return FALSE; }
+    nBytes=ftell(fp);
+    if (nBytes==0x2000L) nBase=0;
+    else if (nBytes==0x2200L) nBase=0x200L;
+    else if (nBytes==0x8000L) nBase=0x6000L;
+    else { fclose(fp); return FALSE; }
+    if (fseek(fp,nBase+0x1FFCL,SEEK_SET)!=0 || fread(v,1,2,fp)!=2)
+    { fclose(fp); return FALSE; }
+    fclose(fp);
+    {
+        Uint16 rv=(Uint16)v[0]|((Uint16)v[1]<<8);
+        return (rv>=0xE000 && rv!=0xFFFF) ? TRUE : FALSE;
+    }
+}
+
+/* AURORA_SWC_MEGA_V9_20260831: validate SWC media before destructive unload. */
+/* AURORA_CLASSIC_MEMORY_MODE_V10_15B_20260831 */
+/* AURORA_CLASSIC_COPIER_FIRMWARE_V10_15B_20260831 */
+static Bool _MainLoopClassicSwcVectorOK(const Uint8 *p, Uint32 nBytes)
+{
+    Uint16 rv;
+    if (!p || nBytes < 0x2000u)
+        return FALSE;
+    rv = (Uint16)p[0x1FFCu] | ((Uint16)p[0x1FFDu] << 8);
+    return (rv >= 0xE000u && rv != 0xFFFFu) ? TRUE : FALSE;
+}
+
+static Bool _MainLoopSwcFirmwareFileLooksValid(const char *pPath)
+{
+    FILE *fp;
+    long nBytes;
+    long nSkip = 0;
+    Uint8 v[2];
+
+    if (!pPath || !*pPath)
+        return FALSE;
+
+    fp = fopen(pPath, "rb");
+    if (!fp)
+        return FALSE;
+
+    if (fseek(fp, 0, SEEK_END) != 0)
+    {
+        fclose(fp);
+        return FALSE;
+    }
+    nBytes = ftell(fp);
+
+    if (nBytes == 0x4200L)
+        nSkip = 512;
+    else if (nBytes == 0x4000L)
+        nSkip = 0;
+    else if (nBytes == 0x10000L)
+    {
+        Uint8 firstBlock[0x4000];
+        Uint8 block[0x4000];
+        Int32 first = -1;
+        Int32 nValid = 0;
+        Bool identical = TRUE;
+
+        for (Int32 q = 0; q < 4; ++q)
+        {
+            long off = (long)q * 0x4000L;
+            if (fseek(fp, off, SEEK_SET) != 0 ||
+                fread(block, 1, sizeof(block), fp) != sizeof(block))
+            {
+                fclose(fp);
+                return FALSE;
+            }
+
+            if (_MainLoopClassicSwcVectorOK(block, (Uint32)sizeof(block)))
+            {
+                if (first < 0)
+                {
+                    first = q;
+                    memcpy(firstBlock, block, sizeof(block));
+                }
+                else if (memcmp(firstBlock, block, sizeof(block)) != 0)
+                {
+                    identical = FALSE;
+                }
+                ++nValid;
+            }
+        }
+
+        if (nValid == 0 || (nValid > 1 && !identical))
+        {
+            fclose(fp);
+            return FALSE;
+        }
+
+        nSkip = (long)first * 0x4000L;
+    }
+    else
+    {
+        fclose(fp);
+        return FALSE;
+    }
+
+    if (fseek(fp, nSkip + 0x1FFCL, SEEK_SET) != 0 ||
+        fread(v, 1, 2, fp) != 2)
+    {
+        fclose(fp);
+        return FALSE;
+    }
+    fclose(fp);
+
+    {
+        Uint16 resetVector = (Uint16)v[0] | ((Uint16)v[1] << 8);
+        return (resetVector != 0x0000 && resetVector != 0xFFFF)
+            ? TRUE : FALSE;
+    }
+}
+
+/* AURORA_COPIER_DSK_PRIORITY_AUTO_DISK1_V10_17_20260901
+ * DSK.* is the canonical user override for classic copier autoboot. It wins over
+ * every named BIOS. Determine classic model from payload, not filename.
+ */
+
+/* AURORA_SUPER_MAGIC_DRIVE_V1_20260902 */
+static const char *_MainLoopSmdBaseName(const char*p){const char*a,*b;if(!p)return"";a=strrchr(p,'/');b=strrchr(p,'\\');if(!a||(b&&b>a))a=b;return a?a+1:p;}
+static Bool _MainLoopIsSmdBiosPath(const char*p){const char*n=_MainLoopSmdBaseName(p);return n&&strcasecmp(n,"mdpbios.bin")==0?TRUE:FALSE;}
+static Bool _MainLoopSmdBiosLooksValid(const char*p){struct stat st;if(!p||stat(p,&st)!=0||S_ISDIR(st.st_mode)||st.st_size!=0x2000)return FALSE;return TRUE;}
+static Bool _MainLoopExecuteSmdFirmware(const char*p,const char*orig,Bool loadSram){if(!_pSega||!_MainLoopIsSmdBiosPath(p)||!_MainLoopSmdBiosLooksValid(p))return FALSE;if(!MainLoopEnsureGameplayRasterWidth(256))return FALSE; /* AURORA_SMD_V1_7_RECOVERY_BOOT_20260903 */if(!_pSega->LoadSuperMagicDrive(p,NULL)){MainLoopModalPrintf(60*5,"SMD boot failed: %s",_pSega->GetSuperMagicDriveError());return FALSE;}_pSystem=_pSega;s_SmdExternalCartPath[0]=0;snprintf(_RomName,sizeof(_RomName),"%s","Super Magic Drive");snprintf(_RomPath,sizeof(_RomPath),"%s",orig&&*orig?orig:p);MainLoopStateOnRomChanged();_MainLoopSetSampleRate(_pSega->GetSampleRate());if(loadSram)_MainLoopLoadSRAM();MainLoopStatusPrintf(180,"Super Magic Drive V3: no disk / no cart");return TRUE;}
+static void _MainLoopSmdPut16(Uint8*p,Uint16 v){p[0]=(Uint8)v;p[1]=(Uint8)(v>>8);}static void _MainLoopSmdPut32(Uint8*p,Uint32 v){p[0]=(Uint8)v;p[1]=(Uint8)(v>>8);p[2]=(Uint8)(v>>16);p[3]=(Uint8)(v>>24);}
+static Bool _MainLoopSmdCreateD88(const char*p){
+ enum{HB=0x2b0,TRACKS=80,HEADS=2,SPT=18,SLOTS=20,SEC=512,SH=16,SLOT=SLOTS*(SH+SEC)};Uint8 header[HB],*track=NULL,logical[SEC];FILE*fp=NULL;Uint32 total=HB+(Uint32)(TRACKS*HEADS)*SLOT,lba=0;Bool ok=FALSE;if(!p||!*p)return FALSE;fp=fopen(p,"wb");if(!fp)return FALSE;track=(Uint8*)malloc(SLOT);if(!track)goto done;memset(header,0,sizeof(header));memcpy(header,"AURORA SMD",10);header[0x1b]=0x20;_MainLoopSmdPut32(header+0x1c,total);for(Uint32 t=0;t<TRACKS*HEADS;t++)_MainLoopSmdPut32(header+0x20+t*4,HB+t*SLOT);if(fwrite(header,1,sizeof(header),fp)!=sizeof(header))goto done;
+ for(Uint32 ti=0;ti<TRACKS*HEADS;ti++){Uint8 c=(Uint8)(ti>>1),h=(Uint8)(ti&1);Uint32 pos=0;memset(track,0,SLOT);for(Uint8 r=1;r<=SPT;r++,lba++){Uint8*sh=track+pos,*data=sh+SH;memset(logical,0,sizeof(logical));if(lba==0){logical[0]=0xeb;logical[1]=0x3c;logical[2]=0x90;memcpy(logical+3,"AURORASMD",9);_MainLoopSmdPut16(logical+11,512);logical[13]=1;_MainLoopSmdPut16(logical+14,1);logical[16]=2;_MainLoopSmdPut16(logical+17,224);_MainLoopSmdPut16(logical+19,2880);logical[21]=0xf0;_MainLoopSmdPut16(logical+22,9);_MainLoopSmdPut16(logical+24,18);_MainLoopSmdPut16(logical+26,2);logical[510]=0x55;logical[511]=0xaa;}else if(lba==1||lba==10){logical[0]=0xf0;logical[1]=logical[2]=0xff;}sh[0]=c;sh[1]=h;sh[2]=r;sh[3]=2;_MainLoopSmdPut16(sh+4,SPT);sh[13]=1;_MainLoopSmdPut16(sh+14,SEC);memcpy(data,logical,SEC);pos+=SH+SEC;}if(fwrite(track,1,SLOT,fp)!=SLOT)goto done;}ok=fflush(fp)==0?TRUE:FALSE;done:if(track)free(track);if(fp)fclose(fp);if(!ok)remove(p);return ok;}
+static Bool _MainLoopSmdStem(char*out,Int32 cap){const char*n,*dot;size_t z;if(!out||cap<=1)return FALSE;n=s_SmdExternalCartPath[0]?_MainLoopSmdBaseName(s_SmdExternalCartPath):"SMD";dot=strrchr(n,'.');z=dot?(size_t)(dot-n):strlen(n);if(!z||z>=(size_t)cap)return FALSE;memcpy(out,n,z);out[z]=0;for(size_t i=0;i<z;i++)if((unsigned char)out[i]<0x20||strchr("\\/:*?\"<>|",out[i]))out[i]='_';return TRUE;}
+static Bool _MainLoopSmdDiskPath(char*out,Int32 cap,unsigned idx){Char dir[512],stem[256];int n;if(!out||cap<=0||!idx||!_MainLoopSmdStem(stem,sizeof(stem))||!MainLoopEnsureSwcDirectory(dir,sizeof(dir)))return FALSE;n=snprintf(out,cap,"%s/%s_%u.d88",dir,stem,idx);return n>=0&&n<cap?TRUE:FALSE;}
+static Bool _MainLoopSmdNumberedIndex(const char*p,unsigned*out){const char*n=_MainLoopSmdBaseName(p),*dot=strrchr(n,'.'),*q;unsigned v=0,m=1;if(!dot||strcasecmp(dot,".d88")!=0||dot==n)return FALSE;q=dot;while(q>n&&q[-1]>='0'&&q[-1]<='9'){--q;v+=(unsigned)(*q-'0')*m;if(m>100000000u)return FALSE;m*=10;}if(q==dot||q==n||q[-1]!='_'||!v)return FALSE;if(out)*out=v;return TRUE;}
+static Bool _MainLoopSmdInsertDisk(const char*p){if(!_pSega||!_pSega->IsSuperMagicDrive()||!p||!*p)return FALSE;MainLoopStatusPrintf(180,"Inserting SMD disk...");MainLoopRender();MainLoopRender();if(!_pSega->SwapSuperMagicDriveDisk(p)){MainLoopStatusPrintf(240,"SMD disk failed: %s",_pSega->GetSuperMagicDriveError());return FALSE;}MainLoopStateOnRomChanged();MainLoopStatusPrintf(120,"SMD disk inserted: %s",_MainLoopSmdBaseName(p));return TRUE;}
+Bool MainLoopSmdCreateNextDisk(void){Char p[1024];struct stat st;if(!_pSega||!_pSega->IsSuperMagicDrive())return FALSE;for(unsigned i=1;i<1000;i++){if(!_MainLoopSmdDiskPath(p,sizeof(p),i))return FALSE;if(stat(p,&st)!=0){MainLoopStatusPrintf(180,"Creating SMD disk %u...",i);MainLoopRender();MainLoopRender();if(!_MainLoopSmdCreateD88(p)){MainLoopStatusPrintf(240,"Could not create SMD D88");return FALSE;}return _MainLoopSmdInsertDisk(p);}}return FALSE;}
+Bool MainLoopSmdSwapNextDisk(void){Char p[1024];struct stat st;unsigned cur=0,next;(void)_MainLoopSmdNumberedIndex(_pSega&&_pSega->IsSuperMagicDrive()?_pSega->GetSuperMagicDriveDiskPath():NULL,&cur);if(!_pSega||!_pSega->IsSuperMagicDrive())return FALSE;next=cur?cur+1:1;if(_MainLoopSmdDiskPath(p,sizeof(p),next)&&stat(p,&st)==0&&!S_ISDIR(st.st_mode))return _MainLoopSmdInsertDisk(p);if(_MainLoopSmdDiskPath(p,sizeof(p),1)&&stat(p,&st)==0&&!S_ISDIR(st.st_mode))return _MainLoopSmdInsertDisk(p);MainLoopStatusPrintf(120,"No numbered SMD disk found");return FALSE;}
+static Bool _MainLoopSmdInsertCartridge(const char*p){
+ Int32 nBytes;size_t req;Emu::Rom::LoadErrorE er;Uint32 crc;if(!_pSega||!_pSegaRom||!_pSega->IsSuperMagicDrive()||!_pSega->IsSuperMagicDriveFirmwareMode()||!p||!*p)return FALSE;nBytes=_MainLoopGetBinarySize(p);if(nBytes<=0)return FALSE;req=PicoDriveBridge_RequiredRomCapacity((size_t)nBytes);if(!req||req>0xffffffffU)return FALSE;
+ if(_pSega->HasSuperMagicDriveCartridge()){_pSega->EjectSuperMagicDriveCartridge();_pSegaRom->Unload();_MainLoopFreeRomBuffer();}
+ if(!_MainLoopAllocRomBuffer((Uint32)req)){MainLoopStatusPrintf(240,"Not enough memory for SMD cartridge");return FALSE;}if(_MainLoopReadBinaryData(_RomData,(Int32)_RomDataCapacity,p)!=nBytes){_MainLoopFreeRomBuffer();return FALSE;}crc=(Uint32)mz_crc32(MZ_CRC32_INIT,_RomData,(size_t)nBytes);er=_pSegaRom->AttachBuffer(_RomData,(Uint32)nBytes,_RomDataCapacity);if(er!=Emu::Rom::LOADERROR_NONE){_MainLoopFreeRomBuffer();return FALSE;}_pSegaRom->SetSourceName(p);if(!_pSega->InsertSuperMagicDriveCartridge(_pSegaRom)){_pSegaRom->Unload();_MainLoopFreeRomBuffer();MainLoopStatusPrintf(240,"SMD cartridge insertion failed: %s",_pSega->GetSuperMagicDriveError());return FALSE;}snprintf(s_SmdExternalCartPath,sizeof(s_SmdExternalCartPath),"%s",p);MainLoopStateOnRomChanged();MainLoopStatePrimeRomIdentityCRC(crc);
+ if(!_pSega->HasSuperMagicDriveDisk()){Char d1[1024];struct stat st;if(_MainLoopSmdDiskPath(d1,sizeof(d1),1)){if(stat(d1,&st)!=0&&!_MainLoopSmdCreateD88(d1)){MainLoopStatusPrintf(210,"SMD cart inserted; could not create disk 1");return TRUE;}(void)_MainLoopSmdInsertDisk(d1);}}
+ MainLoopStatusPrintf(180,"SMD cartridge inserted: %s",_MainLoopSmdBaseName(p));return TRUE;}
+
+static Bool _MainLoopDskMagicomPayloadLooksValid(const char *pPath)
+{
+    FILE *fp;
+    long nBytes, nBase;
+    Uint8 v[2];
+
+    if (!pPath || !*pPath)
+        return FALSE;
+
+    fp = fopen(pPath, "rb");
+    if (!fp)
+        return FALSE;
+    if (fseek(fp, 0, SEEK_END) != 0)
+    {
+        fclose(fp);
+        return FALSE;
+    }
+
+    nBytes = ftell(fp);
+    if (nBytes == 0x2000L) nBase = 0;
+    else if (nBytes == 0x2200L) nBase = 0x200L;
+    else if (nBytes == 0x8000L) nBase = 0x6000L;
+    else
+    {
+        fclose(fp);
+        return FALSE;
+    }
+
+    if (fseek(fp, nBase + 0x1FFCL, SEEK_SET) != 0 ||
+        fread(v, 1, 2, fp) != 2)
+    {
+        fclose(fp);
+        return FALSE;
+    }
+    fclose(fp);
+
+    {
+        Uint16 rv = (Uint16)v[0] | ((Uint16)v[1] << 8);
+        return (rv >= 0xE000 && rv != 0xFFFF) ? TRUE : FALSE;
+    }
+}
+
+static Bool _MainLoopFindPriorityDskFirmware(
+    char *pOut, Int32 nOutBytes, Bool *pMagicom)
+{
+    static const char *kDskNames[] =
+    {
+        "DSK.SFC", "DSK.SMC", "DSK.ROM",
+        "dsk.sfc", "dsk.smc", "dsk.rom"
+    };
+    Char Directory[512];
+
+    if (!pOut || nOutBytes <= 0 || !pMagicom)
+        return FALSE;
+
+    pOut[0] = 0;
+    *pMagicom = FALSE;
+
+    for (Uint32 i = 0;
+         i < sizeof(kDskNames) / sizeof(kDskNames[0]); ++i)
+    {
+        if (!MainLoopFindSystemFileDirectory(
+                Directory, (Int32)sizeof(Directory), kDskNames[i]))
+            continue;
+
+        int n = snprintf(
+            pOut, (size_t)nOutBytes,
+            "%s/%s", Directory, kDskNames[i]);
+        if (n < 0 || n >= nOutBytes)
+        {
+            pOut[0] = 0;
+            continue;
+        }
+
+        if (_MainLoopSwcFirmwareFileLooksValid(pOut))
+        {
+            *pMagicom = FALSE;
+            return TRUE;
+        }
+
+        if (_MainLoopDskMagicomPayloadLooksValid(pOut))
+        {
+            *pMagicom = TRUE;
+            return TRUE;
+        }
+
+        pOut[0] = 0;
+    }
+
+    return FALSE;
+}
+
+/* AURORA_SWC_D88_ONLY_V5_20260901 */
+static Uint32 _MainLoopD88Get32(const Uint8 *p)
+{
+    return (Uint32)p[0] |
+           ((Uint32)p[1] << 8) |
+           ((Uint32)p[2] << 16) |
+           ((Uint32)p[3] << 24);
+}
+
+static Bool _MainLoopSwcD88FileLooksValid(const char *pPath, long nBytes)
+{
+    enum { HeaderMin = 0x2A0, HeaderMax = 0x2B0 };
+    Uint8 Header[HeaderMin];
+    Uint32 diskBytes;
+    Uint32 firstTrack = 0;
+    FILE *fp;
+
+    if (!pPath || nBytes < HeaderMin)
+        return FALSE;
+
+    fp = fopen(pPath, "rb");
+    if (!fp)
+        return FALSE;
+
+    if (fread(Header, 1, sizeof(Header), fp) != sizeof(Header))
+    {
+        fclose(fp);
+        return FALSE;
+    }
+    fclose(fp);
+
+    diskBytes = _MainLoopD88Get32(Header + 0x1C);
+    /* AURORA_SWC_D88_ONLY_V5_2_20260901:
+     * a completed in-BIOS reformat may make the same D88 2DD or 2HD. */
+    if (diskBytes != (Uint32)nBytes ||
+        (Header[0x1B] != 0x10 && Header[0x1B] != 0x20))
+        return FALSE;
+
+    for (Uint32 i = 0; i < 160; ++i)
+    {
+        Uint32 off = _MainLoopD88Get32(Header + 0x20 + i * 4);
+        if (off)
+        {
+            firstTrack = off;
+            break;
+        }
+    }
+
+    return (firstTrack == HeaderMin || firstTrack == HeaderMax)
+        ? TRUE : FALSE;
+}
+
+static Bool _MainLoopSwcDiskFileLooksValid(const char *pPath)
+{
+    struct stat st;
+    long n;
+    const char *pExt;
+
+    if (!pPath || !*pPath || stat(pPath, &st) != 0 ||
+        S_ISDIR(st.st_mode))
+        return FALSE;
+
+    pExt = strrchr(pPath, '.');
+    if (!pExt || strcasecmp(pExt, ".d88") != 0)
+        return FALSE;
+
+    n = (long)st.st_size;
+    return _MainLoopSwcD88FileLooksValid(pPath, n);
+}
+
+static Bool _MainLoopFindSwcFirmware(char *pOut, Int32 nOutBytes)
+{
+    static const char *kNames[] =
+    {
+        /* AURORA_V5_COPIER_LOADER_MEDIA_FLOW_20260831
+         * AURORA_SWC_D88_ONLY_V5_20260901: canonical copier BIOS fallback first. */
+        "DSK.SFC",
+        "DSK.SMC",
+        "DSK.ROM",
+        "dsk.sfc",
+        "dsk.smc",
+        "dsk.rom",
+        "Super Wild Card V2.8CC 06-08-94 BIOS [!].smc",
+        "Super Wild Card V2.8CC 06-08-94 BIOS.smc",
+        "Super Wild Card V2.8CC 06-28-94 BIOS [!].smc",
+        "Super Wild Card V2.8CC 06-28-94 BIOS.smc"
+    };
+    Char Directory[512];
+
+    if (!pOut || nOutBytes <= 0)
+        return FALSE;
+    pOut[0] = 0;
+
+    for (Uint32 i = 0; i < sizeof(kNames) / sizeof(kNames[0]); ++i)
+    {
+        if (MainLoopFindSystemFileDirectory(
+                Directory, (Int32)sizeof(Directory), kNames[i]))
+        {
+            int n = snprintf(pOut, (size_t)nOutBytes,
+                             "%s/%s", Directory, kNames[i]);
+            if (n >= 0 && n < nOutBytes &&
+                _MainLoopSwcFirmwareFileLooksValid(pOut))
+                return TRUE;
+            pOut[0] = 0;
+        }
+    }
+
+    if (MainLoopEnsureSystemDirectory(
+            Directory, (Int32)sizeof(Directory)))
+    {
+        DIR *pDir = opendir(Directory);
+        if (pDir)
+        {
+            struct dirent *pEntry;
+            while ((pEntry = readdir(pDir)) != NULL)
+            {
+                if (_MainLoopSwcIsFirmwareName(pEntry->d_name))
+                {
+                    int n = snprintf(pOut, (size_t)nOutBytes,
+                                     "%s/%s", Directory, pEntry->d_name);
+                    if (n >= 0 && n < nOutBytes &&
+                        _MainLoopSwcFirmwareFileLooksValid(pOut))
+                    {
+                        closedir(pDir);
+                        return TRUE;
+                    }
+                    pOut[0] = 0;
+                }
+            }
+            closedir(pDir);
+        }
+    }
+
+    return FALSE;
+}
+
+
+static Bool _MainLoopExecuteSwcFirmware(const char *pFirmwarePath,
+                                        const char *pOriginalPath,
+                                        Bool bLoadSRAM)
+{
+    if (!pFirmwarePath || !*pFirmwarePath ||
+        !_MainLoopSwcPathIsFirmware(pFirmwarePath) ||
+        !_pSnes)
+        return FALSE;
+
+    if (!MainLoopEnsureGameplayRasterWidth(256))
+        return FALSE;
+
+    if (!_pSnes->LoadSuperWildCard(pFirmwarePath, NULL))
+    {
+        MainLoopModalPrintf(
+            60 * 5, "SWC boot failed: %s",
+            _pSnes->GetSuperWildCardError());
+        return FALSE;
+    }
+
+    _pSystem = _pSnes;
+    s_SwcExternalCartPath[0] = 0;
+    snprintf(_RomName, sizeof(_RomName), "%s", "Super Wild Card");
+    snprintf(
+        _RomPath, sizeof(_RomPath), "%s",
+        (pOriginalPath && *pOriginalPath) ? pOriginalPath : pFirmwarePath);
+    MainLoopStateOnRomChanged();
+
+    _MainLoopSetSampleRate(_pSnes->GetSampleRate());
+    if (bLoadSRAM)
+        _MainLoopLoadSRAM();
+
+    MainLoopStatusPrintf(150, "Super Wild Card: no disk inserted");
+    return TRUE;
+}
+
+static Bool _MainLoopExecuteMagicomFirmware(
+    const char *pFirmwarePath, const char *pOriginalPath, Bool bLoadSRAM)
+{
+    if (!pFirmwarePath || !*pFirmwarePath ||
+        !_MainLoopMagicomPathIsFirmware(pFirmwarePath) ||
+        !_MainLoopMagicomFirmwareFileLooksValid(pFirmwarePath) || !_pSnes)
+        return FALSE;
+    if (!MainLoopEnsureGameplayRasterWidth(256)) return FALSE;
+    if (!_pSnes->LoadSuperMagicom(pFirmwarePath,NULL))
+    {
+        MainLoopModalPrintf(60*5,"Magicom boot failed: %s",_pSnes->GetSuperWildCardError());
+        return FALSE;
+    }
+    _pSystem=_pSnes;
+    s_SwcExternalCartPath[0]=0;
+    snprintf(_RomName,sizeof(_RomName),"%s","Super Magicom");
+    snprintf(_RomPath,sizeof(_RomPath),"%s",
+        (pOriginalPath && *pOriginalPath) ? pOriginalPath : pFirmwarePath);
+    MainLoopStateOnRomChanged();
+    _MainLoopSetSampleRate(_pSnes->GetSampleRate());
+    if (bLoadSRAM) _MainLoopLoadSRAM();
+    MainLoopStatusPrintf(150,"Super Magicom: no disk inserted");
+    return TRUE;
+}
+
+
+/* AURORA_COPIER_DSK_PRIORITY_AUTO_DISK1_V10_17_20260901 */
+static Bool _MainLoopSwcBuildCartDiskPath(
+    char *pOut, Int32 nOutBytes, unsigned nDisk);
+/* AURORA_D88_RAM_IO_PERF_V1_5_MULTIDISK_20260901 */
+/* AURORA_D88_V1_6_MULTIDISK_1600_20260901 */
+static Bool _MainLoopSwcCreateFat12D88(const char *pPath);
+static Bool _MainLoopSwcNumberedDiskIndex(
+    const char *pPath, unsigned *pIndex);
+
+static Bool _MainLoopSwcInsertCartridge(const char *pPath)
+{
+    CFileIO romfile;
+    Emu::Rom::LoadErrorE eError;
+    if (!_pSnes || !_pSnes->IsSuperWildCard() ||
+        !pPath || !*pPath || !_pSnesRom)
+        return FALSE;
+
+    /* AURORA_SWC_MEDIA_FLOW_V2_20260902 */
+    if (_pSnes->HasSuperWildCardCartridge())
+    {
+        if (!_pSnes->IsSuperWildCardFirmwareMode())
+            return FALSE;
+
+        (void)_MainLoopForceCheckSRAM();
+        (void)_MainLoopSaveSRAM(TRUE);
+        _MainLoopSwcCartSRAMDetach();
+        _pSnes->EjectSuperWildCardCartridge();
+        _pSnesRom->Unload();
+        s_SwcExternalCartPath[0] = 0;
+    }
+
+    /* AURORA_D88_RAM_IO_PERF_V1_1_20260901
+     * Two renders cover both GS buffers before synchronous work. */
+    /* AURORA_D88_RAM_IO_PERF_V1_5_MULTIDISK_20260901:
+     * MainLoopStatusPrintf is the exact blue/left path used by "SRAM saved.". */
+    MainLoopStatusPrintf(180, "Inserting cartridge...");
+    MainLoopRender();
+    MainLoopRender();
+
+    if (!romfile.Open(pPath, "rb"))
+    {
+        MainLoopStatusPrintf(180, "Cannot open cartridge");
+        return FALSE;
+    }
+
+    eError = _pSnesRom->LoadRom(&romfile);
+    romfile.Close();
+    SnesRomResetRuntimeCompatForExternalDevice();
+
+    if (eError != Emu::Rom::LOADERROR_NONE)
+    {
+        _pSnesRom->Unload();
+        MainLoopStatusPrintf(180, "Invalid SNES cartridge");
+        return FALSE;
+    }
+
+    if (!_pSnes->InsertSuperWildCardCartridge(_pSnesRom))
+    {
+        _pSnesRom->Unload();
+        MainLoopStatusPrintf(180, "Cartridge insertion failed");
+        return FALSE;
+    }
+
+    snprintf(
+        s_SwcExternalCartPath, sizeof(s_SwcExternalCartPath),
+        "%s", pPath);
+
+    /* AURORA_SWC_CART_SRAM_MEMORY_FINAL_V5_3_20260901 */
+    _MainLoopSwcCartSRAMAttach(pPath);
+    MainLoopStateOnRomChanged();
+
+    /* AURORA_COPIER_DSK_PRIORITY_AUTO_DISK1_V10_17_20260901
+     * If this cartridge has no _1 D88 yet, create the same logical 1.44-MiB
+     * D88 media used by L2+Square and hot-insert it immediately. Existing _1
+     * media is never overwritten or auto-inserted.
+     */
+    {
+        Char AutoDiskPath[1024];
+        struct stat AutoDiskStat;
+
+        if (_MainLoopSwcBuildCartDiskPath(
+                AutoDiskPath, sizeof(AutoDiskPath), 1))
+        {
+            Bool bExists =
+                stat(AutoDiskPath, &AutoDiskStat) == 0 &&
+                !S_ISDIR(AutoDiskStat.st_mode);
+
+            if (!bExists)
+            {
+                MainLoopStatusPrintf(180, "Creating disk 1...");
+                MainLoopRender();
+                MainLoopRender();
+
+                if (!_MainLoopSwcCreateFat12D88(AutoDiskPath))
+                {
+                    MainLoopStatusPrintf(
+                        210,
+                        "Cartridge inserted; could not create _1 disk");
+                    return TRUE;
+                }
+            }
+
+            MainLoopStatusPrintf(180, "Inserting disk 1...");
+            MainLoopRender();
+            MainLoopRender();
+
+            if (!_pSnes->SwapSuperWildCardDisk(AutoDiskPath))
+            {
+                if (!bExists)
+                    remove(AutoDiskPath);
+                MainLoopStatusPrintf(
+                    210,
+                    "Cartridge inserted; _1 disk insert failed");
+                return TRUE;
+            }
+
+            MainLoopStateOnRomChanged();
+            MainLoopStatusPrintf(
+                180, "Cartridge + %s inserted",
+                _MainLoopSwcBaseName(AutoDiskPath));
+            return TRUE;
+        }
+    }
+
+    MainLoopStatusPrintf(
+        180, "SWC cartridge inserted: %s",
+        _MainLoopSwcBaseName(pPath));
+    return TRUE;
+}
+
+
+static Bool _MainLoopSwcCartStem(char *pOut, Int32 nOutBytes)
+{
+    const char *pName;
+    const char *pExt;
+    const char *pSource;
+    Bool bDiskStem = FALSE;
+    size_t n;
+
+    if (!pOut || nOutBytes <= 1)
+        return FALSE;
+
+    pSource = s_SwcExternalCartPath;
+
+    /* AURORA_SWC_BROWSER_DISK_STEM_V1_20260902:
+     * With no donor/external cartridge, inherit the currently mounted D88
+     * family instead of creating Dummy_N.  GAME_3.d88 therefore continues
+     * as GAME_4.d88 (subject to the normal first-free numbered scan). */
+    if (!pSource[0])
+    {
+        pSource = (_pSnes && _pSnes->IsSuperWildCard())
+                    ? _pSnes->GetSuperWildCardDiskPath()
+                    : NULL;
+        if (!pSource || !*pSource)
+        {
+            int nChars = snprintf(pOut, (size_t)nOutBytes, "%s", "Dummy");
+            return nChars >= 0 && nChars < nOutBytes ? TRUE : FALSE;
+        }
+        bDiskStem = TRUE;
+    }
+
+    pName = _MainLoopSwcBaseName(pSource);
+    if (!pName || !*pName)
+        return FALSE;
+
+    pExt = strrchr(pName, '.');
+    n = pExt ? (size_t)(pExt - pName) : strlen(pName);
+
+    if (bDiskStem)
+    {
+        size_t end = n;
+        while (end > 0 && pName[end - 1] >= '0' && pName[end - 1] <= '9')
+            --end;
+        if (end < n && end > 0 && pName[end - 1] == '_')
+            n = end - 1;
+    }
+
+    if (!n || n >= (size_t)nOutBytes)
+        return FALSE;
+
+    memcpy(pOut, pName, n);
+    pOut[n] = 0;
+
+    for (size_t i = 0; i < n; ++i)
+    {
+        unsigned char c = (unsigned char)pOut[i];
+        if (c < 0x20 || strchr("\\/:*?\"<>|", c))
+            pOut[i] = '_';
+    }
+    while (n > 0 && (pOut[n - 1] == ' ' || pOut[n - 1] == '.'))
+        pOut[--n] = '_';
+
+    return pOut[0] ? TRUE : FALSE;
+}
+
+static Bool _MainLoopSwcBuildCartDiskPath(char *pOut,
+                                           Int32 nOutBytes,
+                                           unsigned nDisk)
+{
+    Char Directory[512];
+    Char Stem[256];
+    int n;
+
+    if (!pOut || nOutBytes <= 0 || nDisk == 0 ||
+        !_MainLoopSwcCartStem(Stem, sizeof(Stem)) ||
+        !MainLoopEnsureSwcDirectory(
+            Directory, (Int32)sizeof(Directory)))
+        return FALSE;
+
+    /* AURORA_SWC_D88_ONLY_V5_20260901 */
+    n = snprintf(
+        pOut, (size_t)nOutBytes,
+        "%s/%s_%u.d88", Directory, Stem, nDisk);
+    return n >= 0 && n < nOutBytes ? TRUE : FALSE;
+}
+
+static Bool _MainLoopSwcFindFirstExistingCartDisk(
+    char *pOut, Int32 nOutBytes)
+{
+    Char Directory[512];
+    Char Stem[256];
+    Char Prefix[300];
+    DIR *pDir;
+    struct dirent *pEntry;
+    unsigned best = 0;
+    Char BestName[512] = "";
+
+    if (!pOut || nOutBytes <= 0 ||
+        !_MainLoopSwcCartStem(Stem, sizeof(Stem)) ||
+        !MainLoopEnsureSwcDirectory(
+            Directory, (Int32)sizeof(Directory)))
+        return FALSE;
+
+    if (snprintf(Prefix, sizeof(Prefix), "%s_", Stem) >=
+        (int)sizeof(Prefix))
+        return FALSE;
+
+    pDir = opendir(Directory);
+    if (!pDir)
+        return FALSE;
+
+    while ((pEntry = readdir(pDir)) != NULL)
+    {
+        const char *p = pEntry->d_name;
+        const char *pDigits;
+        unsigned value = 0;
+        Bool overflow = FALSE;
+
+        if (strncasecmp(p, Prefix, strlen(Prefix)) != 0)
+            continue;
+
+        pDigits = p + strlen(Prefix);
+        if (*pDigits < '0' || *pDigits > '9')
+            continue;
+
+        p = pDigits;
+        while (*p >= '0' && *p <= '9')
+        {
+            unsigned digit = (unsigned)(*p - '0');
+
+            /* AURORA_SWC_SWAP_INDEX_BOUNDS_V4_4_20260901 */
+            if (value > ((~0u) - digit) / 10u)
+            {
+                overflow = TRUE;
+                break;
+            }
+
+            value = value * 10u + digit;
+            ++p;
+        }
+
+        if (overflow || value == 0 ||
+            strcasecmp(p, ".d88") != 0)
+            continue;
+
+        if (!best || value < best)
+        {
+            best = value;
+            snprintf(BestName, sizeof(BestName), "%s", pEntry->d_name);
+        }
+    }
+    closedir(pDir);
+
+    if (!best)
+        return FALSE;
+
+    {
+        struct stat st;
+        int n = snprintf(
+            pOut, (size_t)nOutBytes,
+            "%s/%s", Directory, BestName);
+        if (n < 0 || n >= nOutBytes ||
+            stat(pOut, &st) != 0 || S_ISDIR(st.st_mode))
+            return FALSE;
+    }
+    return TRUE;
+}
+
+
+/* AURORA_SWC_DEFAULT_FLOPPY_1440_V4_1_20260901
+ * Standard 1.44 MiB FAT12: 2880 sectors, 18 sectors/track, 9 sectors/FAT. */
+/* AURORA_SWC_DEFAULT_FLOPPY_1440_V4_1_20260901
+ * AURORA_SWC_D88_ONLY_V5_20260901
+ * AURORA_SWC_D88_ONLY_V5_1_20260901
+ * The D88 container reserves 20 sector records per physical track while
+ * declaring only 18 active sectors. Logical format is standard FAT12 1.44
+ * MiB; the same file can later be FORMAT TRACK'ed to 20 SPT / 1.6 MiB. */
+/* AURORA_D88_WRITE_HELPERS_COMPILEFIX_20260901
+ * D88 stores integer fields little-endian. */
+static void _MainLoopD88Put16(Uint8 *p, Uint16 v)
+{
+    p[0] = (Uint8)(v & 0xFFu);
+    p[1] = (Uint8)((v >> 8) & 0xFFu);
+}
+
+static void _MainLoopD88Put32(Uint8 *p, Uint32 v)
+{
+    p[0] = (Uint8)(v & 0xFFu);
+    p[1] = (Uint8)((v >> 8) & 0xFFu);
+    p[2] = (Uint8)((v >> 16) & 0xFFu);
+    p[3] = (Uint8)((v >> 24) & 0xFFu);
+}
+
+/* AURORA_SWC_DEFAULT_FLOPPY_1440_V4_1_20260901
+ * AURORA_SWC_D88_ONLY_V5_20260901
+ * AURORA_SWC_D88_ONLY_V5_1_20260901
+ * AURORA_D88_RAM_IO_PERF_V1_1_20260901
+ *
+ * Build the complete fixed-capacity D88 in EE RAM and emit it with one
+ * sequential fwrite. Logical FAT12 remains 1.44 MiB / 18 SPT; each track
+ * still reserves physical room for 20 SPT so BIOS FORMAT can reach 1.6 MiB. */
+/* AURORA_SWC_DEFAULT_FLOPPY_1440_V4_1_20260901
+ * AURORA_SWC_D88_ONLY_V5_20260901
+ * AURORA_SWC_D88_ONLY_V5_1_20260901
+ * AURORA_D88_RAM_IO_PERF_V1_1_20260901
+ * AURORA_D88_V1_6_MULTIDISK_1600_20260901
+ *
+ * NEW media default is restored to 1.6 MiB:
+ *   80 cylinders x 2 heads x 20 sectors x 512 = 1,638,400 logical bytes.
+ * FAT12 requires 10 sectors/FAT at this geometry.
+ *
+ * The D88 container is streamed one physical track at a time. Peak temporary
+ * creation RAM is only 20 x (16+512) = 10,560 bytes, important because the
+ * currently inserted D88 is already cached in EE RAM. */
+static Bool _MainLoopSwcCreateFat12D88(const char *pPath)
+{
+    enum
+    {
+        HeaderBytes = 0x2B0,
+        Tracks = 80,
+        Heads = 2,
+        ActiveSectors = 20,
+        D88SlotSectors = 20,
+        SectorBytes = 512,
+        SectorHeaderBytes = 16,
+        SlotBytes =
+            D88SlotSectors * (SectorHeaderBytes + SectorBytes)
+    };
+
+    Uint8 Header[HeaderBytes];
+    Uint8 *Track = NULL;
+    const Uint32 totalBytes =
+        HeaderBytes + (Uint32)Tracks * Heads * SlotBytes;
+    FILE *fp = NULL;
+    Bool ok = FALSE;
+
+    if (!pPath || !*pPath)
+        return FALSE;
+
+    Track = (Uint8 *)malloc(SlotBytes);
+    if (!Track)
+        return FALSE;
+
+    fp = fopen(pPath, "wb");
+    if (!fp)
+        goto done;
+
+    memset(Header, 0, sizeof(Header));
+    memcpy(Header, "AURORA SWC", 10);
+    Header[0x1A] = 0x00;
+    Header[0x1B] = 0x20;
+    _MainLoopD88Put32(Header + 0x1C, totalBytes);
+
+    for (Uint32 t = 0; t < (Uint32)(Tracks * Heads); ++t)
+        _MainLoopD88Put32(
+            Header + 0x20 + t * 4,
+            HeaderBytes + t * SlotBytes);
+
+    if (fwrite(Header, 1, sizeof(Header), fp) != sizeof(Header))
+        goto done;
+
+    for (Uint32 c = 0; c < Tracks; ++c)
+    {
+        for (Uint32 h = 0; h < Heads; ++h)
+        {
+            memset(Track, 0, SlotBytes);
+
+            for (Uint32 r = 1; r <= ActiveSectors; ++r)
+            {
+                Uint32 lba =
+                    ((c * Heads + h) * ActiveSectors) + (r - 1);
+                Uint32 rec =
+                    (r - 1) * (SectorHeaderBytes + SectorBytes);
+                Uint8 *sh = Track + rec;
+                Uint8 *sector = sh + SectorHeaderBytes;
+
+                sh[0] = (Uint8)c;
+                sh[1] = (Uint8)h;
+                sh[2] = (Uint8)r;
+                sh[3] = 2;
+                _MainLoopD88Put16(
+                    sh + 4, (Uint16)ActiveSectors);
+                sh[6] = 0x00;
+                sh[7] = 0x00;
+                sh[8] = 0x00;
+                sh[13] = 1;
+                _MainLoopD88Put16(
+                    sh + 14, SectorBytes);
+
+                if (lba == 0)
+                {
+                    sector[0] = 0xEB;
+                    sector[1] = 0x3C;
+                    sector[2] = 0x90;
+                    memcpy(sector + 3, "AURORASW", 8);
+
+                    sector[11] = 0x00;
+                    sector[12] = 0x02;
+                    sector[13] = 0x01;
+                    sector[14] = 0x01;
+                    sector[15] = 0x00;
+                    sector[16] = 0x02;
+                    sector[17] = 0xE0;
+                    sector[18] = 0x00;
+
+                    sector[19] = 0x80;
+                    sector[20] = 0x0C;
+                    sector[21] = 0xF0;
+                    sector[22] = 0x0A;
+                    sector[23] = 0x00;
+                    sector[24] = 0x14;
+                    sector[25] = 0x00;
+                    sector[26] = 0x02;
+                    sector[27] = 0x00;
+
+                    sector[38] = 0x29;
+                    sector[39] = 0x41;
+                    sector[40] = 0x55;
+                    sector[41] = 0x52;
+                    sector[42] = 0x36;
+                    memcpy(sector + 43, "NO NAME    ", 11);
+                    memcpy(sector + 54, "FAT12   ", 8);
+                    sector[510] = 0x55;
+                    sector[511] = 0xAA;
+                }
+                else if (lba == 1 || lba == 11)
+                {
+                    sector[0] = 0xF0;
+                    sector[1] = 0xFF;
+                    sector[2] = 0xFF;
+                }
+            }
+
+            if (fwrite(Track, 1, SlotBytes, fp) != SlotBytes)
+                goto done;
+        }
+    }
+
+    if (fflush(fp) != 0 ||
+        ftell(fp) != (long)totalBytes)
+        goto done;
+
+    ok = TRUE;
+
+done:
+    if (fp)
+        fclose(fp);
+    if (Track)
+        free(Track);
+
+    if (!ok)
+    {
+        remove(pPath);
+        return FALSE;
+    }
+
+    if (!_MainLoopSwcD88FileLooksValid(
+            pPath, (long)totalBytes))
+    {
+        remove(pPath);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+/* AURORA_V5_COPIER_LOADER_MEDIA_FLOW_20260831: no automatic floppy provisioning. */
+
+Bool MainLoopSwcCreateNextDisk(void)
+{
+    Char Path[1024];
+    struct stat st;
+    unsigned nDisk;
+
+    if (!_pSnes || !_pSnes->IsSuperWildCard())
+        return FALSE;
+
+    /* AURORA_D88_RAM_IO_PERF_V1_5_MULTIDISK_20260901
+     * Manual L2+Square creation is CREATE-ONLY. It must never eject/replace
+     * the currently inserted disk. The sole automatic insertion remains the
+     * cartridge auto-provision path for a missing _1.d88. */
+    for (nDisk = 1; nDisk < 10000; ++nDisk)
+    {
+        if (!_MainLoopSwcBuildCartDiskPath(Path, sizeof(Path), nDisk))
+            return FALSE;
+
+        if (stat(Path, &st) != 0)
+            break;
+    }
+
+    if (nDisk >= 10000)
+    {
+        MainLoopStatusPrintf(180, "Too many numbered disks");
+        return FALSE;
+    }
+
+    MainLoopStatusPrintf(180, "Creating disk %u...", nDisk);
+    MainLoopRender();
+    MainLoopRender();
+
+    if (!_MainLoopSwcCreateFat12D88(Path))
+    {
+        MainLoopStatusPrintf(180, "Could not create disk image");
+        return FALSE;
+    }
+
+    MainLoopStatusPrintf(
+        150,
+        "Created disk %u: %s",
+        nDisk,
+        _MainLoopSwcBaseName(Path));
+    return TRUE;
+}
+
+static Bool _MainLoopSwcInsertDisk(const char *pPath)
+{
+    const char *pExt;
+    unsigned shown = 0;
+
+    if (!_pSnes || !_pSnes->IsSuperWildCard() ||
+        !pPath || !*pPath)
+        return FALSE;
+
+    pExt = strrchr(pPath, '.');
+    if (!pExt || strcasecmp(pExt, ".d88") != 0)
+    {
+        MainLoopStatusPrintf(
+            180, "Unsupported D88 floppy image");
+        return FALSE;
+    }
+
+    /* AURORA_D88_RAM_IO_PERF_V1_5_MULTIDISK_20260901
+     * Do not pre-open/pre-read the D88 here. MountDisk already performs the
+     * authoritative full RAM-cache validation, so the old frontend pre-probe
+     * was duplicate host I/O on every browser insertion. */
+    if (_MainLoopSwcNumberedDiskIndex(pPath, &shown))
+        MainLoopStatusPrintf(180, "Inserting disk %u...", shown);
+    else
+        MainLoopStatusPrintf(
+            180,
+            "Inserting disk: %s...",
+            _MainLoopSwcBaseName(pPath));
+
+    MainLoopRender();
+    MainLoopRender();
+
+    if (!_pSnes->SwapSuperWildCardDisk(pPath))
+    {
+        MainLoopStatusPrintf(
+            180, "SWC disk insert failed: %s",
+            _pSnes->GetSuperWildCardError());
+        return FALSE;
+    }
+
+    MainLoopStateOnRomChanged();
+
+    MainLoopStatusPrintf(
+        180, "SWC floppy mounted %s: %s",
+        _pSnes->IsSuperWildCardDiskWritable() ? "RW" : "READ-ONLY",
+        _MainLoopSwcBaseName(pPath));
+    return TRUE;
+}
+
+
+static Bool _MainLoopExecuteSwcDisk(const char *pMappedPath,
+                                    const char *pOriginalPath,
+                                    Bool bLoadSRAM)
+{
+    Char FirmwarePath[1024];
+
+    if (!pMappedPath || !*pMappedPath || !pOriginalPath || !*pOriginalPath ||
+        !_pSnes)
+        return FALSE;
+
+    Bool bMagicom = FALSE;
+
+    /* AURORA_COPIER_DSK_PRIORITY_AUTO_DISK1_V10_17_20260901
+     * Canonical DSK.* always wins over every named copier BIOS. */
+    if (!_MainLoopFindPriorityDskFirmware(
+            FirmwarePath, sizeof(FirmwarePath), &bMagicom))
+    {
+        if (!_MainLoopFindSwcFirmware(FirmwarePath, sizeof(FirmwarePath)))
+        {
+            Char Directory[512];
+            DIR *d = NULL;
+            struct dirent *e;
+
+            if (MainLoopEnsureSystemDirectory(
+                    Directory, sizeof(Directory)))
+                d = opendir(Directory);
+
+            if (d)
+            {
+                while ((e = readdir(d)) != NULL)
+                {
+                    if (_MainLoopMagicomPathIsFirmware(e->d_name))
+                    {
+                        int n = snprintf(
+                            FirmwarePath, sizeof(FirmwarePath),
+                            "%s/%s", Directory, e->d_name);
+                        if (n > 0 &&
+                            n < (int)sizeof(FirmwarePath) &&
+                            _MainLoopMagicomFirmwareFileLooksValid(
+                                FirmwarePath))
+                        {
+                            bMagicom = TRUE;
+                            break;
+                        }
+                    }
+                }
+                closedir(d);
+            }
+
+            if (!bMagicom)
+            {
+                MainLoopModalPrintf(
+                    60 * 5,
+                    "Classic copier BIOS missing in SYSTEM");
+                return FALSE;
+            }
+        }
+    }
+
+    if (!MainLoopEnsureGameplayRasterWidth(256))
+    {
+        MainLoopModalPrintf(60 * 3, "ERROR: cannot configure SWC SNES raster");
+        return FALSE;
+    }
+
+    if (!(bMagicom ? _pSnes->LoadSuperMagicom(FirmwarePath, pMappedPath) : _pSnes->LoadSuperWildCard(FirmwarePath, pMappedPath)))
+    {
+        MainLoopModalPrintf(
+            60 * 5,
+            "SWC boot failed: %s",
+            _pSnes->GetSuperWildCardError());
+        return FALSE;
+    }
+
+    _pSystem = _pSnes;
+    snprintf(_RomName, sizeof(_RomName), "%s", bMagicom ? "Super Magicom" : "Super Wild Card");
+    s_SwcExternalCartPath[0] = 0; /* AURORA_SWC_FLOPPY_V5_20260831 */
+    snprintf(_RomPath, sizeof(_RomPath), "%s", pOriginalPath);
+    MainLoopStateOnRomChanged();
+
+    _MainLoopSetSampleRate(_pSnes->GetSampleRate());
+    if (bLoadSRAM)
+        _MainLoopLoadSRAM();
+
+    if (_fbTexture[0]) _fbTexture[0]->Clear();
+    if (_fbTexture[1]) _fbTexture[1]->Clear();
+    if (_fbTexture[0])
+        TextureUpload(&_OutTex, _fbTexture[0]->GetLinePtr(0));
+
+    ConPrint("Super Wild Card V4: BIOS=%s disk=%s\n",
+             FirmwarePath, pMappedPath);
+    /* AURORA_SWC_MEDIA_PROBE_V10_2_20260831: cold-boot media confirmation. */
+    MainLoopStatusPrintf(
+        210, "SWC cold-boot floppy mounted %s: %s",
+        _pSnes->IsSuperWildCardDiskWritable() ? "RW" : "READ-ONLY",
+        _MainLoopSwcBaseName(pMappedPath));
+    return TRUE;
+}
+
+/* AURORA_SWC_SWAP_REPORT_REAL_INDEX_V4_2_20260901
+ * AURORA_SWC_SWAP_REPORT_STRICT_INDEX_V4_3_20260901
+ * AURORA_SWC_SWAP_INDEX_BOUNDS_V4_4_20260901
+ * AURORA_SWC_D88_ONLY_V5_20260901
+ * Parse basename_<n>.d88 without unsigned wrap. */
+static Bool _MainLoopSwcNumberedDiskIndex(
+    const char *pPath, unsigned *pIndex)
+{
+    const Char *pName;
+    const Char *pExt;
+    const Char *pDigits;
+    const Char *p;
+    unsigned value = 0;
+
+    if (!pPath || !*pPath || !pIndex)
+        return FALSE;
+
+    pName = _MainLoopSwcBaseName(pPath);
+    if (!pName || !*pName)
+        return FALSE;
+
+    pExt = strrchr(pName, '.');
+    if (!pExt || strcasecmp(pExt, ".d88") != 0)
+        return FALSE;
+
+    pDigits = pExt;
+    while (pDigits > pName &&
+           pDigits[-1] >= '0' && pDigits[-1] <= '9')
+        --pDigits;
+
+    if (pDigits == pExt || pDigits <= pName || pDigits[-1] != '_')
+        return FALSE;
+
+    for (p = pDigits; p < pExt; ++p)
+    {
+        unsigned digit = (unsigned)(*p - '0');
+        if (value > ((~0u) - digit) / 10u)
+            return FALSE;
+        value = value * 10u + digit;
+    }
+
+    if (value == 0)
+        return FALSE;
+
+    *pIndex = value;
+    return TRUE;
+}
+
+Bool MainLoopSwcSwapNextDisk(void)
+{
+    const Char *pCurrent;
+    const Char *pExt;
+    const Char *pUnderscore;
+    const Char *pDigits;
+    Char Prefix[1024];
+    Char NextPath[1024];
+    struct stat Status;
+    unsigned nDisk = 0;
+    unsigned nDigits = 0;
+
+    if (!_pSnes || !_pSnes->IsSuperWildCard())
+        return FALSE;
+
+    pCurrent = _pSnes->GetSuperWildCardDiskPath();
+    if (!pCurrent || !*pCurrent)
+    {
+        Char FirstPath[1024];
+        struct stat FirstStatus;
+
+        if (!_MainLoopSwcFindFirstExistingCartDisk(
+                FirstPath, sizeof(FirstPath)) ||
+            stat(FirstPath, &FirstStatus) != 0 ||
+            S_ISDIR(FirstStatus.st_mode))
+        {
+            MainLoopStatusPrintf(
+                120, "No existing disk to insert");
+            return FALSE;
+        }
+
+        /* AURORA_SWC_MEGA_V9_20260831: lowest existing numbered image. */
+        {
+            unsigned shown = 0;
+            if (_MainLoopSwcNumberedDiskIndex(FirstPath, &shown))
+                MainLoopStatusPrintf(180, "Inserting disk %u...", shown);
+            else
+                MainLoopStatusPrintf(
+                    180,
+                    "Inserting disk: %s...",
+                    _MainLoopSwcBaseName(FirstPath));
+        }
+        MainLoopRender();
+        MainLoopRender();
+
+        if (!_pSnes->SwapSuperWildCardDisk(FirstPath))
+            return FALSE;
+
+        MainLoopStateOnRomChanged();
+
+        {
+            unsigned shown;
+            if (_MainLoopSwcNumberedDiskIndex(FirstPath, &shown))
+                MainLoopStatusPrintf(90, "Disk %u inserted", shown);
+            else
+                MainLoopStatusPrintf(
+                    90, "Floppy inserted: %s",
+                    _MainLoopSwcBaseName(FirstPath));
+        }
+        return TRUE;
+    }
+
+    pExt = strrchr(pCurrent, '.');
+    if (!pExt || strcasecmp(pExt, ".d88"))
+    {
+        MainLoopStatusPrintf(120, "Current disk is not .d88");
+        return FALSE;
+    }
+
+    pUnderscore = pExt;
+    while (pUnderscore > pCurrent && pUnderscore[-1] != '_' &&
+           pUnderscore[-1] != '/' && pUnderscore[-1] != '\\')
+        --pUnderscore;
+
+    if (pUnderscore <= pCurrent || pUnderscore[-1] != '_')
+    {
+        MainLoopStatusPrintf(150, "Disk name must end in _1.d88, _2.d88, ...");
+        return FALSE;
+    }
+
+    pDigits = pUnderscore;
+    while (pDigits < pExt && *pDigits >= '0' && *pDigits <= '9')
+    {
+        ++nDigits;
+        ++pDigits;
+    }
+    if (pDigits != pExt || nDigits == 0 ||
+        !_MainLoopSwcNumberedDiskIndex(pCurrent, &nDisk))
+    {
+        MainLoopStatusPrintf(
+            150, "Disk name must end in _1.d88, _2.d88, ...");
+        return FALSE;
+    }
+
+    {
+        size_t nPrefix = (size_t)((pUnderscore - 1) - pCurrent);
+        if (nPrefix >= sizeof(Prefix))
+            return FALSE;
+        memcpy(Prefix, pCurrent, nPrefix);
+        Prefix[nPrefix] = 0;
+    }
+
+    {
+        Bool bHaveNext = FALSE;
+
+        /* AURORA_SWC_SWAP_INDEX_BOUNDS_V4_4_20260901
+         * Preserve legacy next-disk behavior for every representable index.
+         * Only UINT_MAX-equivalent (~0u) skips +1, preventing wrap to _0. */
+        if (nDisk != ~0u)
+        {
+            if (snprintf(NextPath, sizeof(NextPath), "%s_%0*u%s",
+                         Prefix, (int)nDigits, nDisk + 1u, pExt) >=
+                (int)sizeof(NextPath))
+                return FALSE;
+
+            if (stat(NextPath, &Status) == 0 &&
+                !S_ISDIR(Status.st_mode))
+                bHaveNext = TRUE;
+        }
+
+        if (!bHaveNext)
+        {
+        unsigned nFirst;
+        Bool bFoundFirst = FALSE;
+
+        /* AURORA_V7_FRONT_COPIER_MEDIA_CART_RESET_20260831
+         * Numbered media is circular. Search from _1 upward using the same
+         * prefix/extension; when only _1 exists it is a valid wrap target too. */
+        for (nFirst = 1; nFirst < 10000; ++nFirst)
+        {
+            if (snprintf(NextPath, sizeof(NextPath), "%s_%0*u%s",
+                         Prefix, (int)nDigits, nFirst, pExt) >=
+                (int)sizeof(NextPath))
+                return FALSE;
+
+            if (stat(NextPath, &Status) == 0 &&
+                !S_ISDIR(Status.st_mode))
+            {
+                bFoundFirst = TRUE;
+                break;
+            }
+        }
+
+            if (!bFoundFirst)
+            {
+                MainLoopStatusPrintf(
+                    120, "No numbered floppy image found");
+                return FALSE;
+            }
+        }
+    }
+
+    {
+        unsigned shown = 0;
+        if (_MainLoopSwcNumberedDiskIndex(NextPath, &shown))
+            MainLoopStatusPrintf(180, "Inserting disk %u...", shown);
+        else
+            MainLoopStatusPrintf(
+                180,
+                "Inserting disk: %s...",
+                _MainLoopSwcBaseName(NextPath));
+    }
+    MainLoopRender();
+    MainLoopRender();
+
+    if (!_pSnes->SwapSuperWildCardDisk(NextPath))
+    {
+        MainLoopStatusPrintf(180, "SWC disk swap failed: %s",
+                             _pSnes->GetSuperWildCardError());
+        return FALSE;
+    }
+
+    MainLoopStateOnRomChanged(); /* AURORA_SWC_MEGA_V9_20260831 */
+
+    {
+        unsigned shown;
+        if (_MainLoopSwcNumberedDiskIndex(NextPath, &shown))
+            MainLoopStatusPrintf(90, "Disk %u inserted", shown);
+        else
+            MainLoopStatusPrintf(
+                90, "Floppy inserted: %s",
+                _MainLoopSwcBaseName(NextPath));
+    }
+    return TRUE;
+}
+
+
+Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
+{
+    PathExtTypeE eType, eSourceType;
+    Emu::Rom *pRom = NULL;
+    Emu::System *pSystem = NULL;
+    Emu::Rom *pBios = NULL;
+    char FileName[1024], OriginalPath[1024], SegaContentName[1024];
+    char hddPath[1024], ZipMemberName[512];
+    unsigned int uZipIndex = 0;
+    Bool bZipIndexValid = FALSE;
+    Int32 nExpectedRomBytes = 0, nRomBytes = 0;
+    Uint32 uRomIdentityCRC = 0;
+#if SNDBG_LOG
+    Uint32 uRomCRC = 0;
+#endif
+
+    if (!pFileName)
+        return FALSE;
+
+    snprintf(OriginalPath, sizeof(OriginalPath), "%s", pFileName);
+    if (HddMapPath(pFileName, hddPath, sizeof(hddPath)) == 1)
+        pFileName = hddPath;
+
+    snprintf(FileName, sizeof(FileName), "%s", pFileName);
+    snprintf(SegaContentName, sizeof(SegaContentName), "%s", pFileName);
+    ZipMemberName[0] = 0;
+
+    if (!PathExtResolve(FileName, &eType, TRUE))
+        return FALSE;
+
+    if (eType == MAINLOOP_ENTRYTYPE_SNESPALETTE)
+        return _MainLoopLoadSnesPalette(pFileName);
+    if (eType == MAINLOOP_ENTRYTYPE_NESPALETTE)
+        return _MainLoopLoadNesPalette(pFileName); /* AURORA_FCEUMM_FDS_V4_TURBO_PAL_PERF_20260827 */
+
+    /* AURORA_SUPER_MAGIC_DRIVE_V1_20260902 */
+    if (_pSega && _pSega->IsSuperMagicDrive())
+    {
+        if (eType == MAINLOOP_ENTRYTYPE_SNESWCDISK)
+            return _MainLoopSmdInsertDisk(pFileName);
+        if (eType == MAINLOOP_ENTRYTYPE_SEGAROM && !_MainLoopIsSmdBiosPath(pFileName) && _pSega->IsSuperMagicDriveFirmwareMode())
+            return _MainLoopSmdInsertCartridge(pFileName);
+    }
+    if (eType == MAINLOOP_ENTRYTYPE_SEGAROM && _MainLoopIsSmdBiosPath(pFileName) && !_MainLoopSmdBiosLooksValid(pFileName))
+    {
+        MainLoopModalPrintf(60*5,"mdpbios.bin must be the 8192-byte Super Magic Drive BIOS");
+        return FALSE;
+    }
+
+    /* AURORA_V6_MAGICOM_FRONT_FAREAST_20260831: identify copier before destructive unload. */
+    if (eType == MAINLOOP_ENTRYTYPE_SNESWCBIOS)
+    {
+        if (_MainLoopMagicomPathIsFirmware(pFileName))
+        {
+            if (!_MainLoopMagicomFirmwareFileLooksValid(pFileName))
+            {
+                MainLoopModalPrintf(60*5,
+                    "Requires classic Super Magicom V1H/V31 BIOS (V3H soft-upgrade unsupported)");
+                return FALSE;
+            }
+        }
+        else if (_MainLoopSwcPathIsFirmware(pFileName))
+        {
+            if (!_MainLoopSwcFirmwareFileLooksValid(pFileName))
+            {
+                MainLoopModalPrintf(60*5,"Requires classic 16 KiB Super Wild Card BIOS");
+                return FALSE;
+            }
+        }
+        else
+        {
+            MainLoopModalPrintf(60*4,"Unrecognized classic copier .rom");
+            return FALSE;
+        }
+    }
+    else if (eType == MAINLOOP_ENTRYTYPE_SNESROM &&
+             _MainLoopMagicomPathIsFirmware(pFileName))
+    {
+        if (!_MainLoopMagicomFirmwareFileLooksValid(pFileName))
+        {
+            MainLoopModalPrintf(60*5,
+                "Requires classic Super Magicom V1H/V31 BIOS (V3H soft-upgrade unsupported)");
+            return FALSE;
+        }
+    }
+    else if (eType == MAINLOOP_ENTRYTYPE_SNESROM &&
+             _MainLoopSwcPathIsFirmware(pFileName))
+    {
+        if (!_MainLoopSwcFirmwareFileLooksValid(pFileName))
+        {
+            MainLoopModalPrintf(60*5,"Requires classic 16 KiB Super Wild Card BIOS");
+            return FALSE;
+        }
+    }
+    else if (eType == MAINLOOP_ENTRYTYPE_SNESWCDISK)
+    {
+        if (!_MainLoopSwcDiskFileLooksValid(pFileName))
+        {
+            MainLoopModalPrintf(60*4,"Unsupported or invalid D88 floppy image");
+            return FALSE;
+        }
+        /* AURORA_SWC_D88_ONLY_V5_20260901: bare D88 retains DSK.SFC fallback. */
+        if (!(_pSnes && _pSnes->IsSuperWildCard()))
+        {
+            Char FirmwarePath[1024];
+            if (!_MainLoopFindSwcFirmware(FirmwarePath,sizeof(FirmwarePath)))
+            {
+                MainLoopModalPrintf(60*5,"SWC BIOS missing/invalid in SNESticle/SYSTEM");
+                return FALSE;
+            }
+        }
+    }
+
+    /* AURORA_V4_16_SAFE_GAME_SWITCH_FLUSH_20260830
+     * Defensive guard for non-browser launch paths. */
+    if (MainLoopSramSaveBusy())
+        return FALSE;
+
+    /* AURORA_FINAL_V1_2_STORAGE_CLOSURE_20260901
+     * One teardown boundary for both CD cores. Browser launches normally
+     * already own this hold through the menu; non-browser callers acquire it
+     * here. PCE needs the same protection Sega CD already had before its
+     * cdstream objects can be destroyed under an in-flight async read. */
+    if (!MainLoopCdUiQuiesce())
+    {
+        MainLoopStatusPrintf(120, "CD I/O busy; try again.");
+        return FALSE;
+    }
+
+    /* AURORA_V6_MAGICOM_FRONT_FAREAST_20260831: shared loader/cart/disk workflow. */
+    if (_pSnes && _pSnes->IsSuperWildCard() &&
+        eType == MAINLOOP_ENTRYTYPE_SNESWCDISK)
+    {
+        return _MainLoopSwcInsertDisk(pFileName);
+    }
+    if (_pSnes && _pSnes->IsSuperWildCard() &&
+        (!_pSnes->HasSuperWildCardCartridge() ||
+         _pSnes->IsSuperWildCardFirmwareMode()) &&
+        eType == MAINLOOP_ENTRYTYPE_SNESROM &&
+        !_MainLoopSwcPathIsFirmware(pFileName) &&
+        !_MainLoopMagicomPathIsFirmware(pFileName))
+    {
+        return _MainLoopSwcInsertCartridge(pFileName);
+    }
+
+    _MainLoopUnloadRom();
+
+    /* AURORA_FINAL_V1_2_STORAGE_CLOSURE_20260901
+     * Old CD objects are gone now. Release Beetle's pause gate before any new
+     * content is loaded; PicoDrive requires no explicit native resume. */
+    MainLoopCdUiResume();
+
+#if MAINLOOP_HISTORY
+    _MainLoopResetHistory();
+#endif
+    _MainLoopResetInputChecksums();
+
+    /* AURORA_SUPER_MAGIC_DRIVE_V1_20260902 */
+    if (eType == MAINLOOP_ENTRYTYPE_SEGAROM && _MainLoopIsSmdBiosPath(pFileName))
+        return _MainLoopExecuteSmdFirmware(pFileName, OriginalPath, bLoadSRAM);
+
+    /* AURORA_FCEUMM_FDS_V0_5_PATH_BOOT: only a plain .fds full path enters FCEUmm. */
+    /* AURORA_V6_MAGICOM_FRONT_FAREAST_20260831: explicit loader ROM selects its hardware model. */
+    if ((eType == MAINLOOP_ENTRYTYPE_SNESWCBIOS ||
+         eType == MAINLOOP_ENTRYTYPE_SNESROM) &&
+        _MainLoopMagicomPathIsFirmware(pFileName))
+        return _MainLoopExecuteMagicomFirmware(
+            pFileName, OriginalPath, bLoadSRAM);
+
+    if (eType == MAINLOOP_ENTRYTYPE_SNESWCBIOS ||
+        (eType == MAINLOOP_ENTRYTYPE_SNESROM &&
+         _MainLoopSwcPathIsFirmware(pFileName)))
+        return _MainLoopExecuteSwcFirmware(
+            pFileName, OriginalPath, bLoadSRAM);
+
+    /* AURORA_SWC_D88_ONLY_V5_20260901: .d88 bypasses cartridge allocation. */
+    if (eType == MAINLOOP_ENTRYTYPE_SNESWCDISK)
+        return _MainLoopExecuteSwcDisk(pFileName, OriginalPath, bLoadSRAM);
+
+    if (eType == MAINLOOP_ENTRYTYPE_NESFDSDISK)
+        return _MainLoopExecuteFdsPath(pFileName, OriginalPath, bLoadSRAM);
+
+    /* AURORA_CD_SRAM_NOTICES_20260824: never size/read a CUE or its tracks as a cartridge. */
+    if (eType == MAINLOOP_ENTRYTYPE_CDIMAGE)
+        return _MainLoopExecuteDisc(
+            pFileName, OriginalPath, FileName, bLoadSRAM);
+
+    eSourceType = eType;
+
+    /* Preflight size/name with no large frontend ROM allocation. */
+    if (eSourceType == MAINLOOP_ENTRYTYPE_GZ)
+    {
+        snprintf(SegaContentName, sizeof(SegaContentName), "%s", FileName);
+        if (!PathExtResolve(FileName, &eType, TRUE))
+            return FALSE;
+        nExpectedRomBytes = MinizGetGZUncompressedSize(pFileName);
+    }
+    else if (eSourceType == MAINLOOP_ENTRYTYPE_ZIP)
+    {
+        nExpectedRomBytes = MinizProbeZipFirstMatchInfo(
+            pFileName, &uZipIndex,
+            ZipMemberName, (int)sizeof(ZipMemberName),
+            _MainLoopZipDynamicEntryFilter);
+
+        if (nExpectedRomBytes > 0)
+        {
+            bZipIndexValid = TRUE;
+            snprintf(SegaContentName, sizeof(SegaContentName),
+                     "%s", ZipMemberName);
+            snprintf(FileName, sizeof(FileName), "%s", ZipMemberName);
+            if (!PathExtResolve(FileName, &eType, TRUE))
+                return FALSE;
+        }
+    }
+    else
+    {
+        nExpectedRomBytes = _MainLoopGetBinarySize(pFileName);
+    }
+
+    /* AURORA_FDS_V4_ZIP_DISPATCH_20260828 */
+    if (eType == MAINLOOP_ENTRYTYPE_NESFDSDISK)
+    {
+        if (eSourceType == MAINLOOP_ENTRYTYPE_ZIP && bZipIndexValid)
+            return _MainLoopExecuteFdsZip(
+                pFileName, OriginalPath, ZipMemberName,
+                uZipIndex, nExpectedRomBytes, bLoadSRAM);
+
+        MainLoopModalPrintf(60 * 4,
+            "FDS in GZ is not supported; use plain .fds or ZIP");
+        return FALSE;
+    }
+
+    if (nExpectedRomBytes <= 0 ||
+        (Uint32)nExpectedRomBytes > _MainLoopRomPayloadLimit(eType))
+    {
+        MainLoopModalPrintf(60 * 3, "ERROR: ROM is too large or unreadable");
+        return FALSE;
+    }
+
+    switch (eType)
+    {
+        case MAINLOOP_ENTRYTYPE_NESROM:
+            pSystem = _pNes; pRom = _pNesRom; pBios = NULL;
+            _MainLoop_fOutputIntensity = 0.8f;
+            break;
+        case MAINLOOP_ENTRYTYPE_NESFDSDISK:
+            pSystem = _pNes; pRom = _pNesFDSDisk; pBios = _pNesFDSBios;
+            _MainLoop_fOutputIntensity = 0.8f;
+            break;
+        case MAINLOOP_ENTRYTYPE_NESFDSBIOS:
+            pSystem = _pNes; pRom = NULL; pBios = _pNesFDSBios;
+            _MainLoop_fOutputIntensity = 0.8f;
+            break;
+        case MAINLOOP_ENTRYTYPE_SEGAROM:
+            pSystem = _pSega; pRom = _pSegaRom; pBios = NULL;
+            _MainLoop_fOutputIntensity = 1.0f;
+            break;
+        case MAINLOOP_ENTRYTYPE_SNESROM:
+            pSystem = _pSnes; pRom = _pSnesRom; pBios = NULL;
+            _MainLoop_fOutputIntensity = 1.0f;
+            break;
+        case MAINLOOP_ENTRYTYPE_PCEROM:
+            pSystem = _pPce; pRom = _pPceRom; pBios = NULL;
+            _MainLoop_fOutputIntensity = 1.0f;
+            break;
+        default:
+            return FALSE;
+    }
+
+    /* Resolve 240p physical raster before final ROM RAM is committed. */
+    {
+        Int32 rasterWidth = 256;
+
+        /* AURORA_PCE_PRECORE512_V13_20260830
+         * PCE Fast host surface has a 512-pixel pitch and may expose
+         * 256/352/512 visible widths. Enter the core with the GS already on
+         * one aligned 512-wide storage raster; later presentation selects only
+         * the visible window, never rebuilds to a non-64-aligned width. */
+        if (eType == MAINLOOP_ENTRYTYPE_PCEROM)
+            rasterWidth = 512;
+
+        if (eType == MAINLOOP_ENTRYTYPE_SEGAROM)
+        {
+            Bool native320 = FALSE;
+
+            if (_MainLoopSegaExtEquals(SegaContentName, "bin"))
+            {
+                Uint32 nProbe = (Uint32)nExpectedRomBytes;
+                Uint8 *pProbe;
+                Int32 got;
+
+                if (nProbe > MAINLOOP_SEGA_PROBE_BYTES)
+                    nProbe = MAINLOOP_SEGA_PROBE_BYTES;
+
+                pProbe = (Uint8 *)malloc((size_t)nProbe);
+                if (!pProbe)
+                {
+                    MainLoopModalPrintf(60 * 3,
+                        "ERROR: not enough memory for ROM probe");
+                    return FALSE;
+                }
+
+                if (eSourceType == MAINLOOP_ENTRYTYPE_GZ)
+                    got = MinizReadGZPrefix(
+                        pFileName, pProbe, (Int32)nProbe);
+                else if (eSourceType == MAINLOOP_ENTRYTYPE_ZIP)
+                    got = bZipIndexValid
+                        ? MinizReadZipEntryPrefix(
+                            pFileName, uZipIndex, pProbe, (Int32)nProbe)
+                        : -1;
+                else
+                    got = _MainLoopReadBinaryPrefix(
+                        pProbe, (Int32)nProbe, pFileName);
+
+                if (got != (Int32)nProbe)
+                {
+                    free(pProbe);
+                    MainLoopModalPrintf(60 * 3,
+                        "ERROR: cannot probe Sega ROM");
+                    return FALSE;
+                }
+
+                native320 = _MainLoopSegaWantsNative320(
+                    pProbe, nExpectedRomBytes, SegaContentName);
+                free(pProbe);
+            }
+            else
+            {
+                native320 = _MainLoopSegaWantsNative320(
+                    NULL, nExpectedRomBytes, SegaContentName);
+            }
+
+            if (native320)
+                rasterWidth = 320;
+        }
+
+        if (!MainLoopEnsureGameplayRasterWidth(rasterWidth))
+        {
+            if (rasterWidth != 256)
+                MainLoopEnsureGameplayRasterWidth(256);
+            MainLoopModalPrintf(60 * 3,
+                "ERROR: cannot configure video raster");
+            return FALSE;
+        }
+    }
+
+    /* Allocate exact frontend backing policy for this cartridge. */
+    {
+        size_t required;
+        if (eType == MAINLOOP_ENTRYTYPE_SEGAROM)
+            required = PicoDriveBridge_RequiredRomCapacity(
+                (size_t)nExpectedRomBytes);
+        else
+            required = (size_t)nExpectedRomBytes + 1024U;
+
+        if (required < (size_t)nExpectedRomBytes ||
+            required > 0xFFFFFFFFU ||
+            !_MainLoopAllocRomBuffer((Uint32)required))
+        {
+            _MainLoopAbortPreCoreLoad();
+            MainLoopModalPrintf(60 * 3,
+                "ERROR: not enough memory for ROM");
+            return FALSE;
+        }
+    }
+
+    if (eSourceType == MAINLOOP_ENTRYTYPE_GZ)
+    {
+        nRomBytes = _MainLoopReadGZData(
+            _RomData, (Int32)_RomDataCapacity, pFileName);
+    }
+    else if (eSourceType == MAINLOOP_ENTRYTYPE_ZIP)
+    {
+        char loadedName[512];
+        loadedName[0] = 0;
+        nRomBytes = bZipIndexValid
+            ? MinizReadZipEntryToBuffer(
+                pFileName, uZipIndex,
+                _RomData, (Int32)_RomDataCapacity,
+                loadedName, (int)sizeof(loadedName))
+            : -1;
+        if (nRomBytes > 0 &&
+            strcmp(loadedName, ZipMemberName) != 0)
+            nRomBytes = -1;
+    }
+    else
+    {
+        nRomBytes = _MainLoopReadBinaryData(
+            _RomData, (Int32)_RomDataCapacity, pFileName);
+    }
+
+    if (nRomBytes != nExpectedRomBytes)
+    {
+        _MainLoopAbortPreCoreLoad();
+        MainLoopModalPrintf(60 * 3, "ERROR: Cannot read complete ROM");
+        return FALSE;
+    }
+
+    /* Save-state identity: same pristine payload boundary as before. */
+    uRomIdentityCRC = (Uint32)mz_crc32(
+        MZ_CRC32_INIT, _RomData, (size_t)nRomBytes);
+#if SNDBG_LOG
+    uRomCRC = (Uint32)mz_crc32(
+        MZ_CRC32_INIT, _RomData, (size_t)nRomBytes);
+#endif
+
+    {
+        Int32 guard = (Int32)(_RomDataCapacity - (Uint32)nRomBytes);
+        if (guard > 1024) guard = 1024;
+        if (guard > 0)
+            memset(_RomData + nRomBytes, 0, (size_t)guard);
+    }
+
+    printf("ROM data read: %s (%d/%u bytes backing)\n",
+           pFileName, nRomBytes, (unsigned)_RomDataCapacity);
+    _MainLoopGetName(_RomName, FileName);
+    printf("ROMName: '%s'\n", _RomName);
+
+    if (pBios)
+    {
+        if (pRom == NULL)
+        {
+            if (!_MainLoopLoadBios(pBios, pFileName))
+            {
+                _MainLoopUnloadRom();
+                MainLoopModalPrintf(60 * 5,
+                    "ERROR: Cannot load disksys.rom");
+                return FALSE;
+            }
+        }
+        else if (!pBios->IsLoaded())
+        {
+            char diskrompath[1024];
+            Char *pDiskFileName;
+
+            snprintf(diskrompath, sizeof(diskrompath), "%s", FileName);
+            pDiskFileName = strrchr(diskrompath, '/');
+            if (!pDiskFileName)
+                pDiskFileName = strrchr(diskrompath, ':');
+            if (!pDiskFileName)
+            {
+                _MainLoopUnloadRom();
+                return FALSE;
+            }
+
+            strcpy(pDiskFileName + 1, "disksys.rom");
+            printf("FDSRom: '%s'\n", diskrompath);
+
+            if (!_MainLoopLoadBios(pBios, diskrompath))
+            {
+                _MainLoopUnloadRom();
+                MainLoopModalPrintf(60 * 5,
+                    "ERROR: Cannot load disksys.rom");
+                return FALSE;
+            }
+        }
+    }
+
+    if (pRom && !_MainLoopLoadRomData(pRom, _RomData, nRomBytes))
+    {
+        _MainLoopUnloadRom();
+        return FALSE;
+    }
+
+    if (pBios)
+    {
+        pSystem->SetRom(pBios);
+        if (pSystem == _pNes)
+            _pNes->SetNesDisk(_pNesFDSDisk);
+        else
+            _pSnes->SetSnesRom(_pSnesRom);
+    }
+    else
+    {
+        if (pSystem == _pSega && _pSegaRom)
+        {
+            _pSegaRom->SetSourceName(SegaContentName);
+            PicoDriveBridge_SetRegion((int)g_SnesForceRegion);
+        }
+        else if (pSystem == _pPce && _pPceRom)
+            _pPceRom->SetSourceName(SegaContentName);
+        pSystem->SetRom(pRom);
+    }
+
+    pSystem->Reset();
+
+    if (pSystem == _pNes && !_pNes->IsRomReady())
+    {
+        printf("[QuickNES] ROM rejected; aborting launch before mainloop\n");
+        _MainLoopUnloadRom();
+        MainLoopModalPrintf(60 * 3,
+            "ERROR: QuickNES cannot run this NES image (format/mapper/FDS)");
+        return FALSE;
+    }
+
+    if (pSystem == _pSega && !_pSega->IsRomReady())
+    {
+        printf("[PicoDrive] ROM rejected; aborting launch before mainloop\n");
+        _MainLoopUnloadRom();
+        MainLoopModalPrintf(60 * 3,
+            "ERROR: PicoDrive cannot run this SEGA image");
+        return FALSE;
+    }
+
+    if (pSystem == _pPce && !_pPce->IsRomReady())
+    {
+        printf("[PCE] ROM rejected; aborting launch before mainloop\n");
+        _MainLoopUnloadRom();
+        MainLoopModalPrintf(60 * 3, "ERROR: Beetle PCE Fast cannot run this HuCard");
+        return FALSE;
+    }
+
+    _pSystem = pSystem;
+    snprintf(_RomPath, sizeof(_RomPath), "%s", OriginalPath);
+    MainLoopStateOnRomChanged();
+    MainLoopStatePrimeRomIdentityCRC(uRomIdentityCRC);
+
+    ConPrint("ROM Loaded: %s\n", pFileName);
+
+    if (pRom)
+    {
+        int nRegions, iRegion;
+        Char *pRomTitle = pRom->GetRomTitle();
+        Char *pRomMapper = pRom->GetMapperName();
+
+        if (pRomMapper && !strcmp(pRomMapper, "<unknown>"))
+            MainLoopModalPrintf(60, "WARNING: Unsupported NES Mapper");
+        if (pRomTitle)
+            printf("Rom Title: %s\n", pRomTitle);
+
+#if SNDBG_LOG
+        DLog("[rom] file='%s' bytes=%d crc32=%08X title='%s' mapper='%s'",
+             _RomName, (int)nRomBytes, (unsigned)uRomCRC,
+             pRomTitle ? pRomTitle : "<none>",
+             pRomMapper ? pRomMapper : "<none>");
+#endif
+
+        nRegions = pRom->GetNumRomRegions();
+        for (iRegion = 0; iRegion < nRegions; ++iRegion)
+            printf("%s: %d bytes\n",
+                   pRom->GetRomRegionName(iRegion),
+                   pRom->GetRomRegionSize(iRegion));
+    }
+
+    _MainLoopSetSampleRate(pSystem->GetSampleRate());
+    if (bLoadSRAM)
+        _MainLoopLoadSRAM();
+
+    _fbTexture[0]->Clear();
+    TextureUpload(&_OutTex, _fbTexture[0]->GetLinePtr(0));
+
+    if (eType == MAINLOOP_ENTRYTYPE_NESFDSDISK)
+    {
+        _MainLoop_iDisk = 0;
+        _MainLoop_bDiskInserted = TRUE;
+    }
+    return TRUE;
+}
+
+void _MainLoopSetSampleRate(Uint32 uSampleRate)
+{
+    _AudMix->SetSampleRate(uSampleRate);
+}
+
+
+/* AURORA_PCE_PRECORE512_V13_20260830 */
+
+/* AURORA_PCE_CDRDAO_TOC_SUPPORT_V4_8_20260830 */
+
+/* AURORA_V4_12_PRIVATE_FILEXIO_CDDA_PCE_TOC2CUE_20260830 */
+
+/* AURORA_V4_13_CDDA_STARVATION_PCE_TRACK_GEOMETRY_20260830 */
+
+/* AURORA_V4_14_FILEXIO_OPENFLAG_PCE_STORED_PREGAPS_20260830 */
+
+/* AURORA_V4_14_1_RESUME_COMPILEFIX_20260830 */
+
+/* AURORA_V4_15_PCE_CDRDAO_AUDIO_ENDIAN_20260830 */
+
+/* AURORA_V4_16_SAFE_GAME_SWITCH_FLUSH_20260830 */

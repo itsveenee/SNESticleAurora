@@ -1,0 +1,1067 @@
+#include "types.h"
+#include <stdio.h>
+#include <string.h>
+#include <libpad.h>
+#include <libpwroff.h> /* AURORA_V6_PHYSICAL_CONSOLE_BUTTON_20260828 */
+
+#include "mainloop_input.h"
+#include "mainloop_iop.h"
+#include "mainloop_menu.h"
+#include "mainloop_state.h"
+#include "mainloop_ui.h"
+#include "mainloop_shared.h"
+#include "mainloop.h"
+#include "mainloop_load.h" /* AURORA_SWC_FLOPPY_V1_20260831 */
+#include "input.h"
+#include "nes/quicknes/quicknes_bridge.h"
+#include "nes/fceumm/fceumm_fds_bridge.h" /* AURORA_FCEUMM_FDS_V0_6_SIDE_SWAP */
+#include "sega/picodrive/picodrive_bridge.h"
+#include "memcard.h"
+#include "prof.h"
+
+extern "C" {
+#include "audio.h"
+}
+
+
+#define MENU_REPEAT (16)
+
+//#define MENU_REPEATBUTTONS (PAD_UP|PAD_DOWN|PAD_SQUARE|PAD_CIRCLE)
+/* AURORA_MENU_NO_REPEAT_X_TRIANGLE_V2_20260828
+ * Keep repeat for navigation and Square/Circle, but Cross/X and Triangle
+ * are edge-triggered only so holding them cannot queue/execute actions. */
+#define MENU_REPEATBUTTONS (PAD_UP|PAD_DOWN|PAD_SQUARE|PAD_CIRCLE|PAD_LEFT|PAD_RIGHT)
+
+/* AURORA_SNES_R2_TURBO_NO_DPAD_V1_4_4
+ * D-pad is explicitly NOT turboable. While R2 is held, directions remain
+ * continuous every frame so movement never stutters while another button
+ * is being turboed. */
+#define SNES_DIRECTION_HOST_BUTTONS (     PAD_UP | PAD_DOWN | PAD_LEFT | PAD_RIGHT )
+
+#define SNES_TURBO_HOST_BUTTONS (     PAD_SQUARE | PAD_TRIANGLE | PAD_CROSS | PAD_CIRCLE |     PAD_L1 | PAD_R1 | PAD_SELECT | PAD_START )
+
+#define SNES_GAMEPLAY_HOST_BUTTONS (     SNES_DIRECTION_HOST_BUTTONS | SNES_TURBO_HOST_BUTTONS )
+
+/* AURORA_CONTROLLER_OPTIONS_V2 */
+static MainLoopTurboSpeedE _MainLoop_TurboSpeed = MAINLOOP_TURBO_SPEED_NORMAL;
+static Uint32 _MainLoop_TurboPhaseBase = 0;
+/* AURORA_SMS_GG_TURBO_HOST_CLOCK_V2
+ * SMS/GG can execute 0/1/2 PicoDrive frames per GS VBlank when host and
+ * game cadence differ. Keep their autofire on the frontend input tick
+ * instead of the emulated-core frame counter. */
+static Uint32 _MainLoop_TurboHostFrame = 0;
+static Uint32 _MainLoop_TurboHostPhaseBase = 0;
+
+/* AURORA_V6_PHYSICAL_CONSOLE_BUTTON_STATE_20260828
+ * Undocumented alternate controls:
+ *   PicoDrive + real Master System -> console PAUSE NMI
+ *   Famicom Disk System           -> same side-swap action as L2+Triangle
+ *
+ * init_poweroff_driver() already called poweroffInit() during app boot.
+ * The RPC callback below only writes an event latch; all emulator work stays
+ * on the normal frontend thread. */
+enum MainLoopPhysicalConsoleButtonModeE
+{
+    MAINLOOP_PHYSICAL_BUTTON_NONE = 0,
+    MAINLOOP_PHYSICAL_BUTTON_SMS_PAUSE = 1,
+    MAINLOOP_PHYSICAL_BUTTON_FDS_SIDE = 2
+};
+
+static volatile Int32 s_PhysicalConsoleButtonMode =
+    MAINLOOP_PHYSICAL_BUTTON_NONE;
+static volatile Int32 s_PhysicalConsoleButtonEvent =
+    MAINLOOP_PHYSICAL_BUTTON_NONE;
+static Bool s_PhysicalConsoleButtonCallbackInstalled = FALSE;
+
+static void _MainLoopPhysicalConsoleButtonCallback(void *arg)
+{
+    const Int32 mode = s_PhysicalConsoleButtonMode;
+    (void)arg;
+
+    if (mode == MAINLOOP_PHYSICAL_BUTTON_SMS_PAUSE ||
+        mode == MAINLOOP_PHYSICAL_BUTTON_FDS_SIDE)
+        s_PhysicalConsoleButtonEvent = mode;
+}
+
+static Int32 _MainLoopPollPhysicalConsoleButton(void)
+{
+    Int32 desired = MAINLOOP_PHYSICAL_BUTTON_NONE;
+    Int32 event;
+
+    if (!_bMenu && _pSystem == _pSega &&
+        PicoDriveBridge_IsMasterSystem())
+        desired = MAINLOOP_PHYSICAL_BUTTON_SMS_PAUSE;
+    else if (!_bMenu && _pSystem == _pFds)
+        desired = MAINLOOP_PHYSICAL_BUTTON_FDS_SIDE;
+
+    s_PhysicalConsoleButtonMode = desired;
+
+    /* Lazy registration: if SMS/FDS is never entered, pre-V6 callback state
+     * is completely untouched. Outside SMS/FDS the callback is a no-op,
+     * matching the current Aurora state where poweroffInit has no user cb. */
+    if (desired != MAINLOOP_PHYSICAL_BUTTON_NONE &&
+        !s_PhysicalConsoleButtonCallbackInstalled)
+    {
+        poweroffSetCallback(_MainLoopPhysicalConsoleButtonCallback, NULL);
+        s_PhysicalConsoleButtonCallbackInstalled = TRUE;
+    }
+
+    event = s_PhysicalConsoleButtonEvent;
+    if (event == MAINLOOP_PHYSICAL_BUTTON_NONE)
+        return MAINLOOP_PHYSICAL_BUTTON_NONE;
+
+    s_PhysicalConsoleButtonEvent = MAINLOOP_PHYSICAL_BUTTON_NONE;
+
+    /* Drop stale events if menu/core changed between RPC and frontend frame. */
+    return event == desired ? event : MAINLOOP_PHYSICAL_BUTTON_NONE;
+}
+
+static void _MainLoopFdsSideSwapAction(void)
+{
+    if (FceummFdsBridge_BeginSideSwap())
+    {
+        _MainLoop_iDisk = (Int32)FceummFdsBridge_GetSelectedSide();
+        _MainLoop_bDiskInserted = FALSE;
+        MainLoopStatusPrintf(90,
+            "FDS: disk ejected; opposite side in 1 second...");
+    }
+    else if (FceummFdsBridge_IsSideSwapPending())
+    {
+        MainLoopStatusPrintf(90, "FDS: side swap already pending.");
+    }
+    else
+    {
+        MainLoopStatusPrintf(120, "FDS: no opposite side available.");
+    }
+}
+
+void MainLoopTurboSetSpeed(MainLoopTurboSpeedE eSpeed)
+{
+    if (eSpeed < MAINLOOP_TURBO_SPEED_NORMAL || eSpeed >= MAINLOOP_TURBO_SPEED_NUM)
+        eSpeed = MAINLOOP_TURBO_SPEED_NORMAL;
+    _MainLoop_TurboSpeed = eSpeed;
+    _MainLoop_TurboPhaseBase = _pSystem ? (Uint32)_pSystem->GetFrame() : 0;
+    _MainLoop_TurboHostPhaseBase = _MainLoop_TurboHostFrame;
+    QuicknesBridge_SetTurboSpeed((unsigned)eSpeed);
+}
+
+MainLoopTurboSpeedE MainLoopTurboGetSpeed(void) { return _MainLoop_TurboSpeed; }
+
+void MainLoopTurboCycleSpeedDir(Int32 dir)
+{
+    Int32 speed;
+    if (dir == 0) return;
+    speed = (Int32)_MainLoop_TurboSpeed + (dir < 0 ? -1 : 1);
+    if (speed < MAINLOOP_TURBO_SPEED_NORMAL) speed = MAINLOOP_TURBO_SPEED_NUM - 1;
+    if (speed >= MAINLOOP_TURBO_SPEED_NUM) speed = MAINLOOP_TURBO_SPEED_NORMAL;
+    MainLoopTurboSetSpeed((MainLoopTurboSpeedE)speed);
+}
+
+const char *MainLoopTurboGetSpeedName(void)
+{
+    switch (_MainLoop_TurboSpeed)
+    {
+        case MAINLOOP_TURBO_SPEED_HALF:    return "Half";
+        case MAINLOOP_TURBO_SPEED_QUARTER: return "Quarter";
+        case MAINLOOP_TURBO_SPEED_NORMAL:
+        default:                           return "Max";
+    }
+}
+
+void MainLoopTurboAdvanceHostFrame(void)
+{
+    ++_MainLoop_TurboHostFrame;
+}
+
+void MainLoopTurboRearmHostPhase(void)
+{
+    _MainLoop_TurboHostPhaseBase = _MainLoop_TurboHostFrame;
+}
+
+/* AURORA_MD_PAD_LAYOUT_V1 */
+static MainLoopMdPadLayoutE _MainLoop_MdPadLayout = MAINLOOP_MD_PAD_ABC;
+
+void MainLoopMdPadSetLayout(MainLoopMdPadLayoutE eLayout)
+{
+	if (eLayout < MAINLOOP_MD_PAD_ABC || eLayout >= MAINLOOP_MD_PAD_NUM)
+		eLayout = MAINLOOP_MD_PAD_ABC;
+	_MainLoop_MdPadLayout = eLayout;
+}
+
+MainLoopMdPadLayoutE MainLoopMdPadGetLayout(void)
+{
+	return _MainLoop_MdPadLayout;
+}
+
+void MainLoopMdPadCycleLayoutDir(Int32 dir)
+{
+	if (dir == 0)
+		return;
+	MainLoopMdPadSetLayout(
+		_MainLoop_MdPadLayout == MAINLOOP_MD_PAD_ABC
+			? MAINLOOP_MD_PAD_BCA
+			: MAINLOOP_MD_PAD_ABC);
+}
+
+const char *MainLoopMdPadGetLayoutName(void)
+{
+	return _MainLoop_MdPadLayout == MAINLOOP_MD_PAD_BCA ? "BCA" : "ABC";
+}
+
+static Bool _MainLoopTurboIsOn(Uint32 uFrame)
+{
+    Uint32 shift = (Uint32)_MainLoop_TurboSpeed;
+    Uint32 elapsed = uFrame - _MainLoop_TurboPhaseBase;
+    /* Every speed selection begins in the ON half of its cadence. */
+    return (((elapsed >> shift) & 1U) == 0U) ? TRUE : FALSE;
+}
+
+static Bool _MainLoopTurboHostIsOn(void)
+{
+    Uint32 shift = (Uint32)_MainLoop_TurboSpeed;
+    Uint32 elapsed = _MainLoop_TurboHostFrame - _MainLoop_TurboHostPhaseBase;
+    return (((elapsed >> shift) & 1U) == 0U) ? TRUE : FALSE;
+}
+
+static Bool _MainLoop_bSuppressGameInputUntilRelease = FALSE;
+
+void _MainLoopInputSuppressUntilRelease()
+{
+	_MainLoop_bSuppressGameInputUntilRelease = TRUE;
+}
+
+static Uint16 _MainLoopSnesInput(Uint32 cond)
+{
+	Uint32 pad = 0;
+
+	if (cond & PAD_LEFT)    pad|= (SNESIO_JOY_LEFT);
+	if (cond & PAD_RIGHT)   pad|= (SNESIO_JOY_RIGHT);
+	if (cond & PAD_UP)      pad|= (SNESIO_JOY_UP);
+	if (cond & PAD_DOWN)    pad|= (SNESIO_JOY_DOWN);
+
+	if (cond & PAD_SQUARE)   pad|= (SNESIO_JOY_Y);
+	if (cond & PAD_TRIANGLE) pad|= (SNESIO_JOY_X);
+	if (cond & PAD_CROSS)    pad|= (SNESIO_JOY_B);
+	if (cond & PAD_CIRCLE)   pad|= (SNESIO_JOY_A);
+
+	if (cond & PAD_L1)   pad|= (SNESIO_JOY_L);
+	if (cond & PAD_R1)   pad|= (SNESIO_JOY_R);
+
+	if (cond & PAD_SELECT)  pad|= (SNESIO_JOY_SELECT);
+	if (cond & PAD_START)   pad|= (SNESIO_JOY_START);
+	return pad;
+}
+
+/* AURORA_PICODRIVE_STAGE2_SEGA_INPUT
+ * Carrier bits are SNESIO names only because SysInputT is a 16-bit legacy
+ * structure. PicoDriveBridge translates them into the real Mega Drive pad.
+ * Host: Square=A, Cross=B, Circle=C, L1=X, Triangle=Y, R1=Z, R3=MODE. */
+static Uint16 _MainLoopSegaInput(Uint32 cond)
+{
+	Uint16 out = 0;
+	if (cond & PAD_UP)       out |= SNESIO_JOY_UP;
+	if (cond & PAD_DOWN)     out |= SNESIO_JOY_DOWN;
+	if (cond & PAD_LEFT)     out |= SNESIO_JOY_LEFT;
+	if (cond & PAD_RIGHT)    out |= SNESIO_JOY_RIGHT;
+
+	/* AURORA_SMS_GG_FIXED_12_MAPPING_V1
+	 * SMS/GG always use 1-2; MD Mapping does not apply here. */
+	if (PicoDriveBridge_Is8Bit())
+	{
+		if (cond & PAD_SQUARE) out |= SNESIO_JOY_B; /* Button 1 */
+		if (cond & PAD_CROSS)  out |= SNESIO_JOY_A; /* Button 2 */
+	}
+	else if (_MainLoop_MdPadLayout == MAINLOOP_MD_PAD_BCA)
+	{
+		if (cond & PAD_SQUARE) out |= SNESIO_JOY_B; /* carrier -> MD B */
+		if (cond & PAD_CROSS)  out |= SNESIO_JOY_Y; /* carrier -> MD C */
+		if (cond & PAD_CIRCLE) out |= SNESIO_JOY_A; /* carrier -> MD A */
+	}
+	else
+	{
+		if (cond & PAD_SQUARE) out |= SNESIO_JOY_A; /* carrier -> MD A */
+		if (cond & PAD_CROSS)  out |= SNESIO_JOY_B; /* carrier -> MD B */
+		if (cond & PAD_CIRCLE) out |= SNESIO_JOY_Y; /* carrier -> MD C */
+	}
+	if (cond & PAD_L1)       out |= SNESIO_JOY_L; /* MD X */
+	if (cond & PAD_TRIANGLE) out |= SNESIO_JOY_X; /* MD Y */
+	if (cond & PAD_R1)       out |= SNESIO_JOY_R; /* MD Z */
+	if (cond & PAD_R3)       out |= SNESIO_JOY_SELECT; /* MD MODE */
+	if (cond & PAD_START)    out |= SNESIO_JOY_START;
+	return out;
+}
+
+Uint16 _MainLoopInput(Uint32 pad)
+{
+    /* AURORA_FRONT_TRACE_V10_8_20260831
+     * One-shot copier transition diagnostic through the existing status UI.
+     * MainLoopStatusPrintf is already rendered in Aurora's safe-zone UI;
+     * no raw framebuffer/overscan text is introduced. */
+    if (_pSnes && _pSystem == _pSnes && _pSnes->IsSuperWildCard())
+    {
+        SNSuperWildCard::DebugTransitionT d;
+        if (_pSnes->ConsumeFrontCopierDebugTransition(&d))
+        {
+            unsigned fkb = (unsigned)((d.fdcReadBytes + 1023u) >> 10);
+            unsigned dkb = (unsigned)((d.dramWriteBytes + 1023u) >> 10);
+
+            if (FALSE) MainLoopStatusPrintf(300, "M%u%u C%u F%u D%u H%02X V%04X",
+                (unsigned)d.oldMode, (unsigned)d.newMode,
+                (unsigned)(d.parallel & 3u), fkb, dkb,
+                (unsigned)d.mappedD5, (unsigned)d.mappedReset);
+
+            /* AURORA_FRONT_TRACE_V10_8C_PRINTF_20260831
+             * mainloop_input.cpp already has <stdio.h>; keep this diagnostic
+             * self-contained instead of depending on the console wrapper. */
+            printf(
+                "[FRONT V10_8] M%u->%u C008=%02X FDC=%u DRAM=%u MAX=%06X "
+                "SEL:D5=%02X RV=%04X LO:D5=%02X RV=%04X HI:D5=%02X RV=%04X\n",
+                (unsigned)d.oldMode, (unsigned)d.newMode,
+                (unsigned)d.parallel,
+                (unsigned)d.fdcReadBytes,
+                (unsigned)d.dramWriteBytes,
+                (unsigned)d.dramMaxOffset,
+                (unsigned)d.mappedD5, (unsigned)d.mappedReset,
+                (unsigned)d.loD5, (unsigned)d.loReset,
+                (unsigned)d.hiD5, (unsigned)d.hiReset);
+        }
+    }
+
+	if (_MainLoop_bSuppressGameInputUntilRelease)
+	{
+		return 0;
+	}
+
+	/* L2 has absolute priority over the R2 turbo modifier. It remains
+	   reserved for quick-state/menu frontend controls and never reaches
+	   SNES gameplay while held. */
+	if (pad & PAD_L2)
+		return 0;
+
+    /* AURORA_FCEUMM_FDS_V9_INPUT_PALETTE_CPU_FASTPATH_20260827
+     * Same physical layout as QuickNES:
+     * Cross=A, Square=B, Circle=Turbo A, Triangle=Turbo B. */
+    if (_pSystem == _pFds)
+    {
+        Uint32 uFds = pad &
+            ~(PAD_CROSS | PAD_SQUARE | PAD_CIRCLE | PAD_TRIANGLE | PAD_R2);
+
+        if (pad & PAD_CROSS)  uFds |= PAD_CROSS;
+        if (pad & PAD_SQUARE) uFds |= PAD_SQUARE;
+
+        if (_MainLoopTurboHostIsOn())
+        {
+            if (pad & PAD_CIRCLE)   uFds |= PAD_CROSS;
+            if (pad & PAD_TRIANGLE) uFds |= PAD_SQUARE;
+        }
+        return _MainLoopSnesInput(uFds);
+    }
+
+	/* AURORA_PCE_EXPERIMENTAL_V3
+	 * Cross=I, Square=II, Circle=Turbo I, Triangle=Turbo II. */
+	if (_pSystem == _pPce)
+	{
+		Uint32 uPce = pad & ~(PAD_SQUARE | PAD_CROSS | PAD_TRIANGLE | PAD_CIRCLE | PAD_R2);
+
+		/* AURORA_PCE_TURBO_CADENCE_V1
+		 * PCE autofire needs one slower host cadence than the shared setting:
+		 * Max -> Half, Half -> Quarter, Quarter remains Quarter. */
+		Uint32 uPceTurboShift = (Uint32)_MainLoop_TurboSpeed + 1U;
+		if (uPceTurboShift > (Uint32)MAINLOOP_TURBO_SPEED_QUARTER)
+			uPceTurboShift = (Uint32)MAINLOOP_TURBO_SPEED_QUARTER;
+		const Uint32 uPceTurboElapsed = _MainLoop_TurboHostFrame - _MainLoop_TurboHostPhaseBase;
+		const Bool bTurboOn = (((uPceTurboElapsed >> uPceTurboShift) & 1U) == 0U) ? TRUE : FALSE;
+		if (pad & PAD_CROSS)  uPce |= PAD_SQUARE;
+		if (pad & PAD_SQUARE) uPce |= PAD_CROSS;
+		if (bTurboOn)
+		{
+			if (pad & PAD_CIRCLE)   uPce |= PAD_SQUARE;
+			if (pad & PAD_TRIANGLE) uPce |= PAD_CROSS;
+		}
+		return _MainLoopSnesInput(uPce);
+	}
+
+	/* AURORA_PICODRIVE_STAGE3_INPUT_DISPATCH
+	 * MD: SNES-style R2 turbo. SMS/GG: dedicated NES-style turbo buttons. */
+	if (_pSystem == _pSega)
+	{
+		if (PicoDriveBridge_Is8Bit())
+		{
+			/* AURORA_SMS_GG_FIXED_TURBO12_V1
+			 * Square=1, Cross=2, Triangle=Turbo1, Circle=Turbo2. */
+			Uint32 uSms = pad & ~(PAD_SQUARE | PAD_CROSS | PAD_CIRCLE | PAD_TRIANGLE | PAD_R2);
+			const Bool bTurboOn = _MainLoopTurboHostIsOn();
+			if (pad & PAD_SQUARE) uSms |= PAD_SQUARE;
+			if (pad & PAD_CROSS)  uSms |= PAD_CROSS;
+			if (bTurboOn)
+			{
+				if (pad & PAD_TRIANGLE) uSms |= PAD_SQUARE;
+				if (pad & PAD_CIRCLE)   uSms |= PAD_CROSS;
+			}
+			return _MainLoopSegaInput(uSms);
+		}
+
+		if (pad & PAD_R2)
+		{
+			const Uint32 uDirections = pad & (PAD_UP | PAD_DOWN | PAD_LEFT | PAD_RIGHT);
+			Uint32 uTurboButtons = pad & (PAD_SQUARE | PAD_CROSS | PAD_CIRCLE |
+				PAD_L1 | PAD_TRIANGLE | PAD_R1 | PAD_R3 | PAD_START);
+			if (!_MainLoopTurboIsOn((Uint32)_pSystem->GetFrame()))
+				uTurboButtons = 0;
+			return _MainLoopSegaInput(uDirections | uTurboButtons);
+		}
+		return _MainLoopSegaInput(pad);
+	}
+
+	if (pad & PAD_R2)
+	{
+		/* SNES only. NES keeps its existing QuickNES Circle/Triangle turbo
+		   and the historical R2-reserved behaviour. */
+		if (_pSystem == _pSnes)
+		{
+			Uint32 uDirections = pad & SNES_DIRECTION_HOST_BUTTONS;
+			Uint32 uTurboButtons = pad & SNES_TURBO_HOST_BUTTONS;
+
+			/* AURORA_SNES_R2_TURBO_NO_DPAD_RUNTIME_V1_4_4
+			   Directions are never phase-gated. Turbo-eligible buttons
+			   use the cadence selected in Controller options. Max remains
+   the historical 1-frame ON / 1-frame OFF behavior. */
+			if (!_MainLoopTurboIsOn((Uint32)_pSystem->GetFrame()))
+				uTurboButtons = 0;
+
+			/* Examples:
+			   R2+Right       -> Right held continuously.
+			   R2+Right+B     -> Right continuous, B pulses.
+			   R2+B+Y         -> B and Y pulse together. */
+			return _MainLoopSnesInput(uDirections | uTurboButtons);
+		}
+		return 0;
+	}
+
+	return _MainLoopSnesInput(pad);
+}
+
+void _MainLoopQuickStateExecuteConfirmed(Bool bSave)
+{
+	Bool bOK;
+
+	/* AURORA_RUNTIME_SAFE_QUICKSTATE_V1_4_1 */
+	if (!_pSystem)
+		return;
+
+	/* The first quick-save opens the isolated destination chooser. Its
+	   selection callback remembers the target, performs this pending save
+	   and closes back to the game; later L2+X presses save directly. */
+	if (bSave && !MainLoopStateHasDeviceChoice())
+	{
+		_MainLoopStateDevicePromptOpen();
+		return;
+	}
+	/* AURORA_AUDIO_UI_SOFT_TRANSITION_V1_20260901
+	 * Saving is not a timeline discontinuity: keep audsrv alive and muted.
+	 * Loading replaces emulated time, so retain the hard queue cut. */
+	if (bSave)
+		MainLoopAudioUiMute();
+	else
+		MainLoopAudioHardCut();
+
+	/* AURORA_FINAL_V1_1_UI_CD_STORAGE_BARRIER_20260901
+	 * The confirmation screen itself remains instant and I/O-free. Only YES,
+	 * immediately before state scanning/writing, retires the active CD
+	 * transport. */
+	if (!MainLoopCdUiQuiesce())
+	{
+		if (bSave)
+			MainLoopAudioUiResume();
+		else
+			MainLoopAudioResumeGame();
+		MainLoopStatusPrintf(
+			120, "CD I/O busy; state operation deferred.");
+		return;
+	}
+
+	MainLoopModalPrintf(
+		1,
+		bSave ? "Saving state slot %d..." : "Loading state slot %d...",
+		(int)MainLoopStateGetSlot() + 1
+	);
+
+	bOK = bSave ? _MainLoopSaveState() : _MainLoopLoadState();
+
+	/* AURORA_FINAL_V1_1_UI_CD_STORAGE_BARRIER_20260901 */
+	MainLoopCdUiResume();
+
+	if (bSave && !bOK && MainLoopStateGetUnformattedCard() >= 0)
+	{
+		Int32 iPort = MainLoopStateGetUnformattedCard();
+
+		MainLoopAudioUiResume();
+		_MainLoopMemCardFormatPromptOpen(
+			iPort,
+			MAINLOOP_MEMCARDFORMAT_STATE_SAVE
+		);
+		return;
+	}
+
+	if (bSave)
+		MainLoopAudioUiResume();
+	else
+		MainLoopAudioResumeGame();
+
+	MainLoopStatusPrintf(
+		bOK ? 90 : 180,
+		"%s",
+		MainLoopStateGetLastMessage()
+	);
+}
+
+/* AURORA_AUDIO_UI_SOFT_TRANSITION_V1_20260901
+ * The confirmation screen is UI, not an emulated-time discontinuity. */
+static void _MainLoopQuickStateAction(Bool bSave)
+{
+	MainLoopAudioUiMute();
+	_MainLoopStateConfirmPromptOpen(bSave);
+	if (_MainLoop_pScreen != (CScreen *)_MainLoop_pStateConfirmScreen)
+		MainLoopAudioUiResume();
+}
+
+void _MainLoopInputProcess(Uint32 buttons)
+{
+	static Uint32 lastbuttons= ~0;
+	static Uint32 repeat=0;
+	static int _MenuTriggerTimeout[2] = {0,0};
+	static Bool bStateHotkeyHeld = FALSE;
+	static Bool bFdsSwapHotkeyHeld = FALSE; /* AURORA_FCEUMM_FDS_V0_6_SIDE_SWAP */
+    static Bool bSwcSwapHotkeyHeld = FALSE; /* AURORA_SWC_FLOPPY_V1_20260831 */
+    static Bool bSwcCreateHotkeyHeld = FALSE; /* AURORA_SWC_FLOPPY_V5_20260831 */
+    static Bool bFrontCopierPowerHotkeyHeld = FALSE; /* AURORA_FRONT_COPIER_L2_L3_POWER_CYCLE_V2_20260902 */
+	Uint32 trigger;
+
+	/* AURORA_INPUT_SUPPRESS_ALL_GAMEPLAY_V1_4_3 */
+	if (_MainLoop_bSuppressGameInputUntilRelease &&
+	    !(buttons & (SNES_GAMEPLAY_HOST_BUTTONS | PAD_L2 | PAD_R2)))
+	{
+		_MainLoop_bSuppressGameInputUntilRelease = FALSE;
+	}
+
+	if (!(buttons& MENU_REPEATBUTTONS))
+	{
+		repeat=0;
+	}
+
+	// 
+	repeat++;
+	if (repeat > MENU_REPEAT)
+	{
+		repeat -= 1;
+		lastbuttons &= ~MENU_REPEATBUTTONS;
+	}
+
+	trigger = ((buttons ^ lastbuttons) & buttons);
+	lastbuttons = buttons;
+
+	if (!(buttons & PAD_L2) ||
+	    !(buttons & (PAD_CROSS | PAD_CIRCLE)))
+	{
+		bStateHotkeyHeld = FALSE;
+	}
+
+	if (!(buttons & PAD_L2) || !(buttons & PAD_TRIANGLE))
+		bFdsSwapHotkeyHeld = FALSE;
+	if (!(buttons & PAD_L2) || !(buttons & PAD_TRIANGLE))
+		bSwcSwapHotkeyHeld = FALSE;
+	if (!(buttons & PAD_L2) || !(buttons & PAD_SQUARE))
+		bSwcCreateHotkeyHeld = FALSE;
+    if (!(buttons & PAD_L2) || !(buttons & PAD_L3))
+        bFrontCopierPowerHotkeyHeld = FALSE;
+
+	/* AURORA_V6_PHYSICAL_CONSOLE_BUTTON_CONSUME_20260828 */
+	{
+		const Int32 physicalEvent = _MainLoopPollPhysicalConsoleButton();
+
+		if (physicalEvent == MAINLOOP_PHYSICAL_BUTTON_SMS_PAUSE)
+		{
+			PicoDriveBridge_QueueMasterSystemPause();
+		}
+		else if (physicalEvent == MAINLOOP_PHYSICAL_BUTTON_FDS_SIDE)
+		{
+			_MenuTriggerTimeout[0] = 0;
+			_MenuTriggerTimeout[1] = 0;
+			_MainLoopFdsSideSwapAction();
+			return;
+		}
+	}
+
+    /* AURORA_SUPER_MAGIC_DRIVE_V1_20260902 */
+    if (!_bMenu && _pSystem == _pSega && _pSega->IsSuperMagicDrive() && !bFrontCopierPowerHotkeyHeld &&
+        (buttons & (PAD_L2|PAD_L3)) == (PAD_L2|PAD_L3) && !(buttons & PAD_R2) && (trigger & (PAD_L2|PAD_L3)))
+    {
+        bFrontCopierPowerHotkeyHeld=TRUE; _MenuTriggerTimeout[0]=_MenuTriggerTimeout[1]=0;
+        _MainLoopInputSuppressUntilRelease(); _pSega->PowerCycleSuperMagicDrive(); return;
+    }
+
+    /* AURORA_FRONT_COPIER_L2_L3_POWER_CYCLE_V2_20260902
+     * L2+L3 is a host-only cold restart of the active classic Front copier.
+     * It intentionally preserves physical topology: mounted disk/no-disk and
+     * inserted cartridge/no-cartridge remain exactly as they are. The copier
+     * control state returns to Mode 0 and SnesSystem takes the BIOS vector.
+     *
+     * The held latch makes this one-shot. R2 is excluded so L2+R2 keeps its
+     * existing menu/SRAM meaning. Suppress gameplay until full release so the
+     * same physical press cannot leak into the first BIOS frame.
+     */
+    if (!_bMenu && _pSystem == _pSnes &&
+        _pSnes->IsSuperWildCard() &&
+        !bFrontCopierPowerHotkeyHeld &&
+        (buttons & (PAD_L2 | PAD_L3)) == (PAD_L2 | PAD_L3) &&
+        !(buttons & PAD_R2) &&
+        (trigger & (PAD_L2 | PAD_L3)))
+    {
+        bFrontCopierPowerHotkeyHeld = TRUE;
+        _MenuTriggerTimeout[0] = 0;
+        _MenuTriggerTimeout[1] = 0;
+        _MainLoopInputSuppressUntilRelease();
+        _pSnes->PowerCycleFrontCopier();
+        return;
+    }
+
+    /* AURORA_SUPER_MAGIC_DRIVE_V1_20260902 */
+    if (!_bMenu && _pSystem == _pSega && _pSega->IsSuperMagicDrive() && !bSwcCreateHotkeyHeld &&
+        (buttons & PAD_L2) && (buttons & PAD_SQUARE) && !(buttons & PAD_R2) && (trigger & (PAD_L2|PAD_SQUARE)))
+    { bSwcCreateHotkeyHeld=TRUE; _MenuTriggerTimeout[0]=_MenuTriggerTimeout[1]=0; MainLoopSmdCreateNextDisk(); return; }
+
+	/* AURORA_V5_COPIER_LOADER_MEDIA_FLOW_20260831
+	 * L2+Square creates the next numbered image for the active loader:
+	 * Dummy_N without a cartridge, or <cartridge>_N with one. */
+	if (!_bMenu && _pSystem == _pSnes &&
+	    _pSnes->IsSuperWildCard() &&
+	    !bSwcCreateHotkeyHeld &&
+	    (buttons & PAD_L2) && (buttons & PAD_SQUARE) &&
+	    !(buttons & PAD_R2) &&
+	    (trigger & (PAD_L2 | PAD_SQUARE)))
+	{
+		bSwcCreateHotkeyHeld = TRUE;
+		_MenuTriggerTimeout[0] = 0;
+		_MenuTriggerTimeout[1] = 0;
+		MainLoopSwcCreateNextDisk();
+		return;
+	}
+
+	/* AURORA_QN_LIGHTGUN_TIMING_V7_2_20260829
+	 * Light-gun-only false/off-screen shot. L2+Square has no normal release
+	 * hotkey, but consume it here so generic L2 menu/debug handling cannot
+	 * piggyback on the same press. QuickNES reads the raw PS2 snapshot itself. */
+	if (!_bMenu && QuicknesBridge_LightGunActive() &&
+	    (buttons & (PAD_L2 | PAD_SQUARE)) == (PAD_L2 | PAD_SQUARE))
+	{
+		_MenuTriggerTimeout[0] = 0;
+		_MenuTriggerTimeout[1] = 0;
+		return;
+	}
+
+    /* AURORA_SUPER_MAGIC_DRIVE_V1_20260902 */
+    if (!_bMenu && _pSystem == _pSega && _pSega->IsSuperMagicDrive() && !bSwcSwapHotkeyHeld &&
+        (buttons & PAD_L2) && (buttons & PAD_TRIANGLE) && !(buttons & PAD_R2) && (trigger & (PAD_L2|PAD_TRIANGLE)))
+    { bSwcSwapHotkeyHeld=TRUE; _MenuTriggerTimeout[0]=_MenuTriggerTimeout[1]=0; MainLoopSmdSwapNextDisk(); return; }
+
+	/* AURORA_SWC_FLOPPY_V1_20260831 */
+	if (!_bMenu && _pSystem == _pSnes &&
+	    _pSnes->IsSuperWildCard() &&
+	    !bSwcSwapHotkeyHeld &&
+	    (buttons & PAD_L2) && (buttons & PAD_TRIANGLE) &&
+	    !(buttons & PAD_R2) &&
+	    (trigger & (PAD_L2 | PAD_TRIANGLE)))
+	{
+		bSwcSwapHotkeyHeld = TRUE;
+		_MenuTriggerTimeout[0] = 0;
+		_MenuTriggerTimeout[1] = 0;
+		MainLoopSwcSwapNextDisk();
+		return;
+	}
+
+	/* AURORA_FCEUMM_FDS_V0_6_SIDE_SWAP
+	 * FDS-only frontend hotkey. Eject immediately; the bridge counts 60
+	 * emulated FDS frames without blocking the EE thread, flips A<->B on the
+	 * SAME virtual disk, then reinserts. Consume the combo here so the DEBUG
+	 * L2+Triangle display toggle below cannot also fire. */
+	if (!_bMenu && _pSystem == _pFds && !bFdsSwapHotkeyHeld &&
+	    (buttons & PAD_L2) && (buttons & PAD_TRIANGLE) &&
+	    !(buttons & PAD_R2) &&
+	    (trigger & (PAD_L2 | PAD_TRIANGLE)))
+	{
+		bFdsSwapHotkeyHeld = TRUE;
+		_MenuTriggerTimeout[0] = 0;
+		_MenuTriggerTimeout[1] = 0;
+		/* AURORA_V6_PHYSICAL_CONSOLE_BUTTON_FDS_SHARED_20260828 */
+		_MainLoopFdsSideSwapAction();
+		return;
+	}
+
+	/* Release-build quick states, matching the recovered iaddis controls:
+	     L2 + Cross  = save
+	     L2 + Circle = load
+	   L2+R2 remains exclusively the menu/SRAM shortcut below.  The latch
+	   prevents the menu's key-repeat logic from writing a state repeatedly
+	   when the combination is held. */
+	if (!_bMenu &&
+	    !bStateHotkeyHeld &&
+	    (buttons & PAD_L2) &&
+	    !(buttons & PAD_R2))
+	{
+		Bool bSaveTrigger =
+			(buttons & PAD_CROSS) &&
+			(trigger & (PAD_L2 | PAD_CROSS));
+		Bool bLoadTrigger =
+			(buttons & PAD_CIRCLE) &&
+			(trigger & (PAD_L2 | PAD_CIRCLE));
+
+		if (bSaveTrigger || bLoadTrigger)
+		{
+			bStateHotkeyHeld = TRUE;
+			_MenuTriggerTimeout[0] = 0;
+			_MenuTriggerTimeout[1] = 0;
+			_MainLoopQuickStateAction(bSaveTrigger);
+			return;
+		}
+	}
+
+	if (_bMenu &&
+	    _MainLoop_pScreen == (CScreen *)_MainLoop_pStateConfirmScreen)
+	{
+		_MainLoopStateConfirmPromptInput(buttons, trigger);
+		if (_MainLoop_pScreen != (CScreen *)_MainLoop_pStateConfirmScreen)
+		{
+			/* AURORA_AUDIO_UI_SOFT_TRANSITION_V2_20260901
+			 * YES already completed save/load + its correct resume. Only a
+			 * plain close/cancel needs the prompt-level soft resume here. */
+			if (!_MainLoopStateConfirmPromptConsumeExecuted())
+				MainLoopAudioUiResume();
+		}
+		return;
+	}
+
+	/* The one-time destination prompt is intentionally isolated from the
+	   regular L1/R1 menu ring and from the L2+R2 SRAM shortcut. */
+	if (_bMenu &&
+	    _MainLoop_pScreen == (CScreen *)_MainLoop_pStateDeviceScreen)
+	{
+		if (trigger & PAD_CIRCLE)
+		{
+			_MainLoopStateDevicePromptCancel();
+		}
+		else
+		{
+			_MainLoop_pStateDeviceScreen->Input(buttons, trigger);
+		}
+		return;
+	}
+
+	if (_bMenu &&
+	    _MainLoop_pScreen ==
+	            (CScreen *)_MainLoop_pMemCardFormatScreen)
+	{
+		if (trigger & PAD_CIRCLE)
+		{
+			_MainLoopMemCardFormatPromptCancel();
+		}
+		else
+		{
+			_MainLoop_pMemCardFormatScreen->Input(buttons, trigger);
+		}
+		return;
+	}
+
+	#if 1
+	/* Profiler capture: R3 (right-stick click) OR hold L2+R2 together.
+	   L2+R2 is easy to reach on the NetherSX2 touch layout (L3/R3 usually
+	   aren't shown there) and isn't used by SNES/NES games or the menu.
+	   Only does anything in a PROFILE=1 build. */
+	if ((trigger & PAD_R3) ||
+	    (((buttons & PAD_L2) && (buttons & PAD_R2)) && (trigger & (PAD_L2 | PAD_R2))))
+	{
+        #if PROF_ENABLED
+		ProfStartProfile(1);
+        #endif
+//		BMPWriteFile("/pc/mnt/c/out.bmp", &_fbTexture[0]);
+	}
+
+
+
+
+
+    #ifdef DEBUG // CODE_DEBUG
+	if (trigger & PAD_L2)
+	{
+        if (_WavFile.IsOpen())
+        {
+            _WavFile.Close();
+            printf("WavOut Closed\n");
+        } else
+        {
+        /*
+            if (!_WavFile.Open(_pSnesWavFileName, 32000, 16, 2))
+            {
+                 printf("WavOut Open\n");
+            }
+            */
+            if (!_WavFile.Open(_pSnesWavFileName, 48000, 16, 2))
+            {
+                 printf("WavOut Open\n");
+            }
+
+        }
+//		BMPWriteFile("/pc/mnt/c/out.bmp", &_fbTexture[0]);
+	}
+    #endif
+
+
+    #ifdef DEBUG // CODE_DEBUG
+	if (buttons & PAD_L2)
+	{
+        if (trigger&PAD_TRIANGLE)
+		{
+            _MainLoop_uDebugDisplay++;
+            _MainLoop_uDebugDisplay&=3;
+		}
+
+        if (trigger&PAD_L3)
+		{
+			
+	        // stop recording if we are recording
+	        if (s_pMovieClip->IsRecording())
+	        {
+	            printf("Movie: Record End\n");
+	            s_pMovieClip->RecordEnd();
+	        } else
+	        // stop playing if we are playing
+	        if (s_pMovieClip->IsPlaying())
+	        {
+	            printf("Movie: Play End\n");
+	            s_pMovieClip->PlayEnd();
+	        } else
+
+	        if (_pSystem)
+	        {
+	            s_pMovieClip->RecordBegin(_pSystem);
+	            printf("Movie: Record Begin\n");
+	        }
+		}
+
+        if (trigger&PAD_R3)
+		{
+	        // stop recording if we are recording
+	        if (s_pMovieClip->IsRecording())
+	        {
+	            printf("Movie: Record End\n");
+	            s_pMovieClip->RecordEnd();
+	        } 
+
+	        // stop playing if we are playing
+	        if (s_pMovieClip->IsPlaying())
+	        {
+	            printf("Movie: Play End\n");
+	            s_pMovieClip->PlayEnd();
+	        } 
+	        if (_pSystem)
+	        {
+	            s_pMovieClip->PlayBegin(_pSystem);
+	            printf("Movie: Play Begin\n");
+	        }
+		}
+
+    }
+
+			/*
+	if (buttons & PAD_R2)
+	{
+		if (buttons & PAD_SQUARE)
+		{
+        if (trigger&PAD_LEFT)
+			_ColorCalib.i_mul-=0.1f;
+        if (trigger&PAD_RIGHT)
+			_ColorCalib.i_mul+=0.1f;
+        if (trigger&PAD_UP)
+			_ColorCalib.i_add+=0.005f;
+        if (trigger&PAD_DOWN)
+			_ColorCalib.i_add-=0.005f;
+		}
+
+		if (buttons & PAD_CROSS)
+		{
+        if (trigger&PAD_LEFT)
+			_ColorCalib.q_mul-=0.01f;
+        if (trigger&PAD_RIGHT)
+			_ColorCalib.q_mul+=0.01f;
+        if (trigger&PAD_UP)
+			_ColorCalib.q_add+=0.005f;
+        if (trigger&PAD_DOWN)
+			_ColorCalib.q_add-=0.005f;
+		}
+
+		if (buttons & PAD_CIRCLE)
+		{
+        if (trigger&PAD_LEFT)
+			_ColorCalib.y_mul-=0.01f;
+        if (trigger&PAD_RIGHT)
+			_ColorCalib.y_mul+=0.01f;
+        if (trigger&PAD_UP)
+			_ColorCalib.y_add+=0.005f;
+        if (trigger&PAD_DOWN)
+			_ColorCalib.y_add-=0.005f;
+		}
+
+		SNPPUBlendGS::ColorCalibrate(&_ColorCalib);
+    }
+
+			  */
+
+
+
+    #endif
+
+
+	#if 0
+	if (
+	 	((trigger & PAD_R2) && (buttons & PAD_L2)) ||
+	 	((trigger & PAD_L2) && (buttons & PAD_R2)) 
+	   )
+	{
+		// toggle menu
+		 _MenuEnable(!_bMenu);
+		 return;
+	}
+	#endif
+
+	if (trigger & PAD_L2)
+	{
+		_MenuTriggerTimeout[0]=5;
+	}
+
+	if (trigger & PAD_R2)
+	{
+		_MenuTriggerTimeout[1]=5;
+	}
+
+
+	if (_MenuTriggerTimeout[0] > 0)
+	{
+		if (trigger & PAD_R2)
+		{
+			_MenuTriggerTimeout[0] = 0;
+			 // toggle menu
+			 _MenuEnable(!_bMenu);
+			 return;
+		}
+		_MenuTriggerTimeout[0]--;
+	}
+
+	if (_MenuTriggerTimeout[1] > 0)
+	{
+		if (trigger & PAD_L2)
+		{
+			_MenuTriggerTimeout[1] = 0;
+			 // toggle menu
+			 _MenuEnable(!_bMenu);
+			 return;
+		}
+		_MenuTriggerTimeout[1]--;
+	}
+
+
+	if (_bMenu)
+	{
+		if (_MainLoop_pScreen)
+		{
+		    if (_MainLoop_pScreen ==
+		            (CScreen *)_MainLoop_pStateBrowserScreen &&
+		        (trigger & PAD_L1))
+		    {
+		        _MainLoopStateMenuRefresh();
+		        _MainLoopSetScreen((CScreen *)_MainLoop_pStateScreen);
+		        return;
+		    }
+
+		    /* L1 / R1 cycle through every available screen including
+		       the message Log. The previous hand-written chain stopped
+		       at Menu when going right and never reached Log when going
+		       left, so the Log tab was effectively unreachable from the
+		       UI. _MainLoopCycleScreen iterates Browser->State Manager
+		       ->Network->Menu->Log->Video Config in either direction.
+		       State Manager remains available while a game is paused. */
+		    if (trigger & PAD_R1)
+		    {
+		        _MainLoopCycleScreen(+1);
+		    } else
+		    if (trigger & PAD_L1)
+		    {
+		        _MainLoopCycleScreen(-1);
+		    } else
+		    {
+		        _MainLoop_pScreen->Input(buttons, trigger);
+		    }
+		}
+
+	}
+	else
+	{
+
+/* AURORA_RUNTIME_SAFE_SOFTRESET_V1_4_3 */
+if (_pSystem && (buttons & PAD_L2))
+	{
+		if (trigger & PAD_SELECT)
+		{
+			_pSystem->SoftReset();
+
+			/* A reset is an audio timeline discontinuity. Discard samples
+			 * and resampler history belonging to the pre-reset machine. */
+			MainLoopAudioResumeGame();
+			return;
+		}
+	}
+
+#if 0
+		// perform cheesy non-deterministic disk switching
+		if (trigger & (PAD_R1|PAD_L1) )
+		{
+			if (_pNesFDSDisk->IsLoaded())
+			{
+				if (_MainLoop_bDiskInserted)
+				{
+					// eject disk!
+					_MainLoop_bDiskInserted = FALSE;
+					_pNes->GetMMU()->InsertDisk(-1);
+
+					MainLoopStatusPrintf(60, "NESFDS Disk Ejected");
+
+					// pick next disk
+					if (trigger & PAD_R1)
+						_MainLoop_iDisk++;
+					else
+						_MainLoop_iDisk--;
+				} else
+				{
+					// wrap the number of disks
+					if (_MainLoop_iDisk < 0)
+					{
+						_MainLoop_iDisk = _pNesFDSDisk->GetNumDisks()-1;
+					}
+
+					if (_MainLoop_iDisk >= _pNesFDSDisk->GetNumDisks())
+					{
+						_MainLoop_iDisk = 0;
+					}
+					// insert disk
+					_pNes->GetMMU()->InsertDisk(_MainLoop_iDisk);
+					_MainLoop_bDiskInserted = TRUE;
+
+
+					MainLoopStatusPrintf(60, "NESFDS Disk %d Inserted", _MainLoop_iDisk);
+				}
+			}
+		}
+#endif
+
+	}
+#endif
+}
+

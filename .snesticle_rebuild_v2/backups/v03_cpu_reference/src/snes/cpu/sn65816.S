@@ -1,0 +1,2479 @@
+
+
+#include "sncpudefs.h"
+#include "ps2reg.h"
+
+#ifndef AURORA_RUNTIME_TRACE
+#define AURORA_RUNTIME_TRACE 0
+#endif
+
+
+		.file		1 "sn65816.S"
+    	.text	
+    	.p2align	3
+    	.globl 		SNCPUExecute_ASM
+        .globl		_SNCPU_OpTable
+
+		.set noreorder    
+
+
+
+//
+// cpu structure offsets
+//
+
+#define SNCPU_rA  			0(R_pCpu)
+#define SNCPU_rX  			2(R_pCpu)
+#define SNCPU_rY  			4(R_pCpu)
+#define SNCPU_rS  			6(R_pCpu)
+#define SNCPU_rP  			8(R_pCpu)
+#define SNCPU_rE  			9(R_pCpu)
+#define SNCPU_rDP  			10(R_pCpu)
+#define SNCPU_rPC  			12(R_pCpu)
+#define SNCPU_rDB  			16(R_pCpu)
+
+#define SNCPU_Cycles 		20(R_pCpu)
+#define SNCPU_Counter0 		24(R_pCpu)
+#define SNCPU_Counter1 		28(R_pCpu)
+#define SNCPU_Counter2 		32(R_pCpu)
+#define SNCPU_Counter3 		36(R_pCpu)
+#define SNCPU_pUserData		40(R_pCpu)
+
+#define SNCPU_nAbortCycles	44(R_pCpu)
+#define SNCPU_bRunning      48(R_pCpu)
+#define SNCPU_uSignal       49(R_pCpu)
+#define SNCPU_uNmiDmaDelay  50(R_pCpu)
+#define SNCPU_uMDR         51(R_pCpu)  // AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907
+
+#define SNCPU_MemIO			52
+
+
+#define SNCPU_pMem			(SNCPU_MemIO+0)
+#define SNCPU_ReadTrap		(SNCPU_MemIO+4)
+#define SNCPU_WriteTrap		(SNCPU_MemIO+8)
+#define SNCPU_uBankCycle	(SNCPU_MemIO+12)
+#define SNCPU_bRAM			(SNCPU_MemIO+13)
+
+
+
+//
+// temporary storage on stack
+//
+
+#define SP_RA0   	0x50(sp)
+#define SP_RA1   	0x54(sp)
+#define SP_PCBank  	0x58(sp)
+#define SP_SaveTrap 0x5C(sp)
+
+#define SP_Save0   	0x60(sp)
+#define SP_Save1   	0x64(sp)
+#define SP_Save2   	0x68(sp)
+#define SP_Save3   	0x6C(sp)
+#define SP_Save4   	0x70(sp)
+#if AURORA_RUNTIME_TRACE
+/* AURORA_RUNTIME_DEBUGGER_MENU_V5_20260919: runtime gate snapshot; 0x74..0x77 was unused. */
+#define SP_TraceEnabled 0x74(sp)
+#endif
+
+#define SP_Data0   	0x78(sp)
+#define SP_Data1   	0x79(sp)
+#define SP_Data2   	0x7A(sp)
+#define SP_Data3   	0x7B(sp)
+
+
+//
+// register definitions
+//
+
+
+//
+// these registers must S0-S7
+// they are not saved during a trap function
+//
+
+// pointer to current cpu state
+#define	R_pCpu			$16
+
+// address/data for mem i/o
+#define R_Addr			$17	
+
+// decomposed flags
+#define R_fN			$18	
+#define R_fZ			$19	
+#define R_fC			$20	
+
+// temporary registers for instruction processing
+#define R_t0			$21
+#define R_t1			$22
+#define R_t2			$23
+
+
+
+
+//
+// these registers are saved/restored when a trap function is called
+// t0-t2 are reserved
+
+#define R_Cycles		$2
+#define R_PC			$3
+#define R_A				$4
+#define R_X				$5
+#define R_Y				$6
+#define R_S				$7
+
+#define R_PCCount		$11
+#define R_P				$12
+#define R_DP			$13
+#define R_DB			$14
+#define R_pOpTable		$15
+#define R_Data			$24
+#define R_DPMASK		$25
+
+#define R_PCCycles		$30
+
+/* AURORA_SNES_BINARY_TRACE_V6_20260918_MACRO: pre-dispatch context ring, runtime gated. */
+#if AURORA_RUNTIME_TRACE
+#define AURORA_TRACE_SCPU_INSN() \
+        /* AURORA_SNES_SAFE_PERF_V6_20260919 / AURORA_TRACE_OFF_PERF_V6_20260919: \
+         * Off is the default. R5900 branch-likely executes the delay slot \
+         * only when the gate is taken, so the opcode-index shift replaces \
+         * V5's NOP. On recomputes that same shift once after the trace body. */ \
+        lw      t1,SP_TraceEnabled            ;\
+        beql    t1,zr,9f                      ;\
+        sll     t0,R_Data,2                   ;\
+        la      t0,g_AuroraTraceSeq           ;\
+        lw      t1,0(t0)                      ;\
+        addiu   t1,t1,1                       ;\
+        sw      t1,0(t0)                      ;\
+        la      t0,g_AuroraTraceSCPUWrite     ;\
+        lw      t2,0(t0)                      ;\
+        addiu   t2,t2,1                       ;\
+        sw      t2,0(t0)                      ;\
+        addiu   t2,t2,-1                      ;\
+        andi    t2,t2,0x07FF                  ;\
+        sll     t2,t2,5                       ;\
+        la      t0,g_AuroraTraceSCPU          ;\
+        addu    t0,t0,t2                      ;\
+        sw      t1,0(t0)                      ;\
+        lwu     t2,SP_PCBank                  ;\
+        subu    t2,R_PC,t2                    ;\
+        addiu   t2,t2,-1                      ;\
+        sw      t2,4(t0)                      ;\
+        lw      t2,SNCPU_Counter1             ;\
+        subu    t2,t2,R_Cycles                ;\
+        sw      t2,8(t0)                      ;\
+        lw      t2,SNCPU_Counter2             ;\
+        subu    t2,t2,R_Cycles                ;\
+        sw      t2,12(t0)                     ;\
+        sw      R_Cycles,16(t0)               ;\
+        sh      R_A,20(t0)                    ;\
+        sh      R_X,22(t0)                    ;\
+        sh      R_Y,24(t0)                    ;\
+        sh      R_S,26(t0)                    ;\
+        sb      R_Data,28(t0)                 ;\
+        sb      R_P,29(t0)                    ;\
+        lbu     t2,SNCPU_uSignal              ;\
+        sb      t2,30(t0)                     ;\
+        lbu     t2,SNCPU_rE                   ;\
+        sb      t2,31(t0)                     ;\
+        sll     t0,R_Data,2                   ;\
+9:
+#else
+#define AURORA_TRACE_SCPU_INSN() sll t0,R_Data,2
+#endif
+
+
+
+
+
+//
+//
+//
+
+
+#define SNCPU_OP(_opcode)  	\
+		op_##_opcode:		
+
+#define SNCPU_OPTABLE_BEGIN()  _SNCPU_OpTable:
+#define SNCPU_OPTABLE_OP(_opcode)  .word op_##_opcode
+#define SNCPU_OPTABLE_END()  
+
+#define SNCPU_SUBCYCLES(_nCycles)		\
+		addiu	R_Cycles,R_Cycles, -(_nCycles * SNCPU_CYCLE_FAST)	
+//#define SNCPU_SUBCYCLES(_nCycles)		
+
+
+#define SNCPU_ENDOP(_nCycles)		\
+		j		_SNCPUExecute_Loop	;	\
+		addiu	R_Cycles,R_Cycles, -(_nCycles * SNCPU_CYCLE_FAST)	\
+
+
+#define SNCPU_ABORTOP() \
+		j		_SNCPUExecute_Abort	;\
+        nop		
+
+#define SNCPU_OP_ALL(_Opcode) \
+	SNCPU_OP(0x0##_Opcode)	\
+	SNCPU_OP(0x1##_Opcode)	\
+	SNCPU_OP(0x2##_Opcode)	\
+	SNCPU_OP(0x3##_Opcode)	\
+	SNCPU_OP(0x4##_Opcode)	
+
+#define SNCPU_OP_E0(_Opcode) \
+	SNCPU_OP(0x0##_Opcode)	\
+	SNCPU_OP(0x1##_Opcode)	\
+	SNCPU_OP(0x2##_Opcode)	\
+	SNCPU_OP(0x3##_Opcode)	\
+
+#define SNCPU_OP_E1(_Opcode) \
+	SNCPU_OP(0x4##_Opcode)	
+
+#define SNCPU_OP_X0(_Opcode) \
+	SNCPU_OP(0x0##_Opcode)	\
+	SNCPU_OP(0x2##_Opcode)	\
+
+#define SNCPU_OP_X1E1(_Opcode) \
+	SNCPU_OP(0x1##_Opcode)	\
+	SNCPU_OP(0x3##_Opcode)	\
+	SNCPU_OP(0x4##_Opcode)	
+
+
+
+//
+//
+//
+
+#define SNCPU_ADD(_dest, _src) 		addu	_dest,_dest,_src
+#define SNCPU_SUB(_dest, _src) 		subu	_dest,_dest,_src
+#define SNCPU_AND(_dest, _src) 		and		_dest,_dest,_src
+#define SNCPU_OR(_dest, _src) 		or		_dest,_dest,_src
+#define SNCPU_XOR(_dest, _src) 		xor		_dest,_dest,_src
+#define SNCPU_SHR(_dest, _src) 		srlv	_dest,_dest,_src
+#define SNCPU_SHL(_dest, _src) 		sllv	_dest,_dest,_src
+
+#define SNCPU_ADDI(_dest, _src) 	addiu	_dest,_dest,_src
+#define SNCPU_SUBI(_dest, _src) 	addiu	_dest,_dest,-(_src)
+#define SNCPU_ANDI(_dest, _src) 	andi	_dest,_dest,_src
+#define SNCPU_ORI(_dest, _src) 	    ori		_dest,_dest,_src
+#define SNCPU_XORI(_dest, _src)    	xori	_dest,_dest,_src
+#define SNCPU_SHRI(_dest, _src)    	srl		_dest,_dest,_src
+#define SNCPU_SRAI(_dest, _src)    	sra		_dest,_dest,_src
+#define SNCPU_SHLI(_dest, _src)    	sll		_dest,_dest,_src
+#define SNCPU_NOT16(_dest)    		xori	_dest,_dest,0xFFFF
+#define SNCPU_NOT8(_dest)    		xori	_dest,_dest,0xFF
+
+// R_DPMASK packs the indexed-address mask in bits 0..15, the direct-page
+// timing penalty in bits 16..23, and the emulation page base in bits 24..31.
+#define SNCPU_WRAP_DP_INDEX(_dest) \
+		and		_dest,_dest,R_DPMASK	;\
+		srl		t0,R_DPMASK,16		;\
+		andi	t0,t0,0xFF00		;\
+		or		_dest,_dest,t0
+
+#define SNCPU_DP_PENALTY() \
+		srl		t0,R_DPMASK,16		;\
+		andi	t0,t0,0x00FF		;\
+		subu	R_Cycles,R_Cycles,t0
+
+/* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916
+ * Same r19 timing rule, one fewer host instruction in every case.
+ * R5900 branch-likely annuls the delay slot when the branch is not taken. */
+/* AURORA_CPU_HOST_WORK_REDUCTION_V1_20260920
+ * Host-only optimization pass.  Every change below preserves the existing
+ * SNES-visible cycle deductions and architectural state; it only removes
+ * redundant R5900 work / wasted delay slots. */
+#define SNCPU_INDEX_READ_PENALTY(_base,_index) \
+		andi	t0,R_P,SNCPU_FLAG_X	;\
+		beql	t0,zr,2f			;\
+		addiu	R_Cycles,R_Cycles,-SNCPU_CYCLE_FAST ;\
+		addu	t1,_base,_index		;\
+		xor		t0,t1,_base			;\
+		andi	t0,t0,0xFF00			;\
+		bnel	t0,zr,2f			;\
+		addiu	R_Cycles,R_Cycles,-SNCPU_CYCLE_FAST ;\
+2:
+#define SNCPU_ADC8(_dest,_src)					\
+		jal		_SNCPU_ADC8						;\
+        andi	R_P,R_P,SNCPU_FLAG_V ^ 0xFF
+
+#define SNCPU_ADC16(_dest,_src)					\
+		jal		_SNCPU_ADC16					;\
+        andi	R_P,R_P,SNCPU_FLAG_V ^ 0xFF
+
+#define SNCPU_SBC8(_dest,_src)					\
+		jal		_SNCPU_SBC8						;\
+        andi	R_P,R_P,SNCPU_FLAG_V ^ 0xFF
+
+#define SNCPU_SBC16(_dest,_src)					\
+		jal		_SNCPU_SBC16					;\
+        andi	R_P,R_P,SNCPU_FLAG_V ^ 0xFF
+
+
+
+
+/* Stop at this instruction boundary when an asserted IRQ becomes unmasked.
+   Save the cycles following the instruction so the outer scheduler vectors
+   immediately rather than waiting until the next scanline slice. */
+#define SNCPU_CHECKIRQ(_TailCycles) \
+		lbu		t0,SNCPU_uSignal					;\
+		andi	t0,t0,SNCPU_SIGNAL_IRQ			;\
+		beq		t0,zr,9f						;\
+		andi	t1,R_P,SNCPU_FLAG_I				;\
+		bne		t1,zr,9f						;\
+		addiu	t2,R_Cycles,-((_TailCycles) * SNCPU_CYCLE_FAST) ;\
+		blez	t2,9f							;\
+		nop									;\
+		sw		t2,SNCPU_nAbortCycles				;\
+		move	R_Cycles,zr						;\
+9:
+
+/* AURORA_CPU_BLOCKMOVE_PBR_V7_FASTPATH_20260916
+ * V7 keeps V6's PBR-safe MVN/MVP rewind, but fills both R5900 branch delay
+ * slots with useful work.  The overwhelmingly common same-descriptor repeat
+ * falls from 8 host instructions to 6 (including A--), close to the old fast
+ * path, while the rare descriptor/trap path still writes only PC.low16 back
+ * to SNCpuT before remapping so a 0000->FFFF rewind can never change PBR. */
+#define SNCPU_BLOCKMOVE_REPEAT() \
+        beq     R_A,zr,9f                       ;\
+        sltiu   t0,R_PCCount,8189               ;\
+        bne     t0,zr,8f                        ;\
+        addiu   R_PC,R_PC,-3                    ;\
+        lw      t0,SP_PCBank                    ;\
+        subu    t0,R_PC,t0                      ;\
+        sh      t0,SNCPU_rPC                    ;\
+        sw      zr,SP_PCBank                    ;\
+        lui     R_PCCount,0xC000                ;\
+        lwu     R_PC,SNCPU_rPC                  ;\
+        b       9f                              ;\
+        nop                                     ;\
+8:      addiu   R_PCCount,R_PCCount,3           ;\
+9:      SNCPU_ADDI(R_A,-1)
+
+#define SNCPU_SETFLAG_I()   		ori		R_P,R_P,SNCPU_FLAG_I
+#define SNCPU_CLRFLAG_I()   						\
+		andi 	R_P,R_P,SNCPU_FLAG_I^0xFFFF	;\
+		SNCPU_CHECKIRQ(1)
+#define SNCPU_SETFLAG_D()   		ori		R_P,R_P,SNCPU_FLAG_D
+#define SNCPU_CLRFLAG_D()   		andi 	R_P,R_P,SNCPU_FLAG_D^0xFFFF
+
+#define SNCPU_SETFLAG_Z8(_src)   	sll		R_fZ,_src,8
+#define SNCPU_SETFLAG_Z16(_src)   	sll		R_fZ,_src,0
+#define SNCPU_SETFLAG_N8(_src)   	sll		R_fN,_src,8
+#define SNCPU_SETFLAG_N16(_src)   	sll		R_fN,_src,0
+#define SNCPU_SETFLAG_C(_src)   	andi	R_fC,_src,1
+#define SNCPU_GETFLAG_C(_dest)   	andi	_dest,R_fC,1
+#define SNCPU_SETFLAGI_C(_src)   	ori		R_fC,zr,1&(_src)
+
+#define SNCPU_GETFLAG_V(_dest)   	andi	_dest,R_P,SNCPU_FLAG_V
+#define SNCPU_GETFLAG_N(_dest)   	andi	_dest,R_fN,0x8000
+#define SNCPU_GETFLAG_Z(_dest)   	\
+		andi	R_fZ,R_fZ,0xFFFF	;\
+        sltiu	_dest,R_fZ,1		;\
+
+#define SNCPU_GETFLAG_E(_dest)   	lbu		_dest,SNCPU_rE		
+#define SNCPU_SETFLAG_E(_src)   	\
+		jal		_SNCPU_UpdateOpTable	   ;\
+		sb		_src,SNCPU_rE		
+
+
+#define SNCPU_SETFLAGI_V(_src)   					\
+        andi	R_P,R_P,SNCPU_FLAG_V ^ 0xFFFF  ;	\
+        or		R_P,R_P,(_src) << 6							
+
+
+#define SNCPU_SETFLAG_V(_src)   					\
+		andi	t0,_src,1 					   ;	\
+        andi	R_P,R_P,SNCPU_FLAG_V ^ 0xFFFF  ;	\
+        sll		t0,t0,6						   ;	\
+        or		R_P,R_P,t0							
+
+
+#define SNCPU_BREAK_TRUE(_reg)  	bne		_reg,zr,_SNCPUExecute_Loop
+#define SNCPU_BREAK_FALSE(_reg)  	beq		_reg,zr,_SNCPUExecute_Loop
+
+
+#define SNCPU_SET_X16(_src)   		andi	R_X,_src,0xFFFF
+#define SNCPU_SET_Y16(_src)   		andi	R_Y,_src,0xFFFF
+#define SNCPU_SET_X8(_src)   		andi	R_X,_src,0xFF
+#define SNCPU_SET_Y8(_src)   		andi	R_Y,_src,0xFF
+#define SNCPU_SET_A16(_src)   		andi	R_A,_src,0xFFFF
+#define SNCPU_SET_A8(_src)   		\
+		andi	t0,_src,0xFF	   ;	\
+		andi	R_A,R_A,0xFF00	   ;	\
+        or		R_A,R_A,t0					
+
+#define SNCPU_SET_S16(_src)   		andi	R_S,_src,0xFFFF
+#define SNCPU_SET_S8(_src)   		\
+		andi	t0,_src,0xFF	   ;	\
+		andi	R_S,R_S,0xFF00	   ;	\
+        or		R_S,R_S,t0					
+
+
+#define SNCPU_GET_DB(_src)   		move	_src,R_DB
+#define SNCPU_SET_DB(_src)   		move	R_DB,_src
+
+
+#define SNCPU_GETI(_dest, _imm) 	li		_dest,_imm
+
+#define SNCPU_GET_X16(_dest)   		andi	_dest,R_X,0xFFFF
+#define SNCPU_GET_X8(_dest)   		andi	_dest,R_X,0xFF
+#define SNCPU_GET_Y16(_dest)   		andi	_dest,R_Y,0xFFFF
+#define SNCPU_GET_Y8(_dest)   		andi	_dest,R_Y,0xFF
+#define SNCPU_GET_A16(_dest)   		andi	_dest,R_A,0xFFFF
+#define SNCPU_GET_A8(_dest)   		andi	_dest,R_A,0xFF
+#define SNCPU_GET_S16(_dest)   		andi	_dest,R_S,0xFFFF
+#define SNCPU_GET_S8(_dest)   		andi	_dest,R_S,0xFF
+
+
+#define SNCPU_GET_DP(_dest)   		move	_dest,R_DP
+#define SNCPU_SET_DP(_src)   		\
+		jal		_SNCPU_UpdateDPMask	;\
+		move	R_DP,_src
+
+#define SNCPU_GET_P(_dest)   				\
+			jal		_SNCPU_ComposeFlags	 ;	\
+            nop							 ;	\
+			move	_dest,R_P			
+            
+            	
+#define SNCPU_SET_P(_src)   		  		;	\
+			jal		_SNCPU_DecomposeFlags	;	\
+			move	R_P,_src
+
+#define SNCPU_GET_PC(_dest)   		\
+		lwu		t0,SP_PCBank	   ;\
+        subu	_dest, R_PC, t0
+
+// set lower 16-bits of PC and 8-bit PB         
+// PB is always stored in CPU struct
+#define SNCPU_SET_PC24(_src)   		\
+		move	R_PC,_src		   ;\
+        sw		zr, SP_PCBank	   ;\
+		lui		R_PCCount,0xC000   ;\
+        sw		R_PC,SNCPU_rPC	   
+
+// set lower 16-bits of PC while preserving 8-bit PB         
+// PB is always stored in CPU struct
+// set PCCount to force bankswitch
+#define SNCPU_SET_PC16(_src)   		\
+        sh		_src,SNCPU_rPC	   ;\
+        sw		zr, SP_PCBank	   ;\
+		lui		R_PCCount,0xC000   ;\
+        lwu		R_PC,SNCPU_rPC	   
+
+
+
+// branch relative
+// add rel to PC
+// subtract rel from pccount. 
+// if pccount >= SNCPU_BANK_SIZE then force bankswitch
+#define SNCPU_BREL_PC16(_rel)				\
+        subu	R_PCCount,R_PCCount,_rel				;\
+        sltiu	t0, R_PCCount,SNCPU_BANK_SIZE			;\
+		addu	R_PC,R_PC,_rel							;\
+		beql	t0,zr,7f								;\
+		lui		R_PCCount,0xC000						;\
+7:
+
+/* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916
+ * Opcode dispatch already separates E=0/E=1, so native mode does not
+ * pay emulation-only page-cross bookkeeping. E=1 preserves the exact
+ * one-fast-cycle penalty, using R5900 branch-likely to annul the -6
+ * delay slot when no page crossing occurred. */
+#define SNCPU_BREL8_E1_PC16(_rel) \
+		lwu		t2,SP_PCBank						;\
+		subu	t2,R_PC,t2						;\
+		SNCPU_BREL_PC16(_rel)					;\
+		addu	t0,t2,_rel						;\
+		xor		t0,t0,t2						;\
+		andi	t0,t0,0xFF00						;\
+		bnel	t0,zr,8f						;\
+		addiu	R_Cycles,R_Cycles,-SNCPU_CYCLE_FAST ;\
+8:
+
+#define SNCPU_FETCH8(_dest)  		   \
+		jal		_SNCPU_Fetch8		;  \
+        nop							;  \
+        move	_dest,R_Data
+
+#define SNCPU_FETCH16(_dest)                 \
+        jal     _SNCPU_Fetch16          ;   \
+        nop                             ;   \
+        move    _dest,R_Data            ;   \
+        srl     R_Data,R_Data,8
+
+#define SNCPU_FETCH24(_dest)                 \
+        jal     _SNCPU_Fetch24          ;   \
+        nop                             ;   \
+        move    _dest,R_Data            ;   \
+        srl     R_Data,R_Data,16
+
+
+#define SNCPU_READ8(_addr,_data)  	   \
+		jal		_SNCPU_Read8		;  \
+		move	R_Addr, _addr		;  \
+		move	_data,R_Data		   \
+
+#define SNCPU_READ16(_addr,_data)            \
+        jal     _SNCPU_Read16           ;   \
+        move    R_Addr,_addr            ;   \
+        move    _data,R_Data            ;   \
+        srl     R_Data,R_Data,8
+
+#define SNCPU_READ24(_addr,_data)            \
+        jal     _SNCPU_Read24           ;   \
+        move    R_Addr,_addr            ;   \
+        move    _data,R_Data            ;   \
+        srl     R_Data,R_Data,16
+
+#define SNCPU_READ16_WRAP16(_addr,_data)     \
+        jal     _SNCPU_Read16Wrap16     ;   \
+        move    R_Addr,_addr            ;   \
+        move    _data,R_Data            ;   \
+        srl     R_Data,R_Data,8
+
+#define SNCPU_READ24_WRAP16(_addr,_data)     \
+        jal     _SNCPU_Read24Wrap16     ;   \
+        move    R_Addr,_addr            ;   \
+        move    _data,R_Data            ;   \
+        srl     R_Data,R_Data,16
+
+#define SNCPU_READ16_DP(_addr,_data)         \
+        jal     _SNCPU_Read16DP         ;   \
+        move    R_Addr,_addr            ;   \
+        move    _data,R_Data            ;   \
+        srl     R_Data,R_Data,8
+
+#define SNCPU_READ16_DPX(_addr,_data) SNCPU_READ16_WRAP16(_addr,_data)
+
+#define SNCPU_WRITE8(_addr,_data)  	   \
+		move	R_Addr, _addr		;  \
+		jal		_SNCPU_Write8		;  \
+		move	R_Data, _data		   \
+
+#define SNCPU_WRITE16(_addr,_data)     \
+		move	R_Addr, _addr		;  \
+		jal		_SNCPU_Write16		;  \
+		move	R_Data, _data		   \
+
+#define SNCPU_WRITE16_WRAP16(_addr,_data) \
+		move	R_Addr,_addr			;\
+		jal		_SNCPU_Write16Wrap16	;\
+		move	R_Data,_data
+
+#define SNCPU_WRITE24(_addr,_data)     \
+		move	R_Addr, _addr		;  \
+		jal		_SNCPU_Write24		;  \
+		move	R_Data, _data		   \
+
+
+
+
+#define SNCPU_RESTRICT_STACK() \
+		lbu		t0,SNCPU_rE			;\
+		beq		t0,zr,1f			;\
+		andi	t1,R_S,0x00FF		;\
+		ori		R_S,t1,0x0100		;\
+1:
+
+#define SNCPU_POP8(_dest)  		   \
+		addiu	R_S,R_S,1			;  \
+		SNCPU_RESTRICT_STACK()		;  \
+		jal		_SNCPU_Read8		;  \
+		move	R_Addr,R_S			;  \
+		move	_dest,R_Data
+
+#define SNCPU_POP8_RAW(_dest) \
+		addiu	R_S,R_S,1			;  \
+		jal		_SNCPU_Read8		;  \
+		move	R_Addr,R_S			;  \
+		move	_dest,R_Data			;  \
+		SNCPU_RESTRICT_STACK()
+
+#define SNCPU_POP16(_dest)  		   \
+		addiu	R_S,R_S,1			;  \
+		SNCPU_RESTRICT_STACK()		;  \
+		jal		_SNCPU_Read8		;  \
+		move	R_Addr,R_S			;  \
+		sb		R_Data,SP_Data0		;  \
+		addiu	R_S,R_S,1			;  \
+		SNCPU_RESTRICT_STACK()		;  \
+		jal		_SNCPU_Read8		;  \
+		move	R_Addr,R_S			;  \
+		sb		R_Data,SP_Data1		;  \
+		lhu		_dest,SP_Data0
+
+#define SNCPU_POP24(_dest)  		   \
+		sw		zr,SP_Data0			;  \
+		addiu	R_S,R_S,1			;  \
+		SNCPU_RESTRICT_STACK()		;  \
+		jal		_SNCPU_Read8		;  \
+		move	R_Addr,R_S			;  \
+		sb		R_Data,SP_Data0		;  \
+		addiu	R_S,R_S,1			;  \
+		SNCPU_RESTRICT_STACK()		;  \
+		jal		_SNCPU_Read8		;  \
+		move	R_Addr,R_S			;  \
+		sb		R_Data,SP_Data1		;  \
+		addiu	R_S,R_S,1			;  \
+		SNCPU_RESTRICT_STACK()		;  \
+		jal		_SNCPU_Read8		;  \
+		move	R_Addr,R_S			;  \
+		sb		R_Data,SP_Data2		;  \
+		lw		_dest,SP_Data0
+
+#define SNCPU_PUSH8(_src)  	   \
+		move	R_Addr,R_S			;  \
+		jal		_SNCPU_Write8		;  \
+		srl		R_Data,_src,0		;  \
+		addiu	R_S,R_S,-1			;  \
+		SNCPU_RESTRICT_STACK()
+
+#define SNCPU_PUSH16(_src)  	   \
+		move	R_Addr,R_S			;  \
+		jal		_SNCPU_Write8		;  \
+		srl		R_Data,_src,8		;  \
+		addiu	R_S,R_S,-1			;  \
+		SNCPU_RESTRICT_STACK()		;  \
+		move	R_Addr,R_S			;  \
+		jal		_SNCPU_Write8		;  \
+		srl		R_Data,_src,0		;  \
+		addiu	R_S,R_S,-1			;  \
+		SNCPU_RESTRICT_STACK()
+
+#define SNCPU_PUSH24(_src)  	   \
+		move	R_Addr,R_S			;  \
+		jal		_SNCPU_Write8		;  \
+		srl		R_Data,_src,16		;  \
+		addiu	R_S,R_S,-1			;  \
+		SNCPU_RESTRICT_STACK()		;  \
+		move	R_Addr,R_S			;  \
+		jal		_SNCPU_Write8		;  \
+		srl		R_Data,_src,8		;  \
+		addiu	R_S,R_S,-1			;  \
+		SNCPU_RESTRICT_STACK()		;  \
+		move	R_Addr,R_S			;  \
+		jal		_SNCPU_Write8		;  \
+		srl		R_Data,_src,0		;  \
+		addiu	R_S,R_S,-1			;  \
+		SNCPU_RESTRICT_STACK()
+
+// Raw multi-byte transfers defer emulation-page restriction until the end.
+#define SNCPU_PUSH16_RAW(_src) \
+		move	R_Addr,R_S			;\
+		jal		_SNCPU_Write8		;\
+		srl		R_Data,_src,8		;\
+		addiu	R_S,R_S,-1			;\
+		move	R_Addr,R_S			;\
+		jal		_SNCPU_Write8		;\
+		srl		R_Data,_src,0		;\
+		addiu	R_S,R_S,-1			;\
+		SNCPU_RESTRICT_STACK()
+
+#define SNCPU_PUSH24_RAW(_src) \
+		move	R_Addr,R_S			;\
+		jal		_SNCPU_Write8		;\
+		srl		R_Data,_src,16		;\
+		addiu	R_S,R_S,-1			;\
+		move	R_Addr,R_S			;\
+		jal		_SNCPU_Write8		;\
+		srl		R_Data,_src,8		;\
+		addiu	R_S,R_S,-1			;\
+		move	R_Addr,R_S			;\
+		jal		_SNCPU_Write8		;\
+		srl		R_Data,_src,0		;\
+		addiu	R_S,R_S,-1			;\
+		SNCPU_RESTRICT_STACK()
+
+#define SNCPU_POP16_RAW(_dest) \
+		addiu	R_S,R_S,1			;\
+		jal		_SNCPU_Read8		;\
+		move	R_Addr,R_S			;\
+		sb		R_Data,SP_Data0		;\
+		addiu	R_S,R_S,1			;\
+		jal		_SNCPU_Read8		;\
+		move	R_Addr,R_S			;\
+		sb		R_Data,SP_Data1		;\
+		lhu		_dest,SP_Data0		;\
+		SNCPU_RESTRICT_STACK()
+
+#define SNCPU_POP24_RAW(_dest) \
+		sw		zr,SP_Data0			;\
+		addiu	R_S,R_S,1			;\
+		jal		_SNCPU_Read8		;\
+		move	R_Addr,R_S			;\
+		sb		R_Data,SP_Data0		;\
+		addiu	R_S,R_S,1			;\
+		jal		_SNCPU_Read8		;\
+		move	R_Addr,R_S			;\
+		sb		R_Data,SP_Data1		;\
+		addiu	R_S,R_S,1			;\
+		jal		_SNCPU_Read8		;\
+		move	R_Addr,R_S			;\
+		sb		R_Data,SP_Data2		;\
+		lw		_dest,SP_Data0		;\
+		SNCPU_RESTRICT_STACK()
+
+
+
+
+#define SNCPU_SAVEREGSTATE() 				\
+		sw		R_PCCount, SP_Save0		   ; \
+		sw		R_DPMASK, SP_Save1		   ; \
+		sw		R_pOpTable, SP_Save2 	   ; \
+		sw		R_PCCycles, SP_Save3 	   ; \
+		sw		R_PC, SP_Save4			   ; \
+        sh		R_A, SNCPU_rA			   ; \
+        sh		R_X, SNCPU_rX			   ; \
+        sh		R_Y, SNCPU_rY			   ; \
+        sh		R_S, SNCPU_rS			   ; \
+        sh		R_DP, SNCPU_rDP			   ; \
+        sw		R_DB, SNCPU_rDB			   ; \
+        sb		R_P, SNCPU_rP			   ; \
+		sw		R_Cycles, SNCPU_Cycles		
+
+
+
+#define SNCPU_LOADREGSTATE()			    \
+		lw		R_PCCount, SP_Save0		   ; \
+		lwu		R_DPMASK, SP_Save1		   ; \
+		lwu		R_pOpTable, SP_Save2 	   ; \
+		lwu		R_PCCycles, SP_Save3 	   ; \
+		lwu		R_PC, SP_Save4			   ; \
+        lhu		R_A, SNCPU_rA			   ; \
+        lhu		R_X, SNCPU_rX			   ; \
+        lhu		R_Y, SNCPU_rY			   ; \
+        lhu		R_S, SNCPU_rS			   ; \
+        lhu		R_DP, SNCPU_rDP			   ; \
+        lwu		R_DB, SNCPU_rDB			   ; \
+        lbu		R_P, SNCPU_rP			   ; \
+		lw		R_Cycles,SNCPU_Cycles	   
+
+
+
+
+/*
+//
+// _SNCPU_Write8
+//
+//  Inputs:
+//		R_pCPU -> cpu state
+//		R_Addr = ??aaaaaa
+//  	R_Data = 000000dd
+//
+//  Destroyed:
+//		t0,t1
+//
+*/
+
+_SNCPU_Write8:
+		srl		t0,R_Addr,SNCPU_BANK_SHIFT				// t0 = bank 
+
+		/* AURORA_CPU_PAGE0_BRANCHLIKELY_V2_20260920
+		 * Descriptor zero ($0000-$1FFF) is hot for direct-page/stack work.
+		 * BEQL executes the existing pMem load only when zero is taken; when
+		 * nonzero, that delay slot is annulled and the original SLL below runs.
+		 * This removes one host instruction from page-0 accesses only. */
+		beql		t0,zr,_SNCPU_Write8ZeroBank
+        lw      t1,SNCPU_pMem(R_pCpu)
+        sll		t0,t0,4									// t0 = (bank << 4) 
+
+        addu	t0,t0,R_pCpu							// t0 -> Bank[bank]
+
+        lh		t2,SNCPU_uBankCycle(t0)					// t2 = bank cycle count | (bRAM << 8)
+        lw		t1,SNCPU_pMem(t0)						// t1 = bank addr
+
+        bgez	t2,_SNCPU_Write8Trap					// if !RAM goto write trap
+        andi	t2,t2,0xFF								// t2 = nCycles
+        
+        addu	t0,t1,R_Addr							// t0 = bank read addr +  R_Addr
+		subu	R_Cycles, R_Cycles, t2					// consume cycles for memory access
+
+		jr		ra										
+        sb		R_Data, 0(t0)							// load byte unsigned
+        
+
+_SNCPU_Write8ZeroBank:
+        beq     t1,zr,_SNCPU_Write8ZeroBankTrap
+        addu    t0,t1,R_Addr
+        addiu   R_Cycles,R_Cycles,-SNCPU_CYCLE_SLOW
+        jr      ra
+        sb      R_Data,0(t0)
+
+_SNCPU_Write8ZeroBankTrap:
+        /* AURORA_SA1_BANK0_TRAP_FALLBACK_V8_20260903
+         * Descriptor zero is direct WRAM on normal S-CPU, but trapped on
+         * SA-1. Reconstruct the generic write-trap inputs when pMem==NULL. */
+        move    t0,R_pCpu
+        lh      t2,SNCPU_uBankCycle(t0)
+        j       _SNCPU_Write8Trap
+        andi    t2,t2,0xFF
+
+_SNCPU_Write8Trap:
+        lw		t1,SNCPU_WriteTrap(t0)					// t1 -> trap handler
+		subu	R_Cycles, R_Cycles, t2					// consume cycles for memory access
+
+		// save volatile and temporary registers
+		sw		ra,SP_RA1				   
+		sw		R_Data,SP_Data0				   
+        /* AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: trapped write exposes its driven byte. */
+        sb      R_Data,SNCPU_uMDR
+        SNCPU_SAVEREGSTATE()
+
+		// call trap handler
+		move	a0, R_pCpu
+		move	a1, R_Addr
+		jalr	t1
+        andi	a2,R_Data, 0xFF
+
+		// restore volatile and temporary registers
+		lw		ra,SP_RA1
+        SNCPU_LOADREGSTATE()
+
+        /* AURORA_SNES_CPU_TRAP_DELAY_FAST_V1_20260921: restore R_Data in JR's existing delay slot. */
+		jr		ra
+		lw		R_Data,SP_Data0
+
+/*
+//
+// _SNCPU_Write16
+//
+//  Inputs:
+//		R_pCPU -> cpu state
+//		R_Addr = ??aaaaaa
+//  	R_Data = 0000dddd
+//
+//  Destroyed:
+//		t0,t1,t2
+//		R_Data
+//		SP_RA0
+//
+*/
+
+
+_SNCPU_Write16_Slow:
+		sw		ra, SP_RA0
+
+		jal		_SNCPU_Write8		// write addr + 0 (00XX)
+        addiu	R_Addr,R_Addr,0
+        
+        srl		R_Data,R_Data,8
+		jal		_SNCPU_Write8		// write addr + 1 (XX00)
+        addiu	R_Addr,R_Addr,1
+
+		lw		ra, SP_RA0
+        addiu	R_Addr,R_Addr,-1
+        
+        jr		ra					// return
+        nop
+
+_SNCPU_Write16:
+
+_SNCPU_Write16_Fast:
+        addiu	t1,R_Addr,1								// t1 = addr + 1
+		srl		t2,R_Addr,SNCPU_BANK_SHIFT				// t2 = bank 
+_SNCPU_Write16_AfterAddrBank: /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 */
+
+        srl		t1,t1,SNCPU_BANK_SHIFT					// t1 = second bank
+        sll		t0,t2,4									// t0 = (bank << 4) & bank mask
+
+		bne		t1,t2,_SNCPU_Write16_Slow				// reads from different banks? go to slow version
+        addu	t0,t0,R_pCpu							// t0 -> Bank[bank]
+
+        lh		t2,SNCPU_uBankCycle(t0)					// t2 = bank cycle count | (bRAM << 8)
+        lw		t1,SNCPU_pMem(t0)						// t1 = bank addr
+
+        bgez	t2,_SNCPU_Write16Trap					// if !RAM goto write trap
+        andi	t2,t2,0xFF								// t2 = nCycles
+        
+        addu	t0,t1,R_Addr							// t0 = bank read addr +  R_Addr
+        srl		t1,R_Data,8								// t1 = high byte
+		subu	R_Cycles, R_Cycles, t2					// consume cycles for memory access
+
+        sb		R_Data, 0(t0)							// store low byte 
+		subu	R_Cycles, R_Cycles, t2					// consume cycles for memory access
+
+        move    R_Data,t1        // AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: final bus byte
+		jr		ra										
+        sb		t1, 1(t0)								// store high byte 
+
+
+_SNCPU_Write16Trap:
+        lw		t1,SNCPU_WriteTrap(t0)					// t1 -> trap handler
+		subu	R_Cycles, R_Cycles, t2					// consume cycles for memory access
+		subu	R_Cycles, R_Cycles, t2					// consume cycles for memory access
+
+		// save volatile and temporary registers
+		sw		ra,SP_RA1				   
+		sw		R_Data,SP_Data0				   
+        /* AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: low byte drives first trapped write. */
+        sb      R_Data,SNCPU_uMDR
+        SNCPU_SAVEREGSTATE()
+
+        sw		t1, SP_SaveTrap
+
+		// call trap handler
+		move	a0, R_pCpu
+		addiu	a1, R_Addr, 0
+		jalr	t1
+        andi	a2,R_Data, 0xFF
+
+		lw		R_Data,SP_Data0				   
+        lw		t1, SP_SaveTrap
+
+
+		// call trap handler
+		move	a0, R_pCpu
+		addiu	a1, R_Addr, 1
+        srl		a2,R_Data,8
+        andi	a2,a2, 0xFF
+        sb      a2,SNCPU_uMDR    // AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: high byte
+        jalr	t1
+        nop
+
+		// restore volatile and temporary registers
+		lw		ra,SP_RA1				   
+		lw		R_Data,SP_Data0				   
+        SNCPU_LOADREGSTATE()
+
+		jr		ra
+        srl     R_Data,R_Data,8    // AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: final MDR
+
+
+
+/* Store a word without allowing the high byte to carry into the next bank.
+   This is the 65816 rule for 16-bit direct, stack-relative, and indirect
+   bank-zero accesses at $FFFF. */
+_SNCPU_Write16Wrap16:
+        /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916: prepare normal Write16 setup while testing FFFF. */
+		addiu	t1,R_Addr,1
+		andi	t0,t1,0xFFFF
+		bne		t0,zr,_SNCPU_Write16_AfterAddrBank
+		srl		t2,R_Addr,SNCPU_BANK_SHIFT
+
+		sw		ra,SP_RA0
+		sw		R_Data,SP_Data0
+		jal		_SNCPU_Write8
+		nop
+
+		lui		t0,0x00FF
+		and		R_Addr,R_Addr,t0
+		lw		R_Data,SP_Data0
+		jal		_SNCPU_Write8
+		srl		R_Data,R_Data,8
+
+		lw		ra,SP_RA0
+		jr		ra
+		nop
+
+
+        
+
+
+
+/*
+//
+// _SNCPU_Read8
+//
+//  Inputs:
+//		R_pCPU -> cpu state
+//		R_Addr = ??aaaaaa
+//
+//	Outputs:
+//  	R_Data = 000000dd
+//
+//  Destroyed:
+//		t0-t2
+//
+*/
+
+_SNCPU_Read8:
+		srl		t0,R_Addr,SNCPU_BANK_SHIFT				// t0 = bank 
+        
+        /* AURORA_CPU_PAGE0_BRANCHLIKELY_V2_20260920: same taken-only page-0 delay-slot reuse as Write8. */
+        beql		t0,zr,_SNCPU_Read8ZeroBank
+        lw      t1,SNCPU_pMem(R_pCpu)
+        sll		t0,t0,4									// t0 = (bank << 4) & bank mask
+
+        addu	t0,t0,R_pCpu							// t0 -> Bank[bank]
+
+        lw		t1,SNCPU_pMem(t0)						// t1 = bank addr
+        lbu		t2,SNCPU_uBankCycle(t0)					// t2 = bank cycle count
+
+        beq		t1,zr,_SNCPU_Read8Trap					// if bankaddr==0 goto trap
+		subu	R_Cycles, R_Cycles, t2					// consume cycles for memory access
+
+        addu	t0,t1,R_Addr							// t0 = bank read addr +  R_Addr
+
+		jr		ra										
+        lbu		R_Data, 0(t0)							// load byte unsigned
+
+
+_SNCPU_Read8ZeroBank:
+        beq     t1,zr,_SNCPU_Read8ZeroBankTrap
+        addu    t0,t1,R_Addr
+        addiu   R_Cycles,R_Cycles,-SNCPU_CYCLE_SLOW
+        jr      ra
+        lbu     R_Data,0(t0)
+
+_SNCPU_Read8ZeroBankTrap:
+        /* AURORA_SA1_BANK0_TRAP_FALLBACK_V8_20260903 */
+        move    t0,R_pCpu
+        lbu     t2,SNCPU_uBankCycle(t0)
+        j       _SNCPU_Read8Trap
+        subu    R_Cycles,R_Cycles,t2
+
+_SNCPU_Read8Trap:
+        lw		t1,SNCPU_ReadTrap(t0)					// t1 -> trap handler
+
+		// save volatile and temporary registers
+		sw		ra,SP_RA1				   
+        /* AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: trap sees the previous bus byte. */
+        sb      R_Data,SNCPU_uMDR
+        SNCPU_SAVEREGSTATE()
+        
+		// call trap handler
+		move	a0, R_pCpu
+		jalr	t1
+		move	a1, R_Addr
+
+        andi	R_Data, v0, 0xFF
+
+		lw		ra,SP_RA1				   
+        SNCPU_LOADREGSTATE()
+
+        /* AURORA_SNES_CPU_TRAP_DELAY_FAST_V1_20260921: final MDR publication in JR's delay slot. */
+		jr		ra
+        sb      R_Data,SNCPU_uMDR    // AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: trap result
+
+
+
+/*
+//
+// _SNCPU_Read16
+//
+//  Inputs:
+//		R_pCPU -> cpu state
+//		R_Addr = ??aaaaaa
+//
+//	Outputs:
+//  	R_Data = 0000dddd
+//
+//  Destroyed:
+//		t0-t2
+//		SP_RA0
+//
+*/
+
+_SNCPU_Read16_Slow:
+		sw		ra, SP_RA0
+
+		jal		_SNCPU_Read8		// read addr + 0(00XX)
+        addiu	R_Addr,R_Addr,0
+        sb		R_Data,SP_Data0
+        
+
+		jal		_SNCPU_Read8		// read addr + 1  (XX00)
+        addiu	R_Addr,R_Addr,1
+        sb		R_Data,SP_Data1
+        
+		lw		ra, SP_RA0
+        lhu		R_Data,SP_Data0
+        
+        jr		ra					// return
+        addiu	R_Addr,R_Addr,-1
+
+
+
+_SNCPU_Read16:
+_SNCPU_Read16_Fast:
+        addiu	t1,R_Addr,1								// t1 = addr + 1
+		srl		t2,R_Addr,SNCPU_BANK_SHIFT				// t2 = bank 
+_SNCPU_Read16_AfterAddrBank: /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 */
+
+        srl		t1,t1,SNCPU_BANK_SHIFT					// t1 = second bank
+        sll		t0,t2,4									// t0 = (bank << 4) & bank mask
+
+		bne		t1,t2,_SNCPU_Read16_Slow				// reads from different banks? go to slow version
+        addu	t0,t0,R_pCpu							// t0 -> Bank[bank]
+
+        lw		t1,SNCPU_pMem(t0)						// t1 = bank addr
+        lbu		t2,SNCPU_uBankCycle(t0)					// t2 = bank cycle count
+
+        beq		t1,zr,_SNCPU_Read16Trap					// if bankaddr==0 goto trap
+		subu	R_Cycles, R_Cycles, t2					// consume cycles for first memory access
+
+        addu	t0,t1,R_Addr							// t0 = bank read addr +  R_Addr
+		subu	R_Cycles, R_Cycles, t2					// consume cycles for second memory access
+
+        lwr		R_Data, 0(t0)							// load word
+        lwl		R_Data, 3(t0)							
+
+		jr		ra	
+        andi	R_Data,R_Data,0xFFFF
+        
+        
+_SNCPU_Read16Trap:
+        lw		t1,SNCPU_ReadTrap(t0)					// t1 -> trap handler
+		subu	R_Cycles, R_Cycles, t2					// consume cycles for second memory access
+
+		// save volatile and temporary registers
+		sw		ra,SP_RA1				   
+        /* AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: first byte sees preceding MDR. */
+        sb      R_Data,SNCPU_uMDR
+        SNCPU_SAVEREGSTATE()
+
+        sw		t1, SP_SaveTrap
+        
+		// read lower byte
+		move	a0, R_pCpu
+		jalr	t1
+		addiu	a1, R_Addr,0
+        sb		v0,SP_Data0
+        sb      v0,SNCPU_uMDR    // AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: byte 0
+
+        lw		t1, SP_SaveTrap
+        
+		// read upper byte
+		move	a0, R_pCpu
+		jalr	t1
+		addiu	a1, R_Addr,1
+        sb		v0,SP_Data1
+        sb      v0,SNCPU_uMDR    // AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: byte 1
+
+		lw		ra,SP_RA1				   
+        SNCPU_LOADREGSTATE()
+
+        /* AURORA_SNES_CPU_TRAP_DELAY_FAST_V1_20260921: load return word in JR's existing delay slot. */
+		jr		ra
+        lhu		R_Data,SP_Data0
+
+
+
+
+/*
+//
+// _SNCPU_Read24
+//
+//  Inputs:
+//		R_pCPU -> cpu state
+//		R_Addr = ??aaaaaa
+//
+//	Outputs:
+//  	R_Data = 00dddddd
+//
+//  Destroyed:
+//		t0-t2
+//		SP_RA0
+//
+*/
+
+_SNCPU_Read24:
+		sw		ra, SP_RA0
+_SNCPU_Read24_AfterSaveRA: /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 */
+        sw		zr,SP_Data0
+
+		jal		_SNCPU_Read8		// read addr + 0  (0000XX)
+        addiu	R_Addr,R_Addr,0
+        sb		R_Data,SP_Data0
+
+		jal		_SNCPU_Read8		// read addr + 1  (00XX00)
+        addiu	R_Addr,R_Addr,1
+        sb		R_Data,SP_Data1
+
+		jal		_SNCPU_Read8		// read addr + 2  (XX0000)
+        addiu	R_Addr,R_Addr,1
+        sb		R_Data,SP_Data2
+        
+		lw		ra, SP_RA0
+        lw		R_Data,SP_Data0
+        
+		jr		ra					// return
+        addiu	R_Addr,R_Addr,-2	
+
+
+/* Word and long pointer/data reads wrap the low 16 address bits while
+   preserving the bank.  The normal path still uses the original fast reader;
+   only the one or two boundary addresses take the byte-wise path. */
+_SNCPU_Read16Wrap16:
+        /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916: (addr+1).low16 != 0 iff not the FFFF wrap case. */
+		addiu	t1,R_Addr,1
+		andi	t0,t1,0xFFFF
+		bne		t0,zr,_SNCPU_Read16_AfterAddrBank
+		srl		t2,R_Addr,SNCPU_BANK_SHIFT
+
+		sw		ra,SP_RA0
+		jal		_SNCPU_Read8
+		nop
+		sb		R_Data,SP_Data0
+
+		lui		t0,0x00FF
+		and		R_Addr,R_Addr,t0
+		jal		_SNCPU_Read8
+		nop
+		sb		R_Data,SP_Data1
+
+		lw		ra,SP_RA0
+		jr		ra
+		lhu		R_Data,SP_Data0
+
+
+/* Direct-page indirect pointers additionally wrap inside D's page in
+   emulation mode when DL is zero.  R_DPMASK contains both that page base and
+   the regular $FFFF bank-wrap mask. */
+_SNCPU_Read16DP:
+		addiu	t0,R_Addr,1
+		andi	t1,R_DPMASK,0xFFFF
+		and		t0,t0,t1
+		srl		t1,R_DPMASK,16
+		andi	t1,t1,0xFF00
+		or		t0,t0,t1
+		addiu	t1,R_Addr,1
+		beq		t0,t1,_SNCPU_Read16_AfterAddrBank
+		srl		t2,R_Addr,SNCPU_BANK_SHIFT /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 */
+
+		sw		ra,SP_RA0
+		sw		t0,SP_SaveTrap
+		jal		_SNCPU_Read8
+		nop
+		sb		R_Data,SP_Data0
+
+		lw		R_Addr,SP_SaveTrap
+		jal		_SNCPU_Read8
+		nop
+		sb		R_Data,SP_Data1
+
+		lw		ra,SP_RA0
+		jr		ra
+		lhu		R_Data,SP_Data0
+
+
+_SNCPU_Read24Wrap16:
+		andi	t0,R_Addr,0xFFFF
+		li		t1,0xFFFE
+		sltu	t0,t0,t1
+		bne		t0,zr,_SNCPU_Read24_AfterSaveRA
+		sw		ra,SP_RA0 /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 */
+
+		sw		R_Addr,SP_SaveTrap
+		sw		zr,SP_Data0
+		jal		_SNCPU_Read8
+		nop
+		sb		R_Data,SP_Data0
+
+		lw		t0,SP_SaveTrap
+		lui		t1,0x00FF
+		and		t1,t0,t1
+		addiu	t0,t0,1
+		andi	t0,t0,0xFFFF
+		or		R_Addr,t0,t1
+		jal		_SNCPU_Read8
+		nop
+		sb		R_Data,SP_Data1
+
+		lw		t0,SP_SaveTrap
+		lui		t1,0x00FF
+		and		t1,t0,t1
+		addiu	t0,t0,2
+		andi	t0,t0,0xFFFF
+		or		R_Addr,t0,t1
+		jal		_SNCPU_Read8
+		nop
+		sb		R_Data,SP_Data2
+
+		lw		ra,SP_RA0
+		jr		ra
+		lw		R_Data,SP_Data0
+
+
+
+
+
+
+/*
+//
+// _SNCPU_Fetch8
+//
+//  Inputs:
+//		R_pCPU -> cpu state
+//		R_PC   = 24-bit PC
+//
+//	Outputs:
+//  	R_Data = 000000dd
+//
+//  Destroyed:
+//		t0-t2
+//		R_Addr
+//
+*/
+
+_SNCPU_Fetch8:
+_SNCPU_Fetch8Fast:
+		bltz	R_PCCount,_SNCPU_Fetch8Update
+		addiu	R_PCCount,R_PCCount,-1
+
+		lbu		R_Data,0(R_PC)
+        addiu	R_PC,R_PC,1
+
+		jr		ra
+        subu	R_Cycles,R_Cycles,R_PCCycles
+
+
+_SNCPU_Fetch8Update:
+		lwu		t0,SP_PCBank			// restore PC to normal
+
+        subu	R_PC, R_PC, t0
+
+        sh		R_PC,SNCPU_rPC	  		// dont allow PB to change. It may only change by a SETPC24
+        lwu		R_PC,SNCPU_rPC	   
+
+		srl		t0,R_PC,SNCPU_BANK_SHIFT					// t0 = pc bank 
+        sll		t0,t0,4										// t0 = (bank << 4) & bank mask
+        addu	t0,t0,R_pCpu								// t0 -> Bank[bank]
+
+        lw		t1,SNCPU_pMem(t0)							// t1 = bank read addr
+        lbu		R_PCCycles,SNCPU_uBankCycle(t0)				// R_PCCycles = bank cycle count
+
+        beq		t1,zr,_SNCPU_Fetch8Trap   					// if bankaddr==0 goto trap
+        sw		t1,SP_PCBank								// save pcbank
+
+        andi	R_PCCount, R_PC, SNCPU_BANK_MASK		// R_PCCount = PC & 0x1FFF ^ 0x1FFF
+        xori	R_PCCount, R_PCCount, SNCPU_BANK_MASK 
+
+		j		_SNCPU_Fetch8Fast        					// refetch byte
+        addu	R_PC,t1,R_PC  								// R_PC -> bank read addr +  R_PC
+
+_SNCPU_Fetch8Trap:
+		lui		R_PCCount,0xC000							// invalidate PCCount 
+        move	R_Addr, R_PC								// perform trap at PC address
+		j		_SNCPU_Read8
+        addiu	R_PC,R_PC,1
+
+
+
+_SNCPU_Fetch8Slow:
+		move	R_Addr, R_PC
+
+		j		_SNCPU_Read8
+        addiu	R_PC,R_PC,1		// increment pc
+
+
+
+
+/*
+//
+// _SNCPU_Fetch16
+//
+//  Inputs:
+//		R_pCPU -> cpu state
+//		R_PC   = 24-bit PC
+//
+//	Outputs:
+//  	R_Data = 0000dddd
+//
+//  Destroyed:
+//		t0-t2
+//		R_Addr
+//		SP_RA0
+//
+//
+*/
+
+
+
+_SNCPU_Fetch16:
+
+_SNCPU_Fetch16Fast:
+		blez	R_PCCount,_SNCPU_Fetch16Trap
+		addiu	R_PCCount,R_PCCount,-2
+
+        subu	R_Cycles,R_Cycles,R_PCCycles
+
+        lwr		R_Data, 0(R_PC)							// load word
+        lwl		R_Data, 3(R_PC)							
+
+        addiu	R_PC,R_PC,2
+        subu	R_Cycles,R_Cycles,R_PCCycles
+
+
+		jr		ra
+        andi	R_Data,R_Data,0xFFFF
+
+
+_SNCPU_Fetch16Trap:
+		sw		ra, SP_RA0
+        
+        jal		_SNCPU_Fetch8
+		addiu	R_PCCount,R_PCCount,2
+
+        jal		_SNCPU_Fetch8
+        sb		R_Data,SP_Data0
+
+        lw		ra, SP_RA0
+        sb		R_Data,SP_Data1
+        
+        jr		ra
+        lhu		R_Data,SP_Data0
+
+
+
+_SNCPU_Fetch16Slow:
+		move	R_Addr, R_PC
+
+		j		_SNCPU_Read16
+        addiu	R_PC,R_PC,2		// increment pc
+
+
+
+/*
+//
+// _SNCPU_Fetch24
+//
+//  Inputs:
+//		R_pCPU -> cpu state
+//		R_PC   = 24-bit PC
+//
+//	Outputs:
+//  	R_Data = 00dddddd
+//
+//  Destroyed:
+//		t0-t2
+//		R_Addr
+//		SP_RA0
+//
+//
+*/
+
+
+_SNCPU_Fetch24:
+_SNCPU_Fetch24Fast:
+		addiu	R_PCCount,R_PCCount,-1
+
+		blez	R_PCCount,_SNCPU_Fetch24Trap
+		addiu	R_PCCount,R_PCCount,-2
+
+        subu	R_Cycles,R_Cycles,R_PCCycles
+
+        lwr		R_Data, 0(R_PC)							// load word
+        lwl		R_Data, 3(R_PC)							
+
+        addiu	R_PC,R_PC,3
+        subu	R_Cycles,R_Cycles,R_PCCycles
+        sll		R_Data,R_Data,8
+        subu	R_Cycles,R_Cycles,R_PCCycles
+
+		jr		ra
+        srl		R_Data,R_Data,8
+
+_SNCPU_Fetch24Trap:
+		sw		ra, SP_RA0
+        sw		zr, SP_Data0
+        
+        jal		_SNCPU_Fetch8
+		addiu	R_PCCount,R_PCCount,3
+
+        jal		_SNCPU_Fetch8
+        sb		R_Data,SP_Data0
+
+        jal		_SNCPU_Fetch8
+        sb		R_Data,SP_Data1
+
+        lw		ra, SP_RA0
+        sb		R_Data,SP_Data2
+        
+        jr		ra
+        lw		R_Data,SP_Data0
+
+
+
+_SNCPU_Fetch24Slow:
+		move	R_Addr, R_PC
+
+		j		_SNCPU_Read24
+        addiu	R_PC,R_PC,3		// increment pc
+        
+
+/*
+//
+// _SNCPU_ComposeFlags
+//
+//  Inputs:
+//		R_pCPU -> cpu state
+//		R_P 	= processor flags
+//  	R_fN = N???????
+//  	R_fZ = ZZZZZZZZ
+//  	R_fC = 0000000C
+//	
+//
+//	Outputs:
+//		R_P = flags | N | Z | C	
+//
+//  Destroyed:
+//
+//
+*/
+
+_SNCPU_ComposeFlags:
+		andi	R_P, R_P, (SNCPU_FLAG_C | SNCPU_FLAG_Z |SNCPU_FLAG_N) ^ 0xFFFF
+        andi	R_fC, R_fC,1
+
+        srl		t0,R_fN,8
+        or		R_P, R_P, R_fC
+
+        andi	t0,t0,0x80
+        andi	R_fZ,R_fZ,0xFFFF
+
+        or		R_P,R_P,t0
+
+        or		t1,R_P,SNCPU_FLAG_Z
+
+		jr		ra
+        movz	R_P,t1,R_fZ
+        
+
+
+/*
+//
+// _SNCPU_DecomposeFlags
+//
+//  Inputs:
+//		R_pCPU -> cpu state
+//		R_P 	= processor flags (NZC)
+//
+//	Outputs:
+//  	R_fN = N???????
+//  	R_fZ = ZZZZZZZZ
+//  	R_fC = 0000000C
+//
+//  Destroyed:
+//		t0-t2
+//
+*/
+
+_SNCPU_DecomposeFlags:
+		andi	R_fZ, R_P, SNCPU_FLAG_Z
+		andi	R_fC, R_P, SNCPU_FLAG_C
+		sll		R_fN, R_P, 8
+        xori	R_fZ, R_fZ, SNCPU_FLAG_Z
+        
+        andi	t0,R_P, SNCPU_FLAG_X
+        andi	t1,R_X, 0xFF
+        andi	t2,R_Y, 0xFF
+        movn	R_X,t1,t0
+		j		_SNCPU_UpdateOpTable
+        movn	R_Y,t2,t0
+
+
+
+
+
+
+
+/*
+//
+// _SNCPU_UpdateOpTable
+//
+//  Inputs:
+//		R_pCPU -> cpu state
+//		R_P 		= processor flags
+//		SNCPU_rE 	= E-bit
+//
+//	Outputs:		   
+//		R_pOpTable	-> opcode table
+//
+//	if e=0
+//		R_DPMASK caches the direct-page mask/base/timing state
+//
+//	if e=1
+//		R_DP is preserved (XCE never clears D on a real 65C816)
+//		R_S		    = 0x01??
+//		R_P		   |= SNCPU_FLAG_M | SNCPU_FLAG_X 
+//
+//  Destroyed:
+//		t0-t2
+//
+*/
+
+_SNCPU_UpdateOpTable:
+		lbu		t0, SNCPU_rE				// t0 = E bit
+		andi	t1, R_P, 0x30				// t1 = M and X bits
+        
+        bne		t0,zr, _E1
+        nop
+
+// E=0
+_E0:
+		la		R_pOpTable, _SNCPU_OpTable	// get pointer to optable base
+		sll		t1,t1, 4 + 2				// t1 = opcode table offset
+
+		j		_SNCPU_UpdateDPMask
+        addu	R_pOpTable,R_pOpTable,t1
+
+
+// E=1
+_E1:
+		la		R_pOpTable, _SNCPU_OpTable	// get pointer to optable base
+        addiu	R_pOpTable,R_pOpTable, 0x400*4	// point to E=1 instructions
+        ori		R_P,R_P, SNCPU_FLAG_M | SNCPU_FLAG_X 
+        andi	R_X,R_X,0x00FF
+        andi	R_Y,R_Y,0x00FF
+        andi	R_S,R_S,0x00FF
+		j		_SNCPU_UpdateDPMask
+        ori		R_S,R_S,0x0100
+
+
+// Refresh cached direct-page wrapping and timing state after E or D changes.
+_SNCPU_UpdateDPMask:
+		andi	t0,R_DP,0x00FF
+		beq		t0,zr,_SNCPU_DPLowZero
+		li		R_DPMASK,0x0000FFFF
+
+		// DL != 0: full 16-bit arithmetic plus one 6-master-clock cycle.
+		lui		R_DPMASK,0x0006
+		jr		ra
+		ori		R_DPMASK,R_DPMASK,0xFFFF
+
+_SNCPU_DPLowZero:
+		lbu		t0,SNCPU_rE
+		beq		t0,zr,_SNCPU_DPMaskDone
+		andi	t0,R_DP,0xFF00
+
+		// E=1 and DL=0: wrap indexed operands inside D's selected page.
+		sll		t0,t0,16
+		ori		R_DPMASK,t0,0x00FF
+
+_SNCPU_DPMaskDone:
+		jr		ra
+		nop
+
+
+
+//
+// adc sbc functions
+//
+//  R_t2 = R_t2 + R_t1
+//
+
+_SNCPU_ADC8:
+		move	t0,R_t2						     // t0 = target
+        addu	R_t2,R_t2,R_t1					 // dest = target + src
+        addu	R_t2,R_t2,R_fC					 // dest+= carry
+        xor		t1,t0,R_t1						 // t1= target ^ src
+        xor		t2,t0,R_t2						 // t2= target ^ dest
+        nor		t1,t1,zr						 // t1= ~(target ^ src)
+        and		t1,t1,t2						 // t1 = (dest ^ target) &	~(target ^ src)
+        srl		t1,t1,1							 // shift into bit position
+        andi	t1,t1,SNCPU_FLAG_V	  			
+        or		R_P,R_P,t1
+
+		andi	t1,R_P,SNCPU_FLAG_D
+        bnel		t1,zr,_SNCPU_ADC8_DECIMAL
+		nop
+
+		jr		ra
+		nop
+
+
+_SNCPU_ADC16:
+		move	t0,R_t2						
+        addu	R_t2,R_t2,R_t1				
+        addu	R_t2,R_t2,R_fC					 // dest+= carry
+        xor		t1,t0,R_t1						
+        xor		t2,t0,R_t2						
+        nor		t1,t1,zr						
+        and		t1,t1,t2						
+        srl		t1,t1,9							
+        andi	t1,t1,SNCPU_FLAG_V	  			
+        or		R_P,R_P,t1
+
+		andi	t1,R_P,SNCPU_FLAG_D
+        bnel		t1,zr,_SNCPU_ADC16_DECIMAL
+		nop
+
+		jr		ra
+		nop
+
+
+
+_SNCPU_SBC8:
+		move	t0,R_t2						
+        addu	R_t2,R_t2,R_t1				
+        addu	R_t2,R_t2,R_fC					 // dest+= carry
+        xor		t1,t0,R_t1						
+        xor		t2,t0,R_t2						
+        nor		t1,t1,zr						
+        and		t1,t1,t2						
+        srl		t1,t1,1							
+        andi	t1,t1,SNCPU_FLAG_V	  			
+        or		R_P,R_P,t1
+
+		andi	t1,R_P,SNCPU_FLAG_D
+        bnel		t1,zr,_SNCPU_SBC8_DECIMAL
+		nop
+
+		jr		ra
+		nop
+
+_SNCPU_SBC16:
+		move	t0,R_t2						
+        addu	R_t2,R_t2,R_t1				
+        addu	R_t2,R_t2,R_fC					 // dest+= carry
+        xor		t1,t0,R_t1						
+        xor		t2,t0,R_t2						
+        nor		t1,t1,zr						
+        and		t1,t1,t2						
+        srl		t1,t1,9							
+        andi	t1,t1,SNCPU_FLAG_V	  			
+        or		R_P,R_P,t1
+
+		andi	t1,R_P,SNCPU_FLAG_D
+        bnel		t1,zr,_SNCPU_SBC16_DECIMAL
+		nop
+
+		jr		ra
+		nop
+
+
+#define _SNCPU_DECIMAL_CALL(_helper) \
+		sw		ra,SP_RA0			;\
+        sb      R_Data,SNCPU_uMDR              ;\
+		SNCPU_SAVEREGSTATE()		;\
+		andi	a0,R_fC,1			;\
+		move	a1,t0				;\
+		jal		_helper				;\
+		move	a2,R_t1			;\
+		move	R_t2,v0			;\
+		SNCPU_LOADREGSTATE()		;\
+        lbu     R_Data,SNCPU_uMDR              ;\
+		lw		ra,SP_RA0
+
+/* Keep the C and PS2 interpreters on one decimal implementation.  Besides
+   removing two subtly different algorithms, this preserves the real 65816
+   behavior for invalid BCD digits, which several games and test ROMs probe. */
+_SNCPU_ADC8_DECIMAL:
+		_SNCPU_DECIMAL_CALL(_SNCpuDecimalADC8)
+		andi	R_P,R_P,SNCPU_FLAG_V ^ 0xFFFF
+		andi	t0,R_t2,0x0200
+		srl		t0,t0,3
+		jr		ra
+		or		R_P,R_P,t0
+
+_SNCPU_ADC16_DECIMAL:
+		_SNCPU_DECIMAL_CALL(_SNCpuDecimalADC16)
+		andi	R_P,R_P,SNCPU_FLAG_V ^ 0xFFFF
+		li		t0,0x00020000
+		and		t0,R_t2,t0
+		srl		t0,t0,11
+		jr		ra
+		or		R_P,R_P,t0
+
+_SNCPU_SBC8_DECIMAL:
+		_SNCPU_DECIMAL_CALL(_SNCpuDecimalSBC8)
+		jr		ra
+		nop
+
+_SNCPU_SBC16_DECIMAL:
+		_SNCPU_DECIMAL_CALL(_SNCpuDecimalSBC16)
+		jr		ra
+		nop
+
+
+
+
+/*
+//
+//	 _SNCPUExecute_ASM
+//
+//	 Inputs:
+//
+//	    a0 -> cpu state
+//
+//	 Outputs:
+//
+//	    none
+//
+//   Destroyed:
+//
+//
+//
+*/
+
+
+SNCPUExecute_ASM:
+		addiu	sp,sp,-0x80
+#if AURORA_RUNTIME_TRACE
+        /* AURORA_RUNTIME_DEBUGGER_MENU_V5_20260919
+         * Menu state cannot change while this synchronous CPU slice runs.
+         * Snapshot the volatile global once; trace records remain identical
+         * when enabled, while Off avoids a global-symbol load per opcode. */
+        la      t0,g_AuroraTraceEnabled
+        lw      t0,0(t0)
+        sw      t0,SP_TraceEnabled
+#endif
+        sd		s0,0x00(sp)
+        sd		s1,0x08(sp)
+        sd		s2,0x10(sp)
+        sd		s3,0x18(sp)
+        sd		s4,0x20(sp)
+        sd		s5,0x28(sp)
+        sd		s6,0x30(sp)
+        sd		s7,0x38(sp)
+        sd		ra,0x40(sp)
+        sd		fp,0x48(sp)
+
+		move	R_pCpu, a0
+        /* AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: R_Data is the live MDR cache for the ASM slice. */
+        lbu     R_Data,SNCPU_uMDR
+
+
+//
+//
+//
+
+		SNCPU_LOADREGSTATE();
+
+        
+        jal		_SNCPU_DecomposeFlags		// decompose flags
+        nop
+        
+        // setup PC
+		lwu		R_PC, SNCPU_rPC
+		sw		zr,SP_PCBank
+        move	R_PCCycles,zr
+		lui		R_PCCount,0xC000							// invalidate PCCount 
+  
+
+//
+// interpreter loop
+//
+
+
+
+	// fetch opcode
+_SNCPUExecute_Loop:
+        /* AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: test slice budget before the opcode bus read. */
+blez	R_Cycles, _SNCPUExecute_Done
+        addiu	R_PC,R_PC,1
+
+bltz	R_PCCount,_SNCPU_ExecuteFetchUpdate
+		addiu	R_PCCount,R_PCCount,-1
+
+lbu		R_Data,-1(R_PC)
+        /* AURORA_SNES_BINARY_TRACE_V6_20260918_FAST */
+        AURORA_TRACE_SCPU_INSN()
+
+        addu	t0, t0, R_pOpTable  					// t0 = OpTable + opcode * 4
+
+        lw		t0, 0x00(t0)							// t0 -> opcode function
+        subu	R_Cycles,R_Cycles,R_PCCycles
+        
+        jr		t0
+        nop
+
+
+_SNCPU_ExecuteFetchUpdate:
+        /* AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: budget already checked in _SNCPUExecute_Loop. */
+
+
+		jal		_SNCPU_Fetch8Update				// reads data, pc+=1
+        addiu	R_PC,R_PC,-1
+        /* AURORA_SNES_BINARY_TRACE_V6_20260918_REMAP */
+        AURORA_TRACE_SCPU_INSN()
+        addu	t0, t0, R_pOpTable  					// t0 = OpTable + opcode * 4
+        lw		t0, 0x00(t0)							// t0 -> opcode function
+        jr		t0
+        nop
+        
+
+		
+  /*
+
+_SNCPUExecute_Loop:
+		blez	R_Cycles, _SNCPUExecute_Done
+        nop
+        
+		jal		_SNCPU_Fetch8
+        nop		
+
+		sll		t0, R_Data, 2							// R_Data = opcode * 4
+
+        addu	t0, t0, R_pOpTable  					// t0 = OpTable + opcode * 4
+
+        lw		t0, 0x00(t0)							// t0 -> opcode function
+        
+        jr		t0
+        nop
+*/        		 
+
+
+
+_SNCPUExecute_Abort:
+
+
+
+//
+//
+//
+
+
+_SNCPUExecute_Done:
+        addiu	R_PC,R_PC,-1
+
+_SNCPUExecute_DoneNoRewind:
+		lw		t0,SP_PCBank
+        subu	R_PC, R_PC, t0
+		sh		R_PC, SNCPU_rPC     // remember, the PB is never updated! only the lower 16-bits of the PC are significant in the register
+
+        jal		_SNCPU_ComposeFlags		// decompose flags
+        nop
+	  
+        /* AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: publish live MDR at the slice boundary. */
+        sb      R_Data,SNCPU_uMDR
+		SNCPU_SAVEREGSTATE();
+
+
+//
+// cleanup stack frame
+//
+
+        ld		fp,0x48(sp)
+        ld		ra,0x40(sp)
+        ld		s7,0x38(sp)
+        ld		s6,0x30(sp)
+        ld		s5,0x28(sp)
+        ld		s4,0x20(sp)
+        ld		s3,0x18(sp)
+        ld		s2,0x10(sp)
+        ld		s1,0x08(sp)
+        ld		s0,0x00(sp)
+		jr		ra
+		addiu	sp,sp,0x80
+
+
+
+
+
+		// addr_imm8_SEP_
+	SNCPU_OP_E0(e2);
+		SNCPU_FETCH8(R_t0);
+        SNCPU_OR(R_P,R_t0);
+
+		la		R_pOpTable, _SNCPU_OpTable	// get pointer to optable base
+
+        // set C flag
+        andi 	t0,R_t0,SNCPU_FLAG_C
+        or		R_fC, R_fC, t0
+
+		// set N flag
+        sll 	t1,R_t0,8
+        or		R_fN, R_fN, t1
+
+		// set Z flag
+        andi 	t2,R_t0,SNCPU_FLAG_Z
+        movn	R_fZ, zr, t2
+
+        andi	t0,R_P, SNCPU_FLAG_X
+        andi	t1,R_X, 0xFF
+        andi	t2,R_Y, 0xFF
+        movn	R_X,t1,t0
+        movn	R_Y,t2,t0
+
+		andi	t1, R_P, 0x30				// t1 = M and X bits
+
+		sll		t1,t1, 4 + 2				// t1 = opcode table offset
+
+        addu	R_pOpTable,R_pOpTable,t1
+
+
+	SNCPU_ENDOP(1)
+
+        
+		// addr_imm8_REP_
+	SNCPU_OP_E0(c2);
+		SNCPU_FETCH8(R_t0);
+        SNCPU_NOT8(R_t0);       // R_t0 = ~rep bits
+        SNCPU_AND(R_P,R_t0);
+
+		la		R_pOpTable, _SNCPU_OpTable	// get pointer to optable base
+        
+        // clear C flag
+        and		R_fC, R_fC, R_t0
+
+		// clear N flag
+        sll 	t1,R_t0,8
+        and		R_fN, R_fN, t1
+
+		// clear Z flag
+        andi 	t2,R_t0,SNCPU_FLAG_Z
+        movz	R_fZ, R_pOpTable, t2
+
+		andi	t1, R_P, 0x30				// t1 = M and X bits
+
+		sll		t1,t1, 4 + 2				// t1 = opcode table offset
+
+        addu	R_pOpTable,R_pOpTable,t1
+		SNCPU_CHECKIRQ(1)
+
+	SNCPU_ENDOP(1)
+
+
+
+		// addr_imm8_SEP_
+	SNCPU_OP_E1(e2);
+		SNCPU_FETCH8(R_t0);
+
+        // set bits of P
+        SNCPU_OR(R_P,R_t0);
+
+        // set C flag
+        andi 	t0,R_t0,SNCPU_FLAG_C
+        or		R_fC, R_fC, t0
+
+		// set N flag
+        sll 	t1,R_t0,8
+        or		R_fN, R_fN, t1
+
+		// set Z flag
+        andi 	t2,R_t0,SNCPU_FLAG_Z
+        movn	R_fZ, zr, t2
+
+        andi	t0,R_P, SNCPU_FLAG_X
+        andi	t1,R_X, 0xFF
+        andi	t2,R_Y, 0xFF
+        movn	R_X,t1,t0
+        movn	R_Y,t2,t0
+
+		jal		_SNCPU_UpdateOpTable		
+        nop
+
+
+	SNCPU_ENDOP(1)
+
+        
+		// addr_imm8_REP_
+	SNCPU_OP_E1(c2);
+		SNCPU_FETCH8(R_t0);
+        
+        // clear bits of P
+        SNCPU_OR(R_P,R_t0);
+        SNCPU_XOR(R_P,R_t0);
+        
+        // clear C flag
+        andi 	t0,R_t0,SNCPU_FLAG_C
+        or		R_fC, R_fC, t0
+        xor		R_fC, R_fC, t0
+
+		// clear N flag
+        sll 	t1,R_t0,8
+        or		R_fN, R_fN, t1
+        xor		R_fN, R_fN, t1
+
+		// clear Z flag
+        andi 	t2,R_t0,SNCPU_FLAG_Z
+        movn	R_fZ, R_t0, t2
+
+		jal		_SNCPU_UpdateOpTable		
+        nop
+		SNCPU_CHECKIRQ(1)
+
+	SNCPU_ENDOP(1)
+
+
+
+
+	SNCPU_OP_E0(10);
+		// BPL N=0
+        SNCPU_GETFLAG_N(R_t1);
+		SNCPU_FETCH8(R_t0)
+
+        SNCPU_BREAK_TRUE(R_t1)
+
+        SNCPU_SHLI(R_t0,24)
+        SNCPU_SRAI(R_t0,24)
+
+		SNCPU_BREL_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E0: no page-cross penalty */
+	SNCPU_ENDOP(1)
+
+	SNCPU_OP_E1(10);
+		// BPL N=0
+        SNCPU_GETFLAG_N(R_t1);
+		SNCPU_FETCH8(R_t0)
+
+        SNCPU_BREAK_TRUE(R_t1)
+
+        SNCPU_SHLI(R_t0,24)
+        SNCPU_SRAI(R_t0,24)
+
+		SNCPU_BREL8_E1_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E1 */
+	SNCPU_ENDOP(1)
+
+
+
+	SNCPU_OP_E0(30);
+		// BMI N=1
+        SNCPU_GETFLAG_N(R_t1);
+		SNCPU_FETCH8(R_t0)
+
+        SNCPU_BREAK_FALSE(R_t1);
+
+        SNCPU_SHLI(R_t0,24)
+        SNCPU_SRAI(R_t0,24)
+
+		SNCPU_BREL_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E0: no page-cross penalty */
+	SNCPU_ENDOP(1)
+
+	SNCPU_OP_E1(30);
+		// BMI N=1
+        SNCPU_GETFLAG_N(R_t1);
+		SNCPU_FETCH8(R_t0)
+
+        SNCPU_BREAK_FALSE(R_t1);
+
+        SNCPU_SHLI(R_t0,24)
+        SNCPU_SRAI(R_t0,24)
+
+		SNCPU_BREL8_E1_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E1 */
+	SNCPU_ENDOP(1)
+
+	SNCPU_OP_E0(f0);
+		// BEQ Z=1
+        andi	R_t1,R_fZ,0xFFFF; /* V1: raw lazy-Z, same low-16 test */
+		SNCPU_FETCH8(R_t0)
+
+        SNCPU_BREAK_TRUE(R_t1);
+
+        SNCPU_SHLI(R_t0,24)
+        SNCPU_SRAI(R_t0,24)
+
+		SNCPU_BREL_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E0: no page-cross penalty */
+	SNCPU_ENDOP(1)
+
+	SNCPU_OP_E1(f0);
+		// BEQ Z=1
+        andi	R_t1,R_fZ,0xFFFF; /* V1: raw lazy-Z, same low-16 test */
+		SNCPU_FETCH8(R_t0)
+
+        SNCPU_BREAK_TRUE(R_t1);
+
+        SNCPU_SHLI(R_t0,24)
+        SNCPU_SRAI(R_t0,24)
+
+		SNCPU_BREL8_E1_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E1 */
+	SNCPU_ENDOP(1)
+
+	SNCPU_OP_E0(d0);
+		// BNE Z=0
+        andi	R_t1,R_fZ,0xFFFF; /* V1: raw lazy-Z, same low-16 test */
+		SNCPU_FETCH8(R_t0)
+
+        SNCPU_BREAK_FALSE(R_t1);
+
+        SNCPU_SHLI(R_t0,24)
+        SNCPU_SRAI(R_t0,24)
+
+		SNCPU_BREL_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E0: no page-cross penalty */
+	SNCPU_ENDOP(1)
+
+	SNCPU_OP_E1(d0);
+		// BNE Z=0
+        andi	R_t1,R_fZ,0xFFFF; /* V1: raw lazy-Z, same low-16 test */
+		SNCPU_FETCH8(R_t0)
+
+        SNCPU_BREAK_FALSE(R_t1);
+
+        SNCPU_SHLI(R_t0,24)
+        SNCPU_SRAI(R_t0,24)
+
+		SNCPU_BREL8_E1_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E1 */
+	SNCPU_ENDOP(1)
+
+
+	SNCPU_OP_E0(90);
+		// BCC
+		SNCPU_FETCH8(R_t0)
+
+        SNCPU_BREAK_TRUE(R_fC);
+
+        SNCPU_SHLI(R_t0,24)
+        SNCPU_SRAI(R_t0,24)
+
+		SNCPU_BREL_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E0: no page-cross penalty */
+	SNCPU_ENDOP(1)
+
+	SNCPU_OP_E1(90);
+		// BCC
+		SNCPU_FETCH8(R_t0)
+
+        SNCPU_BREAK_TRUE(R_fC);
+
+        SNCPU_SHLI(R_t0,24)
+        SNCPU_SRAI(R_t0,24)
+
+		SNCPU_BREL8_E1_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E1 */
+	SNCPU_ENDOP(1)
+
+	SNCPU_OP_E0(b0);
+		// BCS
+		SNCPU_FETCH8(R_t0)
+
+        SNCPU_BREAK_FALSE(R_fC);
+
+        SNCPU_SHLI(R_t0,24)
+        SNCPU_SRAI(R_t0,24)
+
+		SNCPU_BREL_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E0: no page-cross penalty */
+	SNCPU_ENDOP(1)
+
+	SNCPU_OP_E1(b0);
+		// BCS
+		SNCPU_FETCH8(R_t0)
+
+        SNCPU_BREAK_FALSE(R_fC);
+
+        SNCPU_SHLI(R_t0,24)
+        SNCPU_SRAI(R_t0,24)
+
+		SNCPU_BREL8_E1_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E1 */
+	SNCPU_ENDOP(1)
+
+	SNCPU_OP_E0(50);
+		// BVC
+        SNCPU_GETFLAG_V(R_t1);
+		SNCPU_FETCH8(R_t0)
+
+        SNCPU_BREAK_TRUE(R_t1);
+
+        SNCPU_SHLI(R_t0,24)
+        SNCPU_SRAI(R_t0,24)
+
+		SNCPU_BREL_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E0: no page-cross penalty */
+	SNCPU_ENDOP(1)
+
+	SNCPU_OP_E1(50);
+		// BVC
+        SNCPU_GETFLAG_V(R_t1);
+		SNCPU_FETCH8(R_t0)
+
+        SNCPU_BREAK_TRUE(R_t1);
+
+        SNCPU_SHLI(R_t0,24)
+        SNCPU_SRAI(R_t0,24)
+
+		SNCPU_BREL8_E1_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E1 */
+	SNCPU_ENDOP(1)
+
+	SNCPU_OP_E0(70);
+		// BVS
+        SNCPU_GETFLAG_V(R_t1);
+		SNCPU_FETCH8(R_t0)
+
+        SNCPU_BREAK_FALSE(R_t1);
+
+        SNCPU_SHLI(R_t0,24)
+        SNCPU_SRAI(R_t0,24)
+
+		SNCPU_BREL_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E0: no page-cross penalty */
+	SNCPU_ENDOP(1)
+
+	SNCPU_OP_E1(70);
+		// BVS
+        SNCPU_GETFLAG_V(R_t1);
+		SNCPU_FETCH8(R_t0)
+
+        SNCPU_BREAK_FALSE(R_t1);
+
+        SNCPU_SHLI(R_t0,24)
+        SNCPU_SRAI(R_t0,24)
+
+		SNCPU_BREL8_E1_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E1 */
+	SNCPU_ENDOP(1)
+
+
+	SNCPU_OP_E0(80);
+		// BRA
+		SNCPU_FETCH8(R_t0)
+
+        SNCPU_SHLI(R_t0,24)
+        SNCPU_SRAI(R_t0,24)
+
+		SNCPU_BREL_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E0: no page-cross penalty */
+	SNCPU_ENDOP(1)
+
+	SNCPU_OP_E1(80);
+		// BRA
+		SNCPU_FETCH8(R_t0)
+
+        SNCPU_SHLI(R_t0,24)
+        SNCPU_SRAI(R_t0,24)
+
+		SNCPU_BREL8_E1_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E1 */
+	SNCPU_ENDOP(1)
+        
+
+
+
+
+
+	SNCPU_OP_ALL(82);
+
+		// BRL
+		SNCPU_FETCH16(R_t0)
+
+		SNCPU_SHLI(R_t0,16)
+		SNCPU_SRAI(R_t0,16)
+
+		SNCPU_BREL_PC16(R_t0);
+	SNCPU_ENDOP(1)
+
+
+	SNCPU_OP_X0(54);
+
+		// MVN
+        SNCPU_FETCH8(R_t0)		// dest bank
+        SNCPU_FETCH8(R_t1)		// src bank
+
+        SNCPU_SHLI(R_t0,16)
+        SNCPU_SHLI(R_t1,16)
+        
+        SNCPU_SET_DB(R_t0)		// set DB 
+        
+        SNCPU_OR(R_t0, R_Y)
+        SNCPU_OR(R_t1, R_X)
+        
+        SNCPU_READ8(R_t1, R_t2)
+        SNCPU_WRITE8(R_t0,R_t2)
+        
+        SNCPU_ADDI(R_X, 1)
+        SNCPU_ADDI(R_Y, 1)
+        SNCPU_ANDI(R_X,0xFFFF)
+        SNCPU_ANDI(R_Y,0xFFFF)
+        
+        SNCPU_BLOCKMOVE_REPEAT()
+	SNCPU_ENDOP(2)
+        
+
+	SNCPU_OP_X1E1(54);
+
+		// MVN
+        SNCPU_FETCH8(R_t0)		// dest bank
+        SNCPU_FETCH8(R_t1)		// src bank
+
+        SNCPU_SHLI(R_t0,16)
+        SNCPU_SHLI(R_t1,16)
+        
+        SNCPU_SET_DB(R_t0)		// set DB 
+        
+        SNCPU_OR(R_t0, R_Y)
+        SNCPU_OR(R_t1, R_X)
+        
+        SNCPU_READ8(R_t1, R_t2)
+        SNCPU_WRITE8(R_t0,R_t2)
+        
+        SNCPU_ADDI(R_X, 1)
+        SNCPU_ADDI(R_Y, 1)
+        SNCPU_ANDI(R_X,0xFF)
+        SNCPU_ANDI(R_Y,0xFF)
+        
+        SNCPU_BLOCKMOVE_REPEAT()
+	SNCPU_ENDOP(2)
+
+
+	SNCPU_OP_X0(44);
+
+		// MVP
+        SNCPU_FETCH8(R_t0)		// dest bank
+        SNCPU_FETCH8(R_t1)		// src bank
+
+        SNCPU_SHLI(R_t0,16)
+        SNCPU_SHLI(R_t1,16)
+        
+        SNCPU_SET_DB(R_t0)		// set DB 
+        
+        SNCPU_OR(R_t0, R_Y)
+        SNCPU_OR(R_t1, R_X)
+        
+        SNCPU_READ8(R_t1, R_t2)
+        SNCPU_WRITE8(R_t0,R_t2)
+        
+        SNCPU_ADDI(R_X, -1)
+        SNCPU_ADDI(R_Y, -1)
+        SNCPU_ANDI(R_X,0xFFFF)
+        SNCPU_ANDI(R_Y,0xFFFF)
+        
+        SNCPU_BLOCKMOVE_REPEAT()
+	SNCPU_ENDOP(2)
+        
+
+	SNCPU_OP_X1E1(44);
+
+		// MVP
+        SNCPU_FETCH8(R_t0)		// dest bank
+        SNCPU_FETCH8(R_t1)		// src bank
+
+        SNCPU_SHLI(R_t0,16)
+        SNCPU_SHLI(R_t1,16)
+        
+        SNCPU_SET_DB(R_t0)		// set DB 
+        
+        SNCPU_OR(R_t0, R_Y)
+        SNCPU_OR(R_t1, R_X)
+        
+        SNCPU_READ8(R_t1, R_t2)
+        SNCPU_WRITE8(R_t0,R_t2)
+        
+        SNCPU_ADDI(R_X, -1)
+        SNCPU_ADDI(R_Y, -1)
+        SNCPU_ANDI(R_X,0xFF)
+        SNCPU_ANDI(R_Y,0xFF)
+        
+        SNCPU_BLOCKMOVE_REPEAT()
+	SNCPU_ENDOP(2)
+
+
+	SNCPU_OP_ALL(cb);
+		lbu		t0,SNCPU_uSignal
+
+		andi	t1,t0,(SNCPU_SIGNAL_IRQ | SNCPU_SIGNAL_NMIEDGE)
+		ori 	t0,t0,SNCPU_SIGNAL_WAI		// clear wai signal
+		xori 	t0,t0,SNCPU_SIGNAL_WAI		// clear wai signal
+
+		bne		t1,zr, _WAI_SkipIRQ
+		nop
+
+		// WAI; PC already points at the following instruction.
+		ori		t0,t0,SNCPU_SIGNAL_WAI		// set wai signal
+		sb		t0,SNCPU_uSignal
+		move	R_Cycles,zr
+		j		_SNCPUExecute_DoneNoRewind
+		nop
+
+_WAI_SkipIRQ:
+
+		sb		t0,SNCPU_uSignal			// store new wai signal
+
+	SNCPU_ENDOP(3)
+
+//
+// unimplemented, unused in mario
+//
+
+	SNCPU_OP_ALL(42);
+		// WDM is a two-byte reserved instruction.  Its signature byte is
+		// ignored, but still has to be consumed so execution resumes at the
+		// following opcode instead of falling through into STP.
+		SNCPU_FETCH8(R_t0)
+	SNCPU_ENDOP(0)
+
+
+	SNCPU_OP_ALL(db);
+		// STP: latch the stopped state until reset.
+		lbu		t0,SNCPU_uSignal
+		ori		t0,t0,SNCPU_SIGNAL_STP
+		sb		t0,SNCPU_uSignal
+		move	R_Cycles,zr
+		j		_SNCPUExecute_DoneNoRewind
+		nop
+
+
+
+#include "op65816_mips.h"

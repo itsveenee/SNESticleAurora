@@ -1,0 +1,884 @@
+
+
+/*
+Todo: 
+Half carry support
+
+Direct-page 16-bit wrap fixed by SAFE ACCURACY BATCH 2.
+
+ 
+ */
+
+
+
+
+#include <stdlib.h>
+#include <string.h>
+#include "types.h"
+#include "snspc.h"
+#include "snspc_c.h"
+#include "snspcdisasm.h"
+#include "sndebug.h"
+
+
+#define SNSPC_STATEDEBUG (SNES_DEBUG && 1)
+/* AURORA_SPC700_ACCURACY_BATCH1_V1_20260914
+ * Half-carry is architectural state, not an optional compatibility flag. */
+#define SNSPC_PROFILE FALSE
+
+//#define SNSPC_SUBCYCLES(_nCycles)			pCpu->Cycles-= ((_nCycles)*SNSPC_CYCLE) >> pCpu->uCycleShift;
+#define SNSPC_SUBCYCLES(_nCycles)			nCycles-= ((_nCycles)*SNSPC_CYCLE);
+
+/* AURORA_SAFE_CODE_PERF_V1_SPC
+ * The 8-bit fetch/read/write wrappers below were pure forwarding layers.
+ * Keep cycle publication and trap handling exactly where they already are,
+ * but let the hot interpreter reach APURAM / the existing inline trap helper
+ * directly.  This is source-level dispatch cleanup only. */
+#define SNSPC_FETCH8(_Reg) do {                                      \
+    Uint32 _snspc_pc = rPC & 0xFFFFu;                                \
+    (_Reg) = pCpu->Mem[_snspc_pc];                                   \
+    rPC = (_snspc_pc + 1u) & 0xFFFFu;                                \
+} while (0)
+#define SNSPC_FETCH16(_Reg) do {                                     \
+    Uint32 _snspc_pc = rPC & 0xFFFFu;                                \
+    (_Reg)  = (Uint32)pCpu->Mem[_snspc_pc];                          \
+    (_Reg) |= (Uint32)pCpu->Mem[(_snspc_pc + 1u) & 0xFFFFu] << 8;   \
+    rPC = (_snspc_pc + 2u) & 0xFFFFu;                                \
+} while (0)
+
+/* AURORA_TOPGEAR_SPC_LAZY_CYCLE_PUBLISH_V2_20260917
+ * Publish interpreter time only when an SPC I/O trap can observe it.
+ * Ordinary APURAM accesses remain otherwise identical. */
+#define SNSPC_BUS_IS_IO(_a) (((((_a) & 0xFFFFu) - 0xF0u)) < 0x10u)
+#define SNSPC_BUS_IS_IO16(_a) \
+    (SNSPC_BUS_IS_IO((_a)) || SNSPC_BUS_IS_IO(((_a) + 1u)))
+
+#define SNSPC_WRITE8(_Addr, _Data) do { \
+    Uint32 _snspc_addr = (_Addr); \
+    if (SNSPC_BUS_IS_IO(_snspc_addr)) pCpu->Cycles = nCycles; \
+    __SNSPCWrite8(pCpu, _snspc_addr, (_Data)); \
+} while (0)
+#define SNSPC_WRITE16(_Addr, _Data) do { \
+    Uint32 _snspc_addr = (_Addr); \
+    if (SNSPC_BUS_IS_IO16(_snspc_addr)) pCpu->Cycles = nCycles; \
+    _SNSPCWrite16(pCpu, _snspc_addr, (_Data)); \
+} while (0)
+
+#define SNSPC_READ8(_Addr, _x) do { \
+    Uint32 _snspc_addr = (_Addr); \
+    if (SNSPC_BUS_IS_IO(_snspc_addr)) pCpu->Cycles = nCycles; \
+    (_x) = __SNSPCRead8(pCpu, _snspc_addr); \
+} while (0)
+#define SNSPC_READ16(_Addr, _x) do { \
+    Uint32 _snspc_addr = (_Addr); \
+    if (SNSPC_BUS_IS_IO16(_snspc_addr)) pCpu->Cycles = nCycles; \
+    (_x) = _SNSPCRead16(pCpu, _snspc_addr); \
+} while (0)
+
+/* AURORA_SPC700_ACCURACY_BATCH2_V1_20260914: side-effecting bus read without changing the abstract
+ * opcode cycle declaration. Used by MOV destination reads and halt bus. */
+#define SNSPC_DUMMYREAD8(_Addr) do { \
+    Uint32 _snspc_addr = (_Addr); \
+    if (SNSPC_BUS_IS_IO(_snspc_addr)) pCpu->Cycles = nCycles; \
+    (void)__SNSPCRead8(pCpu, _snspc_addr); \
+} while (0)
+
+/*
+ * SPC700 direct-page word accesses wrap inside the selected direct page.
+ *
+ * dp=$00FF -> high byte at $0000
+ * dp=$01FF -> high byte at $0100
+ *
+ * Keep ordinary SNSPC_READ16/SNSPC_WRITE16 unchanged for absolute
+ * addressing; these helpers are used only by DP addressing modes.
+ */
+#define SNSPC_READDP16(_Addr, _x) do {                              \
+    Uint32 _snspc_dp_addr = (_Addr);                                \
+    Uint32 _snspc_dp_hi = r_DP | ((_snspc_dp_addr + 1) & 0xFF);    \
+    if (SNSPC_BUS_IS_IO(_snspc_dp_addr) ||                          \
+        SNSPC_BUS_IS_IO(_snspc_dp_hi)) pCpu->Cycles = nCycles;      \
+    (_x)  = __SNSPCRead8(pCpu, _snspc_dp_addr);                      \
+    (_x) |= ((Uint32)__SNSPCRead8(pCpu, _snspc_dp_hi)) << 8;         \
+} while (0)
+
+#define SNSPC_WRITEDP16(_Addr, _Data) do {                           \
+    Uint32 _snspc_dp_addr = (_Addr);                                 \
+    Uint32 _snspc_dp_hi = r_DP | ((_snspc_dp_addr + 1) & 0xFF);     \
+    Uint32 _snspc_dp_data = (_Data);                                 \
+    if (SNSPC_BUS_IS_IO(_snspc_dp_addr) ||                           \
+        SNSPC_BUS_IS_IO(_snspc_dp_hi)) pCpu->Cycles = nCycles;       \
+    __SNSPCWrite8(pCpu, _snspc_dp_addr, (Uint8)_snspc_dp_data);      \
+    __SNSPCWrite8(pCpu, _snspc_dp_hi,                                \
+                 (Uint8)(_snspc_dp_data >> 8));                      \
+} while (0)
+
+
+#define SNSPC_PUSH8(_Data)	_SNSPCPush8(pCpu, _Data);  
+#define SNSPC_PUSH16(_Data)	_SNSPCPush16(pCpu, _Data);  
+#define SNSPC_POP8(_x)	_x = _SNSPCPop8(pCpu);  
+#define SNSPC_POP16(_x)	_x = _SNSPCPop16(pCpu);  
+
+// this macro assumes that the memory read/write cycle is the last cycle of an instruction
+// this prevents the spc from executing "ahead" of the main cpu
+
+#if 1
+#define SNSPC_OP(_Opcode, _Cycles) \
+	case (_Opcode):	\
+	if (nCycles < ((_Cycles-0)*SNSPC_CYCLE)) goto done;	\
+
+#define SNSPC_ENDOP(_Cycles) \
+		SNSPC_SUBCYCLES(_Cycles);	\
+		break;
+#else
+#define SNSPC_OP(_Opcode, _Cycles) \
+	case (_Opcode):	\
+	if (nCycles < ((_Cycles-1)*SNSPC_CYCLE)) goto done;	\
+
+#define SNSPC_ENDOP(_Cycles) \
+		SNSPC_SUBCYCLES(_Cycles);	\
+		break;
+#endif
+
+#define SNSPC_SETFLAG_Z8(_x)  fZ = (_x) << 8;
+#define SNSPC_SETFLAG_Z16(_x) fZ = (_x) << 0;
+#define SNSPC_SETFLAG_N8(_x)  fN = (_x) << 8;
+#define SNSPC_SETFLAG_N16(_x) fN = (_x) << 0;
+#define SNSPC_SETFLAG_C(_x)  fC = (_x) & 1;
+#define SNSPC_SETFLAGI_C(_x)  fC = (_x) & 1;
+#define SNSPC_GETFLAG_C(_x)  _x = fC & 1;
+
+#define SNSPC_SETFLAG_V() r_P |= SNSPC_FLAG_V;
+#define SNSPC_CLRFLAG_V() r_P &= ~SNSPC_FLAG_V;
+#define SNSPC_SETFLAG_I() r_P |= SNSPC_FLAG_I;
+#define SNSPC_CLRFLAG_I() r_P &= ~SNSPC_FLAG_I;
+#define SNSPC_SETFLAG_B() r_P |= SNSPC_FLAG_B;
+#define SNSPC_SETFLAG_D() r_P |= SNSPC_FLAG_D;
+#define SNSPC_CLRFLAG_D() r_P &= ~SNSPC_FLAG_D;
+#define SNSPC_SETFLAGI_V(__V) r_P &= ~SNSPC_FLAG_V; r_P |= ((__V) & 1) << 6;
+#define SNSPC_SETFLAG_H(__H) do { \
+	r_P = (r_P & ~SNSPC_FLAG_H) | (((__H) & 1) << 3); \
+} while (0)
+
+#define SNSPC_SETFLAG_P() r_P |= SNSPC_FLAG_P; r_DP=0x100;
+#define SNSPC_CLRFLAG_P() r_P &= ~SNSPC_FLAG_P; r_DP=0x000;
+#define SNSPC_SETPC(_Addr)	r_PC= _Addr;
+
+#define SNSPC_UNPACKFLAGS()					\
+	fC = (r_P & SNSPC_FLAG_C);					\
+	r_DP = (r_P & SNSPC_FLAG_P) << 3;					\
+	fZ = (r_P & SNSPC_FLAG_Z) ^ SNSPC_FLAG_Z;	\
+	fN = (r_P << 8);							
+
+#define SNSPC_PACKFLAGS()								\
+	r_P &= ~(SNSPC_FLAG_C | SNSPC_FLAG_Z |SNSPC_FLAG_N);	\
+	r_P |= fC & SNSPC_FLAG_C;												\
+	r_P |= (fN >> 8) & SNSPC_FLAG_N;								\
+	if (!(fZ&0xFFFF)) r_P|=SNSPC_FLAG_Z;		
+
+#define SNSPC_SET_YA16(_x) r_A = (_x); r_Y=(_x)>>8;
+#define SNSPC_SET_A8(_x) r_A = _x;
+#define SNSPC_SET_X8(_x) r_X = _x;
+#define SNSPC_SET_Y8(_x) r_Y = _x;
+#define SNSPC_SET_SP8(_x) r_SP = _x;
+#define SNSPC_SET_PSW8(_x) r_P = _x; SNSPC_UNPACKFLAGS();
+#define SNSPC_SET_PC16(_x) r_PC = _x;
+
+#define SNSPC_GET_YA16(_x) _x = r_A | (r_Y<<8);
+#define SNSPC_GET_A8(_x) _x = r_A;
+#define SNSPC_GET_X8(_x) _x = r_X;
+#define SNSPC_GET_Y8(_x) _x = r_Y;
+#define SNSPC_GET_SP8(_x) _x = r_SP;
+#define SNSPC_GET_PSW8(_x) SNSPC_PACKFLAGS(); _x = r_P; 
+#define SNSPC_GET_PC(_x) _x = r_PC;
+#define SNSPC_GETI(_x,_imm) _x = _imm;
+
+#define r_A    pCpu->Regs.rA
+#define r_X    pCpu->Regs.rX
+#define r_Y    pCpu->Regs.rY
+#define r_SP   pCpu->Regs.rSP
+#define r_P    pCpu->Regs.rPSW
+#define r_PC   rPC
+#define r_DP   rDP
+#define r_C   fC
+
+#define r_A8    pCpu->Regs.rA
+#define r_X8    pCpu->Regs.rX
+#define r_Y8    pCpu->Regs.rY
+#define r_SP8   pCpu->Regs.rSP
+#define r_PSW8   pCpu->Regs.rPSW
+
+#define SNSPC_NOT8(_Dest) _Dest^=0xFF;
+#define SNSPC_NOT16(_Dest) _Dest^=0xFFFF;
+
+#define SNSPC_MOVE(_Dest, _Src) _Dest=_Src;
+#define SNSPC_MUL(_Dest, _Src) _Dest*=_Src;
+#define SNSPC_ADD(_Dest, _Src) _Dest+=_Src;
+#define SNSPC_SUB(_Dest, _Src) _Dest-=_Src;
+
+#define SNSPC_OR(_Dest, _Src) _Dest|=_Src;
+#define SNSPC_XOR(_Dest, _Src) _Dest^=_Src;
+#define SNSPC_AND(_Dest, _Src) _Dest&=_Src;
+#define SNSPC_SHL(_Dest, _Src) _Dest<<=_Src;
+#define SNSPC_SHR(_Dest, _Src) _Dest>>=_Src;
+
+#define SNSPC_ADDI(_Dest, _Src) _Dest+=_Src;
+#define SNSPC_SUBI(_Dest, _Src) _Dest-=_Src;
+#define SNSPC_ORI(_Dest, _Src) _Dest|=_Src;
+#define SNSPC_XORI(_Dest, _Src) _Dest^=_Src;
+#define SNSPC_ANDI(_Dest, _Src) _Dest&=_Src;
+#define SNSPC_SHLI(_Dest, _Src) _Dest<<=_Src;
+#define SNSPC_SHRI(_Dest, _Src) _Dest>>=_Src;
+
+/* AURORA_SPC700_ARITH_REFERENCE_V1
+ * Match S-SMP arithmetic semantics.
+ *
+ * 8-bit ADC/SBC retain the 9th result bit because generated opcode bodies
+ * extract carry by shifting _Dest afterwards. SBC callers already pass the
+ * one's-complemented source, so the ADC primitive remains appropriate.
+ *
+ * ADDW ignores incoming C and produces a 17-bit result. SUBW is explicit,
+ * so H/V use subtraction semantics rather than complemented-add shortcuts.
+ */
+#define SNSPC_ADC8(_Dest,_Src) do {                                  \
+    Uint32 _Target = (_Dest) & 0xFFu;                                \
+    Uint32 _Source = (_Src) & 0xFFu;                                 \
+    Uint32 _Result = _Target + _Source + (fC & 1u);                  \
+    r_P &= ~(SNSPC_FLAG_V | SNSPC_FLAG_H);                           \
+    if ((_Target ^ _Source ^ _Result) & 0x10u)                      \
+        r_P |= SNSPC_FLAG_H;                                         \
+    if ((~(_Target ^ _Source) & (_Target ^ _Result) & 0x80u) != 0) \
+        r_P |= SNSPC_FLAG_V;                                         \
+    (_Dest) = _Result;                                               \
+} while (0)
+
+#define SNSPC_SBC8(_Dest,_Src) SNSPC_ADC8(_Dest,_Src)
+
+#define SNSPC_ADC16(_Dest,_Src) do {                                      \
+    Uint32 _Target = (_Dest) & 0xFFFFu;                                   \
+    Uint32 _Source = (_Src) & 0xFFFFu;                                    \
+    Uint32 _Result = _Target + _Source;                                   \
+    r_P &= ~(SNSPC_FLAG_V | SNSPC_FLAG_H);                                \
+    if ((_Target ^ _Source ^ _Result) & 0x1000u)                         \
+        r_P |= SNSPC_FLAG_H;                                              \
+    if ((~(_Target ^ _Source) & (_Target ^ _Result) & 0x8000u) != 0)    \
+        r_P |= SNSPC_FLAG_V;                                              \
+    (_Dest) = _Result;                                                    \
+} while (0)
+
+#define SNSPC_SBC16(_Dest,_Src) do {                                     \
+    Uint32 _Target = (_Dest) & 0xFFFFu;                                  \
+    Uint32 _Source = (_Src) & 0xFFFFu;                                   \
+    Uint32 _Result = _Target + ((~_Source) & 0xFFFFu) + 1u;              \
+    r_P &= ~(SNSPC_FLAG_V | SNSPC_FLAG_H);                               \
+    if ((~(_Target ^ _Source ^ _Result)) & 0x1000u)                     \
+        r_P |= SNSPC_FLAG_H;                                             \
+    if (((_Target ^ _Source) & (_Target ^ _Result) & 0x8000u) != 0)    \
+        r_P |= SNSPC_FLAG_V;                                             \
+    (_Dest) = _Result;                                                   \
+} while (0)
+
+
+// BPL
+#define SNSPC_BRREL(_bTest)				\
+		{								\
+		Int32	iRel;				\
+		SNSPC_FETCH8(iRel);			\
+		if (_bTest)					\
+			{							\
+			iRel <<=24;				\
+			iRel >>=24;				\
+			rPC+= iRel;				\
+			SNSPC_SUBCYCLES(2);		\
+			}							\
+		}
+
+#define SNSPC_BRA()				\
+		{								\
+		Int32	iRel;				\
+		SNSPC_FETCH8(iRel);			\
+			iRel <<=24;				\
+			iRel >>=24;				\
+			rPC+= iRel;				\
+		}
+
+
+#define SNSPC_BBC(_Bit)			\
+	SNSPC_FETCH8(t0);		\
+	t0+=r_DP;				\
+	SNSPC_READ8(t0,t1);	\
+	t1&=1<<(_Bit);			\
+	SNSPC_BRREL(!t1);		\
+	SNSPC_SUBCYCLES(5);		
+
+#define SNSPC_BBS(_Bit)			\
+	SNSPC_FETCH8(t0);		\
+	t0+=r_DP;				\
+	SNSPC_READ8(t0,t1);	\
+	t1&=1<<(_Bit);			\
+	SNSPC_BRREL(t1);		\
+	SNSPC_SUBCYCLES(5);		
+
+
+
+// addr_abs_CALL_
+#define SNSPC_TCALL(__n)	\
+	SNSPC_READ16(0xFFC0 + ((15-(__n))*2), t0);\
+	SNSPC_GET_PC(t2);\
+	SNSPC_PUSH16(t2);\
+	SNSPC_SET_PC16(t0);
+
+
+
+//
+//
+//
+
+
+static __inline Uint8 __SNSPCRead8(SNSpcT *pCpu, Uint32 uAddr)
+{
+	uAddr &= 0xFFFFu;
+	if ((uAddr - 0xF0u) < 0x10u)
+	{
+		/* AURORA_HW_ACCURACY_SMP_CPUIO_BUS_HOLD_V1_20260916
+		 * CPUIO $F4-$F7 is sampled at the midpoint of the access without
+		 * changing the instruction's total cycle budget. */
+		if ((uAddr & 0xFFFCu) == 0x00F4u)
+		{
+			Int32 nSavedCycles = pCpu->Cycles;
+			Uint8 uData;
+			pCpu->Cycles -= (SNSPC_CYCLE >> 1);
+			uData = pCpu->pReadTrapFunc(pCpu, uAddr);
+			pCpu->Cycles = nSavedCycles;
+			return uData;
+		}
+		return pCpu->pReadTrapFunc(pCpu, uAddr);
+	}
+	return pCpu->Mem[uAddr];
+}
+
+static __inline Uint16 _SNSPCRead16(SNSpcT *pCpu, Uint32 Addr)
+{
+	Uint32 uData;
+	uData =  __SNSPCRead8(pCpu, Addr);
+	uData|= (__SNSPCRead8(pCpu, Addr+1)<<8);
+	return  uData;
+}
+
+static __inline void  __SNSPCWrite8(SNSpcT *pCpu, Uint32 uAddr, Uint8 uData)
+{
+	uAddr &= 0xFFFFu;
+
+	// Ordinary APURAM and disabled-IPL writes have the same destination.
+	if (uAddr < SNSPC_ROM_ADDR || !pCpu->bRomEnable)
+		pCpu->Mem[uAddr] = uData;
+	else
+		pCpu->ShadowMem[uAddr & (SNSPC_ROM_SIZE - 1)] = uData;
+
+	if ((uAddr - 0xF0u) < 0x10u)
+		pCpu->pWriteTrapFunc(pCpu, uAddr, uData);
+}
+
+static __inline void _SNSPCWrite16(SNSpcT *pCpu, Uint32 Addr, Uint16 Data)
+{
+	__SNSPCWrite8(pCpu, Addr, (Uint8)Data);
+	__SNSPCWrite8(pCpu, Addr + 1, Data >> 8);
+}
+
+
+static __inline void _SNSPCPush8(SNSpcT *pCpu, Uint8 Data)
+{
+	pCpu->Mem[r_SP + 0x100] = Data;
+	r_SP--;
+}
+
+static __inline void _SNSPCPush16(SNSpcT *pCpu, Uint16 Data)
+{
+	pCpu->Mem[r_SP + 0x100] = (Uint8)(Data >> 8);
+	r_SP--;
+	pCpu->Mem[r_SP + 0x100] = (Uint8)(Data & 0xFF);
+	r_SP--;
+}
+
+static __inline Uint8 _SNSPCPop8(SNSpcT *pCpu)
+{
+	r_SP++;
+	return pCpu->Mem[r_SP + 0x100];
+}
+
+static __inline Uint16 _SNSPCPop16(SNSpcT *pCpu)
+{
+	Uint32 uData;
+	r_SP++;
+	uData = pCpu->Mem[r_SP + 0x100];
+	r_SP++;
+	uData|= pCpu->Mem[r_SP + 0x100] << 8;
+	return uData;
+}
+
+
+//
+//
+//
+
+#if 0
+SNSpcRegsT _LastRegs[512];
+#endif
+
+#if  SNSPC_STATEDEBUG
+#include "console.h"
+#endif
+
+Int32 SNSPCExecute_C(SNSpcT *pCpu)
+{
+	Int32	nCycles;
+	Uint32	rPC;
+	Uint32 fN; // N??????? ????????
+	Uint32 fZ; // ZZZZZZZZ ZZZZZZZZ
+	Uint32 fC; // 00000000 0000000C
+	Uint32 rDP;
+//	Uint32 bDone = FALSE;
+
+	nCycles = pCpu->Cycles;
+	
+	if (nCycles <= 0) return 0;
+
+	// registerize registers
+	rPC			= pCpu->Regs.rPC;
+
+	// UNPACK flags
+	SNSPC_UNPACKFLAGS();
+
+	// rePACK flags
+	while (1)
+	{
+		/* AURORA_SPC700_HALT_BUS_REFERENCE_V1 / AURORA_SPC700_ACCURACY_BATCH2_V1_20260914
+		 * SLEEP and STOP do not fetch another opcode. Hardware keeps a
+		 * read(PC), idle cadence while halted; keep I/O read side effects. */
+		if (pCpu->Regs.uPad & SNSPC_HALT_MASK)
+		{
+			while (nCycles >= (2 * SNSPC_CYCLE))
+			{
+				SNSPC_DUMMYREAD8(rPC);
+				SNSPC_SUBCYCLES(2);
+			}
+			goto halted;
+		}
+
+		Uint32 uOpcode;
+		Uint32 t0,t1,t2;
+
+//#if  SNSPC_STATEDEBUG
+//		pCpu->Regs.rPC = rPC;
+//		if (g_bStateDebug)
+//		{
+//			Char str[64];
+//  
+//	  		SNSPCDisasm(str, pCpu->Mem + pCpu->Regs.rPC, pCpu->Regs.rPC);
+//            pCpu->Cycles = nCycles;
+//
+//            ConDebug("%06d: spc %04X: %02X %02X %02X %02X %c%c%c%c %s (%d)\n", 
+//                SNSPCGetCounter(pCpu, SNSPC_COUNTER_FRAME),
+//                rPC, 
+//				pCpu->Regs.rA,
+//				pCpu->Regs.rX,
+//				pCpu->Regs.rY,
+//				pCpu->Regs.rSP,
+//				(fN&0x8000) ? 'N' : 'n',
+//				(pCpu->Regs.rPSW&SNSPC_FLAG_V) ? 'V' : 'v',
+//				((fZ&0xFFFF)==0) ? 'Z' : 'z',
+//				(fC&0x01) ? 'C' : 'c',
+//				str,
+//                nCycles
+//			);
+//		}
+//#endif
+
+	#if 0
+		int i;
+		pCpu->Regs.rPC = rPC;
+		for (i=511; i > 0; i--)
+		{
+			_LastRegs[i] = _LastRegs[i-1];
+		}
+		_LastRegs[0] = pCpu->Regs;
+
+		if (rPC==0xC9C)
+		{
+			i++;
+		}
+#endif
+
+		SNSPC_FETCH8(uOpcode);
+
+		switch (uOpcode)
+		{
+
+#include "opspc700_c.h"
+
+	SNSPC_OP(0x10, 2);
+		// BPL
+		SNSPC_BRREL(!(fN & 0x8000));
+       SNSPC_ENDOP(2);
+
+	SNSPC_OP(0x30, 2);
+		// BMI
+		SNSPC_BRREL((fN & 0x8000));
+       SNSPC_ENDOP(2);
+
+	SNSPC_OP(0xF0, 2);
+		// BEQ
+		SNSPC_BRREL(!(fZ&0xFFFF));
+       SNSPC_ENDOP(2);
+
+	SNSPC_OP(0xD0, 2);
+		// BNE
+		SNSPC_BRREL((fZ&0xFFFF));
+       SNSPC_ENDOP(2);
+
+	SNSPC_OP(0x90, 2);
+		// BCC
+		SNSPC_BRREL(fC==0);
+       SNSPC_ENDOP(2);
+
+	SNSPC_OP(0xB0, 2);
+		// BCS
+		SNSPC_BRREL(fC!=0);
+       SNSPC_ENDOP(2);
+
+	SNSPC_OP(0x50, 2);
+		// BVC
+		SNSPC_BRREL(!(r_P&SNSPC_FLAG_V));
+       SNSPC_ENDOP(2);
+
+	SNSPC_OP(0x70, 2);
+		// BVS
+		SNSPC_BRREL((r_P&SNSPC_FLAG_V));
+       SNSPC_ENDOP(2);
+
+	SNSPC_OP(0x2F, 4);
+		// BRA
+		SNSPC_BRA();
+       SNSPC_ENDOP(4);
+
+
+	SNSPC_OP(0x2E, 5);
+		// CBNE dp,rel
+		SNSPC_FETCH8(t0);
+		SNSPC_ADD(t0,r_DP);
+		SNSPC_READ8(t0,t1);
+		SNSPC_GET_A8(t2);
+		SNSPC_BRREL(t1!=t2);
+       SNSPC_ENDOP(5);
+
+	SNSPC_OP(0xDE, 6);
+		// CBNE dp+X,rel
+		SNSPC_FETCH8(t0);
+		SNSPC_ADD(t0,r_X);
+		SNSPC_AND(t0,0xFF);
+		SNSPC_ADD(t0,r_DP);
+		SNSPC_READ8(t0,t1);
+		SNSPC_GET_A8(t2);
+		SNSPC_BRREL(t1!=t2);
+       SNSPC_ENDOP(6);
+
+
+	SNSPC_OP(0x6E, 5);
+		// DBNZ dp,rel
+		SNSPC_FETCH8(t0);
+		SNSPC_ADD(t0,r_DP);
+		SNSPC_READ8(t0,t1);
+		SNSPC_SUB(t1,1);
+		SNSPC_WRITE8(t0,t1);
+		SNSPC_BRREL(t1!=0);
+       SNSPC_ENDOP(5);
+
+	SNSPC_OP(0xFE, 4);
+		// DBNZ Y,rel
+		SNSPC_GET_Y8(t1);
+		SNSPC_SUB(t1,1);
+		SNSPC_SET_Y8(t1);
+		SNSPC_BRREL(t1!=0);
+       SNSPC_ENDOP(4);
+
+
+	SNSPC_OP(0x9E, 12);
+		/* AURORA_SPC700_DIV_REFERENCE_V1
+		 * H=(Y.low >= X.low), V=(Y >= X); quotient/remainder follow
+		 * the S-SMP's documented special divide behavior. */
+		SNSPC_GET_YA16(t0);
+		SNSPC_GET_X8(t1);
+		SNSPC_SETFLAG_H(((r_Y & 0x0F) >= (r_X & 0x0F)) ? 1 : 0);
+		SNSPC_SETFLAGI_V((r_Y >= r_X) ? 1 : 0);
+
+		if ((Uint32)r_Y < ((Uint32)r_X << 1))
+		{
+			t2 = t0 / t1;
+			t0 = t0 % t1;
+		}
+		else
+		{
+			Uint32 base = t0 - (t1 << 9);
+			t2 = 0xFFu - base / (0x100u - t1);
+			t0 = t1 + base % (0x100u - t1);
+		}
+
+		SNSPC_SET_A8(t2);
+		SNSPC_SET_Y8(t0);
+		SNSPC_SETFLAG_N8(t2);
+		SNSPC_SETFLAG_Z8(t2);
+        SNSPC_ENDOP(12);
+
+
+	/* Complete the seven opcode holes that previously fell into default. */
+	SNSPC_OP(0x0A, 5);
+		// OR1 C,abs.bit
+		SNSPC_FETCH16(t0);
+		SNSPC_MOVE(t2,t0);
+		SNSPC_ANDI(t0,0x1FFF);
+		SNSPC_SHRI(t2,13);
+		SNSPC_READ8(t0,t1);
+		SNSPC_SHR(t1,t2);
+		SNSPC_ANDI(t1,1);
+		SNSPC_GETFLAG_C(t2);
+		SNSPC_OR(t2,t1);
+		SNSPC_SETFLAG_C(t2);
+	SNSPC_ENDOP(5);
+
+	SNSPC_OP(0x2A, 5);
+		// OR1 C,/abs.bit
+		SNSPC_FETCH16(t0);
+		SNSPC_MOVE(t2,t0);
+		SNSPC_ANDI(t0,0x1FFF);
+		SNSPC_SHRI(t2,13);
+		SNSPC_READ8(t0,t1);
+		SNSPC_SHR(t1,t2);
+		SNSPC_ANDI(t1,1);
+		SNSPC_XORI(t1,1);
+		SNSPC_GETFLAG_C(t2);
+		SNSPC_OR(t2,t1);
+		SNSPC_SETFLAG_C(t2);
+	SNSPC_ENDOP(5);
+
+	SNSPC_OP(0x4A, 4);
+		// AND1 C,abs.bit
+		SNSPC_FETCH16(t0);
+		SNSPC_MOVE(t2,t0);
+		SNSPC_ANDI(t0,0x1FFF);
+		SNSPC_SHRI(t2,13);
+		SNSPC_READ8(t0,t1);
+		SNSPC_SHR(t1,t2);
+		SNSPC_ANDI(t1,1);
+		SNSPC_GETFLAG_C(t2);
+		SNSPC_AND(t2,t1);
+		SNSPC_SETFLAG_C(t2);
+	SNSPC_ENDOP(4);
+
+	SNSPC_OP(0x6A, 4);
+		// AND1 C,/abs.bit
+		SNSPC_FETCH16(t0);
+		SNSPC_MOVE(t2,t0);
+		SNSPC_ANDI(t0,0x1FFF);
+		SNSPC_SHRI(t2,13);
+		SNSPC_READ8(t0,t1);
+		SNSPC_SHR(t1,t2);
+		SNSPC_ANDI(t1,1);
+		SNSPC_XORI(t1,1);
+		SNSPC_GETFLAG_C(t2);
+		SNSPC_AND(t2,t1);
+		SNSPC_SETFLAG_C(t2);
+	SNSPC_ENDOP(4);
+
+	SNSPC_OP(0x7F, 6);
+		// RETI: restore PSW first, then PC low/high.
+		SNSPC_POP8(t0);
+		SNSPC_SET_PSW8(t0);
+		SNSPC_POP16(t1);
+		SNSPC_SET_PC16(t1);
+	SNSPC_ENDOP(6);
+
+	SNSPC_OP(0xBE, 3);
+		// DAS A
+		SNSPC_GET_A8(t0);
+		if (!(fC & 1) || t0 > 0x99u)
+		{
+			t0 = (t0 - 0x60u) & 0xFFu;
+			SNSPC_SETFLAGI_C(0);
+		}
+		if (!(r_P & SNSPC_FLAG_H) || (t0 & 0x0Fu) > 0x09u)
+			t0 = (t0 - 0x06u) & 0xFFu;
+		SNSPC_SET_A8(t0);
+		SNSPC_SETFLAG_N8(t0);
+		SNSPC_SETFLAG_Z8(t0);
+	SNSPC_ENDOP(3);
+
+	SNSPC_OP(0xDF, 3);
+		// DAA A
+		SNSPC_GET_A8(t0);
+		if ((fC & 1) || t0 > 0x99u)
+		{
+			t0 = (t0 + 0x60u) & 0xFFu;
+			SNSPC_SETFLAGI_C(1);
+		}
+		if ((r_P & SNSPC_FLAG_H) || (t0 & 0x0Fu) > 0x09u)
+			t0 = (t0 + 0x06u) & 0xFFu;
+		SNSPC_SET_A8(t0);
+		SNSPC_SETFLAG_N8(t0);
+		SNSPC_SETFLAG_Z8(t0);
+	SNSPC_ENDOP(3);
+
+	SNSPC_OP(0x03, 5);
+		SNSPC_BBS(0);
+		break;
+
+	SNSPC_OP(0x23, 5);
+		SNSPC_BBS(1);
+		break;
+
+	SNSPC_OP(0x43, 5);
+		SNSPC_BBS(2);
+		break;
+
+	SNSPC_OP(0x63, 5);
+		SNSPC_BBS(3);
+		break;
+
+	SNSPC_OP(0x83, 5);
+		SNSPC_BBS(4);
+		break;
+
+	SNSPC_OP(0xA3, 5);
+		SNSPC_BBS(5);
+		break;
+
+	SNSPC_OP(0xC3, 5);
+		SNSPC_BBS(6);
+		break;
+
+	SNSPC_OP(0xE3, 5);
+		SNSPC_BBS(7);
+		break;
+
+	SNSPC_OP(0x13, 5);
+		SNSPC_BBC(0);
+		break;
+
+	SNSPC_OP(0x33, 5);
+		SNSPC_BBC(1);
+		break;
+
+	SNSPC_OP(0x53, 5);
+		SNSPC_BBC(2);
+		break;
+
+	SNSPC_OP(0x73, 5);
+		SNSPC_BBC(3);
+		break;
+
+	SNSPC_OP(0x93, 5);
+		SNSPC_BBC(4);
+		break;
+
+	SNSPC_OP(0xB3, 5);
+		SNSPC_BBC(5);
+		break;
+
+	SNSPC_OP(0xD3, 5);
+		SNSPC_BBC(6);
+		break;
+	
+	SNSPC_OP(0xF3, 5);
+		SNSPC_BBC(7);
+		break;
+
+
+	SNSPC_OP(0xEF, 3);
+		// SLEEP / WAIT: persistent until reset (interrupts are not exposed here).
+		pCpu->Regs.uPad = SNSPC_HALT_SLEEP;
+		SNSPC_DUMMYREAD8(rPC); /* first read(PC) of the 3-cycle wait entry */
+		SNSPC_ENDOP(3);
+
+	SNSPC_OP(0xFF, 2);
+		/* AURORA_SPC700_MEGA_ACCURACY_V1_20260916
+		 * SNESdev: STOP is 2 cycles; halted cadence remains read(PC)+idle. */
+		pCpu->Regs.uPad = SNSPC_HALT_STOP;
+		SNSPC_DUMMYREAD8(rPC);
+		SNSPC_ENDOP(2);
+
+
+
+		// MOV1 membit, C
+	SNSPC_OP(0x0ca,6)
+		SNSPC_FETCH16(t0);
+		SNSPC_MOVE(t1,t0);
+		SNSPC_GETI(t2,1);
+		SNSPC_ANDI(t0,0x1FFF);
+		SNSPC_SHRI(t1,13);
+		SNSPC_SHL(t2,t1);
+		SNSPC_READ8(t0,t1);
+
+		if (fC & 1)
+		{
+			SNSPC_OR(t1,t2);
+		} else
+		{
+			SNSPC_OR(t1,t2);
+			SNSPC_XOR(t1,t2);
+		}
+
+		SNSPC_WRITE8(t0,t1);
+		/* MOV1 abs.bit,C is 6 cycles; inherited ENDOP(5) undercharged it. */
+		SNSPC_ENDOP(6)
+
+
+	SNSPC_OP(0x0F, 8);
+		/* AURORA_SPC700_BRK_REFERENCE_V1
+		 * Push PC and the pre-BRK PSW. Only then set B=1/I=0. */
+		SNSPC_GET_PC(t0);
+		SNSPC_PUSH16(t0);
+		SNSPC_GET_PSW8(t1);
+		SNSPC_PUSH8(t1);
+		SNSPC_SETFLAG_B();
+		SNSPC_CLRFLAG_I();
+		SNSPC_READ16(SNSPC_VECTOR_BRK,t0);
+		SNSPC_SET_PC16(t0);
+        SNSPC_ENDOP(8);
+
+	SNSPC_OP(0x01, 8);	SNSPC_TCALL(0);      SNSPC_ENDOP(8);
+	SNSPC_OP(0x11, 8);	SNSPC_TCALL(1);      SNSPC_ENDOP(8);
+	SNSPC_OP(0x21, 8);	SNSPC_TCALL(2);      SNSPC_ENDOP(8);
+	SNSPC_OP(0x31, 8);	SNSPC_TCALL(3);      SNSPC_ENDOP(8);
+	SNSPC_OP(0x41, 8);	SNSPC_TCALL(4);      SNSPC_ENDOP(8);
+	SNSPC_OP(0x51, 8);	SNSPC_TCALL(5);      SNSPC_ENDOP(8);
+	SNSPC_OP(0x61, 8);	SNSPC_TCALL(6);      SNSPC_ENDOP(8);
+	SNSPC_OP(0x71, 8);	SNSPC_TCALL(7);      SNSPC_ENDOP(8);
+	SNSPC_OP(0x81, 8);	SNSPC_TCALL(8);      SNSPC_ENDOP(8);
+	SNSPC_OP(0x91, 8);	SNSPC_TCALL(9);      SNSPC_ENDOP(8);
+	SNSPC_OP(0xA1, 8);	SNSPC_TCALL(10);      SNSPC_ENDOP(8);
+	SNSPC_OP(0xB1, 8);	SNSPC_TCALL(11);      SNSPC_ENDOP(8);
+	SNSPC_OP(0xC1, 8);	SNSPC_TCALL(12);      SNSPC_ENDOP(8);
+	SNSPC_OP(0xD1, 8);	SNSPC_TCALL(13);      SNSPC_ENDOP(8);
+	SNSPC_OP(0xE1, 8);	SNSPC_TCALL(14);      SNSPC_ENDOP(8);
+	SNSPC_OP(0xF1, 8);	SNSPC_TCALL(15);      SNSPC_ENDOP(8);
+
+		default:	// unimplemented opcode
+			SNSPC_SUBCYCLES(1);
+		}
+	}
+
+halted:
+	/* Halt path did not prefetch an opcode: never back PC up here. */
+	goto commit;
+
+done:
+	// back up the opcode fetch, wrapping on the SPC700's 16-bit PC.
+	rPC = (rPC - 1u) & 0xFFFFu;
+
+commit:
+	// restore registers
+	SNSPC_PACKFLAGS();
+	pCpu->Cycles	= nCycles;
+	pCpu->Regs.rPC	= rPC;
+
+	return 0;
+}
+

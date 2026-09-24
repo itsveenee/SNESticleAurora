@@ -1,0 +1,11 @@
+{
+  "dead32x": [
+    "src/platform/ps2/system/mainloop_process.cpp",
+    "src/sega/picodrive/picodrive_bridge.cpp",
+    "src/sega/picodrive/picodrive_bridge.h"
+  ],
+  "head": "07f1ed8c05b930c3a8554f3a1e472ac6dc0bfb1d",
+  "label": "v07_host_cleanup",
+  "time_unix": 1790210542,
+  "ui": "src/platform/ps2/ui/uiVideo.cpp"
+}

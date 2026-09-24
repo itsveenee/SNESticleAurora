@@ -1,0 +1,17 @@
+{
+  "files": [
+    "src/snes/apu/snspc_c.c",
+    "src/snes/apu/snspcdsp.cpp",
+    "src/snes/apu/snspcdsp.h",
+    "src/snes/apu/snspcmix.cpp",
+    "src/snes/apu/snspcmix.h"
+  ],
+  "head": "07f1ed8c05b930c3a8554f3a1e472ac6dc0bfb1d",
+  "label": "v04_apu_dsp_reference",
+  "preserved": [
+    "src/snes/apu/snspcio.cpp",
+    "src/snes/apu/snspcio.h"
+  ],
+  "ref": "88ac80f3e531bfbdea1aff2fea65386d6e18f004",
+  "time_unix": 1790210542
+}

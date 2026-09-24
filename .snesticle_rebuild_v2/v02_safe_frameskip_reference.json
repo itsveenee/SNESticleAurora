@@ -1,0 +1,15 @@
+{
+  "head": "07f1ed8c05b930c3a8554f3a1e472ac6dc0bfb1d",
+  "label": "v02_safe_frameskip_reference",
+  "path": "src/platform/ps2/system/mainloop_render.cpp",
+  "removed_markers": [
+    "s_SafeFrameskipRecoveryPending",
+    "s_SafeFrameskipFlicker",
+    "s_SafeFrameskipWorkStart",
+    "_MainLoopSafeFrameskipBeforeFlip",
+    "SAFE_FRAMESKIP_CORE_PRESSURE",
+    "SAFE_FRAMESKIP_RECOVERY_ONLY"
+  ],
+  "source_scheduler_ref": "b4f5c180eeb0fcb81ade3da73a72a5ace381bac1",
+  "time_unix": 1790210541
+}

@@ -29,22 +29,12 @@ extern "C" {
    second, DMA-owned copy of BlendInfo after it: the CPU may then compose the
    next scanline while GIF is still consuming the previous one. */
 #define SNPPU_DMA_BLENDINFO_OFFSET (6 * 1024)
-/* AURORA_SNES_RENDERER_PERF_V8_GS_PINGPONG
- * Prepare the next DMA-owned line in an alternate scratchpad slot. */
-#define SNPPU_DMA_BLENDINFO_SLOTS 2u
-#define SNPPU_DMA_BLENDINFO_STRIDE \
-	((sizeof(SNPPUBlendInfoT) + 63u) & ~63u)
-#define SNPPU_DMA_BLENDINFO_SLOT_ADDR(i) \
-	(PS2MEM_SCRATCHPAD + SNPPU_DMA_BLENDINFO_OFFSET + \
-	 (Uint32)(i) * SNPPU_DMA_BLENDINFO_STRIDE)
-#define SNPPU_DMA_BLENDINFO_ADDR SNPPU_DMA_BLENDINFO_SLOT_ADDR(0)
+#define SNPPU_DMA_BLENDINFO_ADDR \
+	(PS2MEM_SCRATCHPAD + SNPPU_DMA_BLENDINFO_OFFSET)
 
-/* Renderer + both staging slots stay below the 14 KiB lookup reservation. */
 typedef char SNPPUScratchLayoutCheck[
 	(sizeof(SnesRender8pInfoT) <= SNPPU_DMA_BLENDINFO_OFFSET &&
-	 SNPPU_DMA_BLENDINFO_OFFSET + SNPPU_DMA_BLENDINFO_SLOTS *
-		SNPPU_DMA_BLENDINFO_STRIDE <= PS2MEM_SNES_LOOKUP_OFFSET &&
-	 PS2MEM_SNES_LOOKUP_OFFSET + PS2MEM_SNES_LOOKUP_SIZE <= 16 * 1024)
+	 SNPPU_DMA_BLENDINFO_OFFSET + sizeof(SNPPUBlendInfoT) <= 16 * 1024)
 		? 1 : -1];
 
 /* AURORA_TOPGEAR_GS_LINE_PAYLOAD_COPY_V4_20260917
@@ -170,37 +160,20 @@ static Uint32 _SNPPUBlend_AttribSubPal[256] _ALIGN(64) =
 static void _PlanarTo3(Uint8 *pDest, SNMaskT *pSrc0, SNMaskT *pSrc1, SNMaskT *pSrc2)
 {
 	Uint32 nBytes = 256 / 8;
-	/* AURORA_SNES_BG_LOOKUP_SCRATCHPAD_V2_20260920: PlanarTo3 uses PlaneLookup[1], which remains in ordinary RAM. */
-	SnesChrLookup64T *pLookup64 =
-		(SnesChrLookup64T *)&_SnesPPU_PlaneLookup[1];
+	SnesChrLookup64T *pLookup64 = (SnesChrLookup64T *)&_SnesPPU_PlaneLookup[1];
 	Uint64 *pDest64 = (Uint64 *)pDest;
 	const Uint8 *pSrc8_0 = pSrc0->uMask8;
 	const Uint8 *pSrc8_1 = pSrc1->uMask8;
 	const Uint8 *pSrc8_2 = pSrc2->uMask8;
 
-	/* AURORA_SNES_RENDERER_PERF_V8_PLANAR_HALF_ELIDE
-	 * Half-color disabled => plane 2 is exactly zero.  Four 64-bit tests
-	 * replace 32 zero-plane LUT reads, shifts and ORs. */
-	const Uint64 uHalfAny = pSrc2->uMask64[0] | pSrc2->uMask64[1] |
-		pSrc2->uMask64[2] | pSrc2->uMask64[3];
-	if (!uHalfAny)
-	{
-		while (nBytes > 0)
-		{
-			Uint64 uData = (*pLookup64)[*pSrc8_0++] << 0;
-			uData |= (*pLookup64)[*pSrc8_1++] << 1;
-			*pDest64++ = uData;
-			nBytes--;
-		}
-		return;
-	}
-
 	while (nBytes > 0)
 	{
 		Uint64 uData;
+
 		uData  = (*pLookup64)[*pSrc8_0++] << 0;
 		uData |= (*pLookup64)[*pSrc8_1++] << 1;
 		uData |= (*pLookup64)[*pSrc8_2++] << 2;
+
 		*pDest64++ = uData;
 		nBytes--;
 	}
@@ -208,63 +181,53 @@ static void _PlanarTo3(Uint8 *pDest, SNMaskT *pSrc0, SNMaskT *pSrc1, SNMaskT *pS
 
 void SNPPUBlendGS::MarkPaletteEntryDirty(Uint32 uAddr)
 {
-	const Uint32 uWord = (uAddr >> 5) & 7;
-	const Uint32 uBit = 1u << (uAddr & 31);
+	Uint32 uWord = (uAddr >> 5) & 7;
+	Uint32 uBit = 1u << (uAddr & 31);
 
 	if (!(m_uPaletteDirty[uWord] & uBit))
 	{
 		m_uPaletteDirty[uWord] |= uBit;
 		m_nPaletteDirty++;
 	}
-	for (Uint32 uSlot = 0; uSlot < SNPPU_DMA_BLENDINFO_SLOTS; ++uSlot)
-	{
-		if (!(m_uStagePaletteDirty[uSlot][uWord] & uBit))
-		{
-			m_uStagePaletteDirty[uSlot][uWord] |= uBit;
-			m_nStagePaletteDirty[uSlot]++;
-		}
-	}
 	m_bPaletteDirty = TRUE;
 }
 
 void SNPPUBlendGS::MarkPaletteAllDirty()
 {
-	for (Int32 iWord = 0; iWord < 8; iWord++)
-	{
+	Int32 iWord;
+
+	for (iWord = 0; iWord < 8; iWord++)
 		m_uPaletteDirty[iWord] = 0xFFFFFFFFu;
-		for (Uint32 uSlot = 0; uSlot < SNPPU_DMA_BLENDINFO_SLOTS; ++uSlot)
-			m_uStagePaletteDirty[uSlot][iWord] = 0xFFFFFFFFu;
-	}
 	m_nPaletteDirty = 256;
-	for (Uint32 uSlot = 0; uSlot < SNPPU_DMA_BLENDINFO_SLOTS; ++uSlot)
-		m_nStagePaletteDirty[uSlot] = 256;
 	m_bPaletteDirty = TRUE;
 }
 
 Uint32 SNPPUBlendGS::CopyDirtyPalette(PaletteT *pDest,
-	                                  const PaletteT *pSource,
-	                                  Uint32 uSlot)
+	                                  const PaletteT *pSource)
 {
 	Uint32 uCopiedBytes = 0;
-	if (!m_nStagePaletteDirty[uSlot])
+	Int32 iWord;
+
+	if (!m_bPaletteDirty)
 		return 0;
 
-	/* Keep each ping-pong slot a coherent 1 KiB CLUT source. Sparse HDMA
-	 * changes accumulate independently until that slot is prepared again. */
-	if (m_nStagePaletteDirty[uSlot] >= 64)
+	/* A complete CGRAM upload is cheaper as one burst.  HDMA gradients, on
+	   the other hand, commonly alter only one or two entries per scanline;
+	   copying the whole 1 KiB CLUT there was pure EE work. */
+	if (m_nPaletteDirty >= 64)
 	{
 		memcpy(pDest, pSource, sizeof(*pDest));
 		uCopiedBytes = sizeof(*pDest);
 	}
 	else
 	{
-		for (Int32 iWord = 0; iWord < 8; iWord++)
+		for (iWord = 0; iWord < 8; iWord++)
 		{
-			Uint32 uBits = m_uStagePaletteDirty[uSlot][iWord];
+			Uint32 uBits = m_uPaletteDirty[iWord];
 			while (uBits)
 			{
-				const Uint32 uBit = (Uint32)__builtin_ctz(uBits);
-				const Uint32 uAddr = (Uint32)iWord * 32 + uBit;
+				Uint32 uBit = (Uint32)__builtin_ctz(uBits);
+				Uint32 uAddr = (Uint32)iWord * 32 + uBit;
 #if SNPPUBLEND_PAL32
 				pDest->Color32[uAddr] = pSource->Color32[uAddr];
 				uCopiedBytes += sizeof(pDest->Color32[0]);
@@ -276,8 +239,10 @@ Uint32 SNPPUBlendGS::CopyDirtyPalette(PaletteT *pDest,
 			}
 		}
 	}
-	memset(m_uStagePaletteDirty[uSlot], 0, sizeof(m_uStagePaletteDirty[uSlot]));
-	m_nStagePaletteDirty[uSlot] = 0;
+
+	memset(m_uPaletteDirty, 0, sizeof(m_uPaletteDirty));
+	m_nPaletteDirty = 0;
+	m_bPaletteDirty = FALSE;
 	return uCopiedBytes;
 }
 
@@ -550,7 +515,7 @@ void SNPPUBlendGS::Begin(CRenderSurface *pTarget)
     if (!m_bAttribPalettesUploaded)
     {
         GPPrimUploadTexture(
-             m_DmaList[0].uAttribMainPal,
+             m_DmaList.uAttribMainPal,
              64, 0, 0,
              GS_PSMCT32,
              _SNPPUBlend_AttribMainPal,
@@ -558,7 +523,7 @@ void SNPPUBlendGS::Begin(CRenderSurface *pTarget)
              16);
 
         GPPrimUploadTexture(
-             m_DmaList[0].uAttribSubPal,
+             m_DmaList.uAttribSubPal,
              64, 0, 0,
              GS_PSMCT32,
              _SNPPUBlend_AttribSubPal,
@@ -602,8 +567,7 @@ void SNPPUBlendGS::End()
 		_SNPPUGSDiag.SyncCalls++;
 		#if SNDBG_DEEP
 		_SNPPUGSValidateStage(
-			(const SNPPUBlendInfoT *)
-				SNPPU_DMA_BLENDINFO_SLOT_ADDR(m_uLastDmaSlot));
+			(const SNPPUBlendInfoT *)SNPPU_DMA_BLENDINFO_ADDR);
 		#endif
 		_SNPPUGSDiag.HasExpected = FALSE;
 	}
@@ -960,106 +924,127 @@ static void _SNPPUBlendSetParm(SNPPUDmaListT *pList, Int32 iLine,
 
 SNPPUBlendGS::SNPPUBlendGS(Uint32 uVramAddr, Uint32 uOutAddr)
 {
+    SNPPUDmaListT *pList = &m_DmaList;
+    SNPPUDmaListT *pPaletteList = &m_DmaListWithPalette;
+
     _SNPPUBlend_ColorLUT = SNPPUColorGetPalette();
+
+    m_pDmaBlendInfo = NULL;
 	memset(m_uPaletteDirty, 0, sizeof(m_uPaletteDirty));
 	m_nPaletteDirty = 0;
 	MarkPaletteAllDirty();
     m_bAttribPalettesUploaded = FALSE;
-	m_uDmaSlot = 0;
-	m_uLastDmaSlot = 0;
+    m_bDmaListHasIntensity = FALSE;
+	m_bDmaListDirectMain = FALSE;
 
-	/* AURORA_SNES_RENDERER_PERF_V8_GS_PINGPONG */
-	for (Uint32 uSlot = 0; uSlot < SNPPU_DMA_BLENDINFO_SLOTS; ++uSlot)
-	{
-		SNPPUDmaListT *pList = &m_DmaList[uSlot];
-		SNPPUDmaListT *pPaletteList = &m_DmaListWithPalette[uSlot];
-		m_pDmaBlendInfo[uSlot] = NULL;
-		m_bDmaListHasIntensity[uSlot] = FALSE;
-		m_bDmaListDirectMain[uSlot] = FALSE;
-		pList->uPalAddr = uVramAddr + 0x000;
-		pList->uInputAddr = uVramAddr + 0x080;
-		pList->uAttribMainPal = uVramAddr + 0x180;
-		pList->uAttribSubPal = uVramAddr + 0x184;
-		pList->uTempAddr = uVramAddr + 0x200;
-		pList->uOutAddr = uOutAddr;
-		pPaletteList->uPalAddr = pList->uPalAddr;
-		pPaletteList->uInputAddr = pList->uInputAddr;
-		pPaletteList->uAttribMainPal = pList->uAttribMainPal;
-		pPaletteList->uAttribSubPal = pList->uAttribSubPal;
-		pPaletteList->uTempAddr = pList->uTempAddr;
-		pPaletteList->uOutAddr = pList->uOutAddr;
-	}
+    pList->uPalAddr        = uVramAddr + 0x000;
+    pList->uInputAddr      = uVramAddr + 0x080 ;
+    pList->uAttribMainPal  = uVramAddr + 0x180 ;
+    pList->uAttribSubPal   = uVramAddr + 0x184 ;
+    pList->uTempAddr       = uVramAddr + 0x200 ;
+
+	pList->uOutAddr = uOutAddr;
+
+	/* Both chains render identically.  The larger one refreshes the CLUT;
+	   the normal per-line chain reuses it and avoids 1 KiB of GS traffic. */
+	pPaletteList->uPalAddr       = pList->uPalAddr;
+	pPaletteList->uInputAddr     = pList->uInputAddr;
+	pPaletteList->uAttribMainPal = pList->uAttribMainPal;
+	pPaletteList->uAttribSubPal  = pList->uAttribSubPal;
+	pPaletteList->uTempAddr      = pList->uTempAddr;
+	pPaletteList->uOutAddr       = pList->uOutAddr;
+
 #if SNDBG_LOG
 	DLog("[snes-gs-layout] vram blend/out=%X/%X scratch render/stage=%08X/%08X bytes=%u/%u",
 		(unsigned)uVramAddr, (unsigned)uOutAddr,
 		(unsigned)PS2MEM_SCRATCHPAD, (unsigned)SNPPU_DMA_BLENDINFO_ADDR,
-		(unsigned)sizeof(SnesRender8pInfoT), (unsigned)sizeof(SNPPUBlendInfoT));
+		(unsigned)sizeof(SnesRender8pInfoT),
+		(unsigned)sizeof(SNPPUBlendInfoT));
 #endif
 }
 
 void SNPPUBlendGS::Exec(SNPPUBlendInfoT *pInfo, Int32 iLine, Uint32 uFixedColor32, SNMaskT *pColorMask, Bool bAddSub, Uint32 uIntensity)
 {
-	/* AURORA_SNES_RENDERER_PERF_V8_GS_PINGPONG
-	 * Release: prepare alternate slot -> mandatory DmaSyncGIF -> kick.
-	 * GIF/GS ordering is unchanged; only host preparation moves before wait. */
-	const Uint32 uSlot = m_uDmaSlot & 1u;
 	SNPPUBlendInfoT *pDmaInfo =
-		(SNPPUBlendInfoT *)SNPPU_DMA_BLENDINFO_SLOT_ADDR(uSlot);
+		(SNPPUBlendInfoT *)SNPPU_DMA_BLENDINFO_ADDR;
 	SNPPUDmaListT *pExecList;
 	Bool bUploadPalette;
 	Bool bApplyIntensity = uIntensity < 15;
 	Bool bDirectMain = pColorMask == NULL && !bApplyIntensity;
 	Uint32 uPaletteCopyBytes;
 
-	if (!m_pTarget) return;
+	if (!m_pTarget)
+	{
+		return;
+	}
+
     if (pColorMask)
     {
         PROF_ENTER("SNPPUBlendPlanarTo3");
-        _PlanarTo3(pInfo->uAttrib8, &pColorMask[0], &pColorMask[1], &pColorMask[2]);
+        _PlanarTo3(pInfo->uAttrib8, &pColorMask[0],&pColorMask[1],&pColorMask[2]);
         PROF_LEAVE("SNPPUBlendPlanarTo3");
     }
 
-#if SNDBG_LOG
+    // wait for previous dma to finish
     PROF_ENTER("SNPPUGS");
+#if SNDBG_LOG
 	{
 		Uint32 uStart = ProfCtrGetCycle();
 		DmaSyncGIF();
 		_SNPPUGSDiag.SyncCycles += ProfCtrGetCycle() - uStart;
 		_SNPPUGSDiag.SyncCalls++;
 		#if SNDBG_DEEP
-		_SNPPUGSValidateStage((const SNPPUBlendInfoT *)
-			SNPPU_DMA_BLENDINFO_SLOT_ADDR(m_uLastDmaSlot));
+		_SNPPUGSValidateStage(pDmaInfo);
 		#endif
 	}
-    PROF_LEAVE("SNPPUGS");
+#else
+    DmaSyncGIF();
 #endif
+    PROF_LEAVE("SNPPUGS");
 
-    if (m_pDmaBlendInfo[uSlot] != pInfo ||
-        m_bDmaListHasIntensity[uSlot] != bApplyIntensity ||
-		m_bDmaListDirectMain[uSlot] != bDirectMain)
+    if (m_pDmaBlendInfo != pInfo ||
+        m_bDmaListHasIntensity != bApplyIntensity ||
+		m_bDmaListDirectMain != bDirectMain)
     {
-		_SNPPUBlendBuildList(&m_DmaList[uSlot], pDmaInfo,
-			m_DmaList[uSlot].uOutAddr, FALSE, bApplyIntensity, bDirectMain);
-		_SNPPUBlendBuildList(&m_DmaListWithPalette[uSlot], pDmaInfo,
-			m_DmaListWithPalette[uSlot].uOutAddr, TRUE, bApplyIntensity, bDirectMain);
-        SyncDCache(m_DmaList[uSlot].Data,
-			(Uint8 *)m_DmaList[uSlot].Data + sizeof(m_DmaList[uSlot].Data) - 1);
-        SyncDCache(m_DmaListWithPalette[uSlot].Data,
-			(Uint8 *)m_DmaListWithPalette[uSlot].Data +
-				sizeof(m_DmaListWithPalette[uSlot].Data) - 1);
-        m_pDmaBlendInfo[uSlot] = pInfo;
-        m_bDmaListHasIntensity[uSlot] = bApplyIntensity;
-		m_bDmaListDirectMain[uSlot] = bDirectMain;
+		/* The sync above makes it safe to rebuild a list when a fade crosses
+		   brightness 15.  REF tags always point at the stable staging copy,
+		   never at the scanline buffer that RenderLine8 is about to reuse. */
+		_SNPPUBlendBuildList(&m_DmaList, pDmaInfo,
+		                      m_DmaList.uOutAddr, FALSE, bApplyIntensity,
+		                      bDirectMain);
+		_SNPPUBlendBuildList(&m_DmaListWithPalette, pDmaInfo,
+		                      m_DmaListWithPalette.uOutAddr, TRUE,
+		                      bApplyIntensity, bDirectMain);
+
+        /* AURORA_V83_BLENDLIST_RANGE_DCACHE
+         * Only the two 2 KiB command templates were rewritten above.
+         * Their DMA_REF payloads point at the dedicated EE scratchpad staging
+         * area, so there is no cached external payload to write back here.
+         * Keep the emulator's unrelated D-cache resident. */
+        SyncDCache(m_DmaList.Data,
+                   (Uint8 *)m_DmaList.Data + sizeof(m_DmaList.Data) - 1);
+        SyncDCache(m_DmaListWithPalette.Data,
+                   (Uint8 *)m_DmaListWithPalette.Data +
+                       sizeof(m_DmaListWithPalette.Data) - 1);
+
+        m_pDmaBlendInfo = pInfo;
+        m_bDmaListHasIntensity = bApplyIntensity;
+		m_bDmaListDirectMain = bDirectMain;
     }
 
+	/* The previous GIF chain is done with the staging area now.  Main, sub
+	   and attributes change every line; the 1 KiB CLUT is copied and sent
+	   only when CGRAM changed (and once after Begin because scratchpad is
+	   shared between frames). */
 	bUploadPalette = m_bPaletteDirty;
 #if SNDBG_LOG
 	{
 		Uint32 uStart = ProfCtrGetCycle();
 		#if SNDBG_DEEP
-		Uint32 uSourceHash, uStageHash;
+		Uint32 uSourceHash;
+		Uint32 uStageHash;
 		#endif
-		uPaletteCopyBytes = CopyDirtyPalette(pDmaInfo->Pal, pInfo->Pal, uSlot);
+		uPaletteCopyBytes = CopyDirtyPalette(pDmaInfo->Pal, pInfo->Pal);
 		memcpy(pDmaInfo->uMain8, pInfo->uMain8, sizeof(pDmaInfo->uMain8));
 		if (!bDirectMain)
 		{
@@ -1069,70 +1054,88 @@ void SNPPUBlendGS::Exec(SNPPUBlendInfoT *pInfo, Int32 iLine, Uint32 uFixedColor3
 #if SNDBG_DEEP
 		else
 		{
+			/* Keep full staging validation meaningful in the intrusive build. */
 			memcpy(pDmaInfo->uSub8, pInfo->uSub8, sizeof(pDmaInfo->uSub8));
 			memcpy(pDmaInfo->uAttrib8, pInfo->uAttrib8, sizeof(pDmaInfo->uAttrib8));
 		}
 #endif
 		_SNPPUGSDiag.CopyCycles += ProfCtrGetCycle() - uStart;
 		_SNPPUGSDiag.CopyBytes += sizeof(pDmaInfo->uMain8);
-		if (!bDirectMain) _SNPPUGSDiag.CopyBytes += sizeof(pDmaInfo->uSub8)+sizeof(pDmaInfo->uAttrib8);
+		if (!bDirectMain)
+			_SNPPUGSDiag.CopyBytes += sizeof(pDmaInfo->uSub8) +
+				sizeof(pDmaInfo->uAttrib8);
 #if SNDBG_DEEP
-		else _SNPPUGSDiag.CopyBytes += sizeof(pDmaInfo->uSub8)+sizeof(pDmaInfo->uAttrib8);
+		else
+			_SNPPUGSDiag.CopyBytes += sizeof(pDmaInfo->uSub8) +
+				sizeof(pDmaInfo->uAttrib8);
 #endif
-		if (bUploadPalette) { _SNPPUGSDiag.CopyBytes += uPaletteCopyBytes; _SNPPUGSDiag.PaletteUploads++; }
+		if (bUploadPalette)
+		{
+			_SNPPUGSDiag.CopyBytes += uPaletteCopyBytes;
+			_SNPPUGSDiag.PaletteUploads++;
+		}
 		#if SNDBG_DEEP
 		uSourceHash = _SNPPUGSSample(pInfo, NULL);
 		uStageHash = _SNPPUGSSample(pDmaInfo, _SNPPUGSDiag.Expected);
-		if (uSourceHash != uStageHash) _SNPPUGSDiag.CopyMismatch++;
-		_SNPPUGSDiag.SourceHash = (_SNPPUGSDiag.SourceHash << 5) ^ uSourceHash ^ (Uint32)iLine;
-		_SNPPUGSDiag.StageHash = (_SNPPUGSDiag.StageHash << 5) ^ uStageHash ^ (Uint32)iLine;
+		if (uSourceHash != uStageHash)
+			_SNPPUGSDiag.CopyMismatch++;
+		_SNPPUGSDiag.SourceHash =
+			(_SNPPUGSDiag.SourceHash << 5) ^ uSourceHash ^ (Uint32)iLine;
+		_SNPPUGSDiag.StageHash =
+			(_SNPPUGSDiag.StageHash << 5) ^ uStageHash ^ (Uint32)iLine;
 		_SNPPUGSDiag.HasExpected = TRUE;
 		#endif
 	}
 #else
-	uPaletteCopyBytes = CopyDirtyPalette(pDmaInfo->Pal, pInfo->Pal, uSlot);
+	/* AURORA_TOPGEAR_GS_CLEAN_PALETTE_GATE_V4_20260917
+	 * bUploadPalette is the exact flag CopyDirtyPalette tests before
+	 * its no-side-effect return-0 path. */
+	uPaletteCopyBytes = bUploadPalette
+		? CopyDirtyPalette(pDmaInfo->Pal, pInfo->Pal) : 0;
 	(void)uPaletteCopyBytes;
 	if (!bDirectMain)
-		memcpy(pDmaInfo->uMain8, pInfo->uMain8,
-			sizeof(pDmaInfo->uMain8)+sizeof(pDmaInfo->uSub8)+sizeof(pDmaInfo->uAttrib8));
-	else
-		memcpy(pDmaInfo->uMain8, pInfo->uMain8, sizeof(pDmaInfo->uMain8));
-#endif
-
-	/* Per-slot staging dirtiness is distinct from GS-upload dirtiness. */
-	if (bUploadPalette)
 	{
-		memset(m_uPaletteDirty, 0, sizeof(m_uPaletteDirty));
-		m_nPaletteDirty = 0;
-		m_bPaletteDirty = FALSE;
+		/* AURORA_TOPGEAR_GS_LINE_PAYLOAD_COPY_V4_20260917 */
+		memcpy(pDmaInfo->uMain8, pInfo->uMain8,
+			sizeof(pDmaInfo->uMain8) + sizeof(pDmaInfo->uSub8) +
+			sizeof(pDmaInfo->uAttrib8));
 	}
+	else
+	{
+		memcpy(pDmaInfo->uMain8, pInfo->uMain8,
+			sizeof(pDmaInfo->uMain8));
+	}
+#endif
+	pExecList = bUploadPalette ? &m_DmaListWithPalette : &m_DmaList;
 
-	pExecList = bUploadPalette ? &m_DmaListWithPalette[uSlot] : &m_DmaList[uSlot];
     PROF_ENTER("SNPPUBlendExec");
-    _SNPPUBlendSetParm(pExecList, iLine, uFixedColor32, bAddSub, uIntensity, bDirectMain);
+
+    // set parameters of dma-list
+    _SNPPUBlendSetParm(pExecList, iLine, uFixedColor32, bAddSub,
+		uIntensity, bDirectMain);
+
     PROF_LEAVE("SNPPUBlendExec");
 
-#if !SNDBG_LOG
-    PROF_ENTER("SNPPUGS");
-    DmaSyncGIF();
-    PROF_LEAVE("SNPPUGS");
-#endif
-
+    // transfer render ilst
 #if SNDBG_LOG
 	{
 		Uint32 uStart = ProfCtrGetCycle();
 		DmaExecGIFChain(pExecList->Data);
 		_SNPPUGSDiag.KickCycles += ProfCtrGetCycle() - uStart;
 		_SNPPUGSDiag.Lines++;
-		if (bApplyIntensity) _SNPPUGSDiag.IntensityLines++;
-		if (bDirectMain) _SNPPUGSDiag.DirectMainLines++;
+		if (bApplyIntensity)
+			_SNPPUGSDiag.IntensityLines++;
+		if (bDirectMain)
+			_SNPPUGSDiag.DirectMainLines++;
 	}
 #else
     DmaExecGIFChain(pExecList->Data);
 #endif
-	m_uLastDmaSlot = uSlot;
-	m_uDmaSlot = uSlot ^ 1u;
+
 }
+
+
+
 
 void SNPPUBlendGS::Clear(SNPPUBlendInfoT *pInfo, Int32 iLine)
 {
@@ -1148,7 +1151,3 @@ void SNPPUBlendGS::Clear(SNPPUBlendInfoT *pInfo, Int32 iLine)
 
 
 #endif
-
-/* AURORA_SNES_RENDERER_PERF_V8_FINAL_20260922
- * V2/V3/V4/V7 audit-only; V1/V5/V6 exact host-work reductions.
- * Safe Frameskip policy and emulated timing/event order are outside this patch. */

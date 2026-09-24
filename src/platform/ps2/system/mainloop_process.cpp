@@ -443,13 +443,7 @@ Bool MainLoopProcess()
                 /* AURORA_PD_NTSC_5994_CLOCK_V1_20260822
                  * Phase is rational; all products stay below ~61 million. */
                 static Uint32 sPdPhase = 0;
-                /* AURORA_V4_4_BUILD_FIX_32X_VIDEO_FIRST_20260830
-                 * Only 32X uses this recovery latch. */
-                static Int32 sPd32xAudioProtectFrames = 0;
-
                 Bool bDirectSega;
-                Bool bIs32x;
-                Bool b32xSacrificeAudio;
                 Int32 executeFrames = 1;
 
                 PicoDriveBridge_SetRegion((int)g_SnesForceRegion);
@@ -461,21 +455,6 @@ Bool MainLoopProcess()
 
                 bDirectSega =
                     PicoDriveBridge_CanDirectGsVideo() ? TRUE : FALSE;
-
-                bIs32x = PicoDriveBridge_Is32X() ? TRUE : FALSE;
-                if (!bIs32x)
-                    sPd32xAudioProtectFrames = 0;
-                else if (bSafeSkip)
-                    sPd32xAudioProtectFrames = 2;
-
-                b32xSacrificeAudio =
-                    (bIs32x &&
-                     (bSafeSkip || sPd32xAudioProtectFrames > 0))
-                    ? TRUE : FALSE;
-
-                if (bIs32x && !bSafeSkip &&
-                    sPd32xAudioProtectFrames > 0)
-                    --sPd32xAudioProtectFrames;
 
                 if (NetInput.eGameState == NETPLAY_GAMESTATE_IDLE &&
                     /* AURORA_PD_HOST_CADENCE_ALL_SEGA_V6_GATE_20260821 */
@@ -572,13 +551,6 @@ Bool MainLoopProcess()
                          iPdFrame + 1 < executeFrames) ? TRUE : FALSE;
                     /* AURORA_ASYNC_CDDA_VIDEO_ABSOLUTE_V4_20260830
                      * Safe Frameskip is NEVER an I/O permission window now. */
-
-                    /* 32X ONLY: preserve game/PWM timing, drop only produced
-                     * audio when recovering video or on a hidden burst frame. */
-                    if (bIs32x)
-                        PicoDriveBridge_Set32xAudioSacrifice(
-                            (b32xSacrificeAudio || bCadenceDiscard)
-                            ? true : false);
 
                     PicoDriveBridge_SetSkipVideo(
                         (bCadenceDiscard || bSafeSkip) ? true : false);
