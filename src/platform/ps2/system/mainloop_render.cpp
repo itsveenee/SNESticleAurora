@@ -100,6 +100,13 @@ static Uint32 s_SafeFrameskipPeriod = 0;
 static Uint32 s_SafeFrameskipSamples[3] = { 0, 0, 0 };
 static Uint32 s_SafeFrameskipSampleCount = 0;
 static Uint32 s_SafeFrameskipSamplePos = 0;
+/* AURORA_SAFE_FRAMESKIP_GLOBAL_FLICKER_PHASE_GUARD_V1_20260923
+ * Level 1 only, all cores: periodically swap one skipped/presented pair so
+ * intentional every-other-frame flicker cannot phase-lock to the hidden
+ * frame. Reset phase state whenever the active core changes. */
+static Uint32 s_SafeFrameskipFlickerSkipCount = 0;
+static Bool   s_SafeFrameskipFlickerCompensate = FALSE;
+static const void *s_SafeFrameskipFlickerSystem = NULL;
 /* AURORA_EXTREME_CD_VIDEO_FIRST_V1_20260830
  * One-shot request raised only by a CDDA cache/hunk miss. */
 static Bool s_SafeFrameskipCdAudioWindowRequested = FALSE;
@@ -198,6 +205,8 @@ void MainLoopSafeFrameskipSetLevel(Int32 level)
     /* AURORA_EXTREME_CD_VIDEO_FIRST_V1_20260830 */
     s_SafeFrameskipCdAudioWindowRequested = FALSE;
     _MainLoopSafeFrameskipResetTiming();
+    s_SafeFrameskipFlickerSkipCount = 0;
+    s_SafeFrameskipFlickerCompensate = FALSE;
 }
 
 Bool MainLoopSafeFrameskipGetEnabled(void)
@@ -247,13 +256,30 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
     if (!allowed || s_SafeFrameskipLevel <= 0)
     {
         s_SafeFrameskipCdAudioWindowRequested = FALSE;
+        s_SafeFrameskipFlickerSkipCount = 0;
+        s_SafeFrameskipFlickerCompensate = FALSE;
         _MainLoopSafeFrameskipResetTiming();
         return FALSE;
+    }
+
+    /* Global level-1 guard, but phase state must never cross cores. */
+    if ((const void *)_pSystem != s_SafeFrameskipFlickerSystem)
+    {
+        s_SafeFrameskipFlickerSystem = (const void *)_pSystem;
+        s_SafeFrameskipFlickerSkipCount = 0;
+        s_SafeFrameskipFlickerCompensate = FALSE;
+    }
+    if (s_SafeFrameskipLevel != 1)
+    {
+        s_SafeFrameskipFlickerSkipCount = 0;
+        s_SafeFrameskipFlickerCompensate = FALSE;
     }
 
     if (s_SafeFrameskipCdAudioWindowRequested)
     {
         s_SafeFrameskipCdAudioWindowRequested = FALSE;
+        s_SafeFrameskipFlickerSkipCount = 0;
+        s_SafeFrameskipFlickerCompensate = FALSE;
 
         /* AURORA_EXTREME_CD_VIDEO_FIRST_V2_20260830
          * CDDA may spend Safe Frameskip, but never bypass max_skip. */
@@ -312,36 +338,57 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
      * limited by max_skip. Here the menu level IS max_skip. */
     /* AURORA_V13: tolerate ordinary scheduling jitter; catch up only
      * once host debt exceeds 1.25 learned VBlank periods. */
-    if (diff < -target)
+    if (s_SafeFrameskipLevel == 1 &&
+        s_SafeFrameskipFlickerCompensate &&
+        diff < -target)
+    {
+        s_SafeFrameskipFlickerCompensate = FALSE;
+        s_SafeFrameskipConsecutive = 1;
+        skip = TRUE;
+    }
+    else if (diff < -target)
     {
         if (s_SafeFrameskipConsecutive < (Uint32)s_SafeFrameskipLevel)
         {
-            ++s_SafeFrameskipConsecutive;
-            skip = TRUE;
+            if (s_SafeFrameskipLevel == 1)
+            {
+                ++s_SafeFrameskipFlickerSkipCount;
+                if (s_SafeFrameskipFlickerSkipCount >= 4u)
+                {
+                    s_SafeFrameskipFlickerSkipCount = 0;
+                    s_SafeFrameskipFlickerCompensate = TRUE;
+                    s_SafeFrameskipConsecutive = 0;
+                    skip = FALSE;
+                }
+                else
+                {
+                    ++s_SafeFrameskipConsecutive;
+                    skip = TRUE;
+                }
+            }
+            else
+            {
+                ++s_SafeFrameskipConsecutive;
+                skip = TRUE;
+            }
         }
         else
         {
-            /* AURORA_SAFE_FRAMESKIP_UNSTICK_V1_20260907
-             *
-             * We have spent max_skip consecutive catch-up frames, so this
-             * frame is a hard presentation boundary. The previous rebase used
-             * `now` BEFORE the recovery frame and then advanced aim again at
-             * the bottom of this function. Any latency in that forced frame
-             * could instantly recreate the old debt and latch Auto into
-             * repeated skip bursts.
-             *
-             * Reset only transient scheduler state. The calibrated VBlank
-             * samples/period stay intact; the next eligible tick seeds aim
-             * from the real post-presentation host time. This is the same
-             * debt-clearing effect that manually toggling Safe Frameskip
-             * Off/On had, but it now happens automatically at max_skip. */
-            _MainLoopSafeFrameskipResetTiming();
-            return FALSE;
+            /* AURORA_SAFE_FRAMESKIP_SUSTAINED_DEBT_REFERENCE_V1_20260923
+             * max_skip forces a PRESENTATION boundary, not a timing reset.
+             * Keep Aim alive so sustained load can resume skipping immediately
+             * on the next eligible tick: level 1 becomes S/P/S/P instead of
+             * S/P/P/S/P/P. */
+            s_SafeFrameskipConsecutive = 0;
+            skip = FALSE;
         }
     }
     else
     {
         s_SafeFrameskipConsecutive = 0;
+        /* Slowdown ended: do not manufacture a compensation skip later. */
+        s_SafeFrameskipFlickerSkipCount = 0;
+        s_SafeFrameskipFlickerCompensate = FALSE;
     }
 
     /* PicoDrive: don't go in debt too much. Keep the ideal clock no more than
