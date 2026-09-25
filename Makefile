@@ -1054,10 +1054,7 @@ define RUN_LINK
 	name=$$(basename "$(1)"); \
 	start=$$(date +%s%N); \
 	printf "[ LD    ] %-23s [ linking/LTO ... ]\n" "$$name"; \
-	$(2) -v > "$$log" 2>&1 & pid=$$!; \
-	tail -n +1 -f --pid=$$pid "$$log" & tailpid=$$!; \
-	if wait $$pid; then rc=0; else rc=$$?; fi; \
-	wait $$tailpid 2>/dev/null || true; \
+	if $(2) -v > "$$log" 2>&1; then rc=0; else rc=$$?; fi; \
 	end=$$(date +%s%N); \
 	elapsed=$$(awk "BEGIN { printf \"%.2f\", ($$end - $$start) / 1000000000 }"); \
 	reset=""; green=""; yellow=""; red=""; \
@@ -1142,14 +1139,19 @@ $(QUICKNES_LIB): FORCE_QUICKNES
 .PHONY: FORCE_PICODRIVE
 FORCE_PICODRIVE:
 
-$(PICODRIVE_LIB): FORCE_PICODRIVE
+PICODRIVE_CONFIG_STAMP := $(OBJ_DIR)/.picodrive-no32x-v4
+
+$(PICODRIVE_CONFIG_STAMP): | $(OBJ_DIR)
+	@rm -f "$(PICODRIVE_LIB)"
+	@touch "$@"
+
+$(PICODRIVE_LIB): FORCE_PICODRIVE $(PICODRIVE_CONFIG_STAMP)
 	@printf '[ PicoDrive ] building PS2 static core (32X disabled)\n'
 	# AURORA_PICODRIVE_HOT_LAYOUT_RECOVERY_FINAL_V1_20260922:
 	# keep -ffunction-sections/-fdata-sections on Aurora itself, but restore
 	# PicoDrive's earlier contiguous hot-code layout for the EE/R5900.
 	# AURORA_NO_32X_ELF_V4_20260921: ar rcs does not remove members that disappeared from OBJS.
 	# Delete the archive first so no pre-V4 32X/SH2 member can survive.
-	@rm -f "$(PICODRIVE_LIB)"
 	@$(MAKE) -C "$(PICODRIVE_DIR)" -f Makefile.libretro \
 		platform=ps2 CC="$(EE_CC) $(PICODRIVE_PS2_SAFE_FLAGS) $(PICODRIVE_OPLL_NS_FLAGS)" AR="$(PICODRIVE_AR)" PS2DEV="$(PS2DEV)" PS2SDK="$(PS2SDK)" use_libchdr=0 no_32x=1 STATIC_LINKING=0 STATIC_LINKING_LINK=1 all
 

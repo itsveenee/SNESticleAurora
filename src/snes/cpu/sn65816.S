@@ -288,21 +288,25 @@
 		bnel	t0,zr,2f			;\
 		addiu	R_Cycles,R_Cycles,-SNCPU_CYCLE_FAST ;\
 2:
+/* AURORA_DKC_CPU_ADC_DELAY_V1_20260924
+ * Move the existing V-clear from helper entry into each JAL delay
+ * slot. Same architectural point; one less R5900 instruction per
+ * ADC/SBC helper call. */
 #define SNCPU_ADC8(_dest,_src)					\
 		jal		_SNCPU_ADC8						;\
-        nop
+        andi	R_P,R_P,SNCPU_FLAG_V ^ 0xFF
 
 #define SNCPU_ADC16(_dest,_src)					\
 		jal		_SNCPU_ADC16					;\
-        nop
+        andi	R_P,R_P,SNCPU_FLAG_V ^ 0xFF
 
 #define SNCPU_SBC8(_dest,_src)					\
 		jal		_SNCPU_SBC8						;\
-        nop
+        andi	R_P,R_P,SNCPU_FLAG_V ^ 0xFF
 
 #define SNCPU_SBC16(_dest,_src)					\
 		jal		_SNCPU_SBC16					;\
-        nop
+        andi	R_P,R_P,SNCPU_FLAG_V ^ 0xFF
 
 
 
@@ -764,8 +768,13 @@
 _SNCPU_Write8:
 		srl		t0,R_Addr,SNCPU_BANK_SHIFT				// t0 = bank 
 
-		beq		t0,zr,_SNCPU_Write8ZeroBank
-        sll		t0,t0,4									// t0 = (bank << 4) 
+		/* AURORA_DKC_CPU_PAGE0_BEQL_V1_20260924
+		 * Descriptor zero is the hot direct-page/stack/WRAM window.
+		 * BEQL executes the already-required pMem load only when taken;
+		 * nonzero descriptors keep the original SLL path. */
+		beql		t0,zr,_SNCPU_Write8ZeroBank
+        lw      t1,SNCPU_pMem(R_pCpu)
+        sll		t0,t0,4									// t0 = (bank << 4)
 
         addu	t0,t0,R_pCpu							// t0 -> Bank[bank]
 
@@ -782,12 +791,11 @@ _SNCPU_Write8:
         sb		R_Data, 0(t0)							// load byte unsigned
         
 
+/* AURORA_DKC_CPU_BANK00_DELAY_V1_20260924: address formation occupies the existing trap-check delay slot. */
 _SNCPU_Write8ZeroBank:
-        lw      t1,SNCPU_pMem(R_pCpu)
         beq     t1,zr,_SNCPU_Write8ZeroBankTrap
-        nop
-        addiu   R_Cycles,R_Cycles,-SNCPU_CYCLE_SLOW
         addu    t0,t1,R_Addr
+        addiu   R_Cycles,R_Cycles,-SNCPU_CYCLE_SLOW
         jr      ra
         sb      R_Data,0(t0)
 
@@ -981,7 +989,8 @@ _SNCPU_Write16Wrap16:
 _SNCPU_Read8:
 		srl		t0,R_Addr,SNCPU_BANK_SHIFT				// t0 = bank 
         
-        beq		t0,zr,_SNCPU_Read8ZeroBank
+        beql		t0,zr,_SNCPU_Read8ZeroBank
+        lw      t1,SNCPU_pMem(R_pCpu)
         sll		t0,t0,4									// t0 = (bank << 4) & bank mask
 
         addu	t0,t0,R_pCpu							// t0 -> Bank[bank]
@@ -999,11 +1008,9 @@ _SNCPU_Read8:
 
 
 _SNCPU_Read8ZeroBank:
-        lw      t1,SNCPU_pMem(R_pCpu)
         beq     t1,zr,_SNCPU_Read8ZeroBankTrap
-        nop
-        addiu   R_Cycles,R_Cycles,-SNCPU_CYCLE_SLOW
         addu    t0,t1,R_Addr
+        addiu   R_Cycles,R_Cycles,-SNCPU_CYCLE_SLOW
         jr      ra
         lbu     R_Data,0(t0)
 
@@ -1647,7 +1654,6 @@ _SNCPU_DPMaskDone:
 //
 
 _SNCPU_ADC8:
-        andi	R_P,R_P,SNCPU_FLAG_V ^ 0xFF		 // clear overflow flag
 		move	t0,R_t2						     // t0 = target
         addu	R_t2,R_t2,R_t1					 // dest = target + src
         addu	R_t2,R_t2,R_fC					 // dest+= carry
@@ -1668,7 +1674,6 @@ _SNCPU_ADC8:
 
 
 _SNCPU_ADC16:
-        andi	R_P,R_P,SNCPU_FLAG_V ^ 0xFF		
 		move	t0,R_t2						
         addu	R_t2,R_t2,R_t1				
         addu	R_t2,R_t2,R_fC					 // dest+= carry
@@ -1690,7 +1695,6 @@ _SNCPU_ADC16:
 
 
 _SNCPU_SBC8:
-        andi	R_P,R_P,SNCPU_FLAG_V ^ 0xFF		
 		move	t0,R_t2						
         addu	R_t2,R_t2,R_t1				
         addu	R_t2,R_t2,R_fC					 // dest+= carry
@@ -1710,7 +1714,6 @@ _SNCPU_SBC8:
 		nop
 
 _SNCPU_SBC16:
-        andi	R_P,R_P,SNCPU_FLAG_V ^ 0xFF		
 		move	t0,R_t2						
         addu	R_t2,R_t2,R_t1				
         addu	R_t2,R_t2,R_fC					 // dest+= carry

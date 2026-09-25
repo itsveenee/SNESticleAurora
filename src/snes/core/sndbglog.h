@@ -30,7 +30,11 @@
 #endif
 
 #ifndef SNPPU_BG_CACHE
-#define SNPPU_BG_CACHE 0
+/* AURORA_DKC_THROUGHPUT_V1_BG_CACHE_20260924
+ * BG reuses the same full-VRAM physical 2/4bpp decoded CHR cache
+ * already resident for OBJ. VRAM writes already invalidate this
+ * shared cache through UpdateVRAMRange(). */
+#define SNPPU_BG_CACHE 1
 #endif
 
 #if SNDBG_DEEP && !SNDBG_LOG
