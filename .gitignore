@@ -2,6 +2,8 @@
 build/
 refs/
 logs/
+.snesticle_rebuild/
+.snesticle_rebuild_v2/
 
 # Compiled/generated files
 *.o

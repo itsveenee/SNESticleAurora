@@ -385,7 +385,25 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
          * Force exactly one presentation, but mark it as guard-only so
          * _AfterFlip cannot mistake it for recovered performance and rebase
          * away genuine timing debt. */
-        if (s_SafeFrameskipFlickerSkipCount >= 4u)
+        /* AURORA_MD_SAFE_FRAMESKIP_BURST_CAP_V1_20260926
+         * PicoDrive already converts between emulated cadence and the GS host
+         * cadence (including 0/2 ExecuteFrame host ticks when required).
+         * Stacking the global four-hidden-frame burst on top of that scheduler
+         * can make plain Mega Drive/Genesis presentation visibly uneven on a
+         * setup that accumulates host timing debt.
+         *
+         * Preserve Safe Frameskip catch-up on Mega Drive, but restore the old
+         * level-1 rhythm there: at most one hidden presentation before a real
+         * presentation boundary (S/P/S/P under sustained debt). SMS/GG retain
+         * the current global four-frame cap. Sega CD is already excluded from
+         * normal Safe Frameskip by the realtime-CD pacing gate.
+         */
+        const Uint32 maxHiddenBurst =
+            (_pSystem == _pSega &&
+             !PicoDriveBridge_Is8Bit() &&
+             !PicoDriveBridge_IsSegaCD()) ? 1u : 4u;
+
+        if (s_SafeFrameskipFlickerSkipCount >= maxHiddenBurst)
         {
             s_SafeFrameskipFlickerSkipCount = 0;
             s_SafeFrameskipFlickerForcedPresent = TRUE;

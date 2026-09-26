@@ -225,19 +225,30 @@ const char *MainLoopMdPadGetLayoutName(void)
 	return _MainLoop_MdPadLayout == MAINLOOP_MD_PAD_BCA ? "BCA" : "ABC";
 }
 
-static Bool _MainLoopTurboIsOn(Uint32 uFrame)
-{
-    Uint32 shift = (Uint32)_MainLoop_TurboSpeed;
-    Uint32 elapsed = uFrame - _MainLoop_TurboPhaseBase;
-    /* Every speed selection begins in the ON half of its cadence. */
-    return (((elapsed >> shift) & 1U) == 0U) ? TRUE : FALSE;
-}
-
 static Bool _MainLoopTurboHostIsOn(void)
 {
     Uint32 shift = (Uint32)_MainLoop_TurboSpeed;
     Uint32 elapsed = _MainLoop_TurboHostFrame - _MainLoop_TurboHostPhaseBase;
     return (((elapsed >> shift) & 1U) == 0U) ? TRUE : FALSE;
+}
+
+/* AURORA_R2_TURBO_HOSTCLOCK_STABILITY_V1_20260926
+ * R2 turbo is frontend input behavior, so keep its oscillator on the
+ * frontend clock: exactly one phase step per MainLoopProcess().
+ *
+ * This matters especially for PicoDrive, whose host-cadence converter may
+ * execute 0 or 2 emulated frames during one GS host tick. Using GetFrame()
+ * there makes turbo pulse irregularly even though physical input is sampled
+ * once per host tick. SNES also benefits from being independent of emulated
+ * frame accounting and Safe Frameskip presentation decisions.
+ *
+ * Keep the uFrame parameter for the existing internal call sites; it is
+ * intentionally no longer the turbo timebase.
+ */
+static Bool _MainLoopTurboIsOn(Uint32 uFrame)
+{
+    (void)uFrame;
+    return _MainLoopTurboHostIsOn();
 }
 
 static Bool _MainLoop_bSuppressGameInputUntilRelease = FALSE;

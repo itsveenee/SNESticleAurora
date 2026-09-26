@@ -698,7 +698,27 @@ void AuroraTraceRecord(
     else if (s_records_since_commit >= ATR_AUTO_COMMIT)
     {
         write_context_tail(ATR_CTX_AUTO_CHECKPOINT, ATR_CHECKPOINT_TAIL);
-        durable_commit();
+
+        /* AURORA_TRACE_SAMEFRAME_AUTOCOMMIT_GUARD_V1_1_20260926
+         * A polling-heavy CPU loop can generate several 512-record automatic
+         * checkpoints without advancing a single emulated frame.  Once this
+         * frame has already crossed a successful durable close boundary,
+         * closing/reopening the mass: stream again buys no newer frame-level
+         * crash boundary and needlessly exercises PS2 newlib + USB/FAT I/O.
+         *
+         * Preserve the checkpoint payload and flush its bytes, but reserve the
+         * expensive durable close/reopen for the first auto checkpoint after
+         * frame progress. Explicit/high-signal commits are unchanged. */
+        if (s_trace_frame_serial == s_trace_last_durable_serial)
+        {
+            flush_only();
+            if (!s_trace_io_failed)
+                s_records_since_commit = 0;
+        }
+        else
+        {
+            durable_commit();
+        }
     }
 }
 
