@@ -30,12 +30,9 @@
 #endif
 
 #ifndef SNPPU_BG_CACHE
-/* AURORA_REBUILD_BG_DIRECT_FINAL_V2_20260925
- * Final PS2/R5900 policy after hardware A/B:
- * keep BG on the existing optimized direct 2bpp/4bpp decode hot path.
- * OBJ still owns the physical CHR cache and its 4bpp HFlip copy; normal BG
- * avoids the large full-VRAM tag/data traffic. No second cache is allocated. */
-#define SNPPU_BG_CACHE 0
+/* AURORA_RAM_REINVEST_BG_CACHE_V3_20260924
+ * Restore known-good DKC quiet-60FPS local state. */
+#define SNPPU_BG_CACHE 1
 #endif
 
 #if SNDBG_DEEP && !SNDBG_LOG

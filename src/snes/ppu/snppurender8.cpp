@@ -1700,30 +1700,6 @@ static void _SnesPPUTrackMode7DirectColor(Uint8 *pAttrib8, Uint8 uShift,
 
 
 
-
-/* AURORA_BG_COMPOSE_MASK_FASTPATH_V2_20260925
- *
- * Read-only 256-bit mask predicates. SNMaskT already exposes four Uint64
- * words, so this adds no table, buffer or persistent state.
- * The predicates are used only after the renderer creates its own
- * authoritative opacity/window/priority masks. */
-static inline Bool _AuroraBGMaskIsZero(const SNMaskT *pMask)
-{
-	return ((pMask->uMask64[0] |
-	         pMask->uMask64[1] |
-	         pMask->uMask64[2] |
-	         pMask->uMask64[3]) == 0u) ? TRUE : FALSE;
-}
-
-static inline Bool _AuroraBGMaskIsFull(const SNMaskT *pMask)
-{
-	const Uint64 uAll = ~(Uint64)0;
-	return (pMask->uMask64[0] == uAll &&
-	        pMask->uMask64[1] == uAll &&
-	        pMask->uMask64[2] == uAll &&
-	        pMask->uMask64[3] == uAll) ? TRUE : FALSE;
-}
-
 static void _RenderBG8(Uint8 *pLine8, SNMaskT *pLine, SNMaskT *pBGPlane, SNMaskT *pWindow, Uint32 uBitDepth, SNMaskT *pAddSubMask, Uint8 bAddSubMask, SNMaskT *pBGPri, SNMaskT *pExtraMask, Uint32 uPriority, Bool &bRendered, Uint32 uScrollX, SNMaskT *pRenderedMask = NULL)
 {
 	if (uBitDepth!=0)
@@ -1753,21 +1729,6 @@ static void _RenderBG8(Uint8 *pLine8, SNMaskT *pLine, SNMaskT *pBGPlane, SNMaskT
 		// these are the high priority pixels that need to be rendered
 		// they overwrite the lo and hi priority pixels that have already been rendered
 		SNMaskAND(pBGPri, &BGMask, &pBGPlane[SNPPU_BGPLANE_PRI]);
-
-		/* AURORA_BG_COMPOSE_MASK_FASTPATH_V2_20260925
-		 * Empty authoritative coverage makes all work below a no-op.
-		 * Preserve the old first-BG line initialization exactly. */
-		if (_AuroraBGMaskIsZero(&BGMask))
-		{
-			if (pRenderedMask)
-				SNMaskClear(pRenderedMask);
-			if (!bRendered)
-			{
-				memset(pLine8, 0, 256);
-				bRendered = TRUE;
-			}
-			return;
-		}
 
 		switch (uPriority)
 		{
@@ -1845,68 +1806,29 @@ static void _RenderBG8(Uint8 *pLine8, SNMaskT *pLine, SNMaskT *pBGPlane, SNMaskT
 			break;
 		}
 
-		/* Priority resolution can shrink BGMask further. */
-		if (_AuroraBGMaskIsZero(&BGMask))
-		{
-			if (pRenderedMask)
-				SNMaskClear(pRenderedMask);
-			if (!bRendered)
-			{
-				memset(pLine8, 0, 256);
-				bRendered = TRUE;
-			}
-			return;
-		}
-
-		const Bool bAuroraBGMaskFull = _AuroraBGMaskIsFull(&BGMask);
-
 		if (pAddSubMask)
 		{
-			if (bAuroraBGMaskFull)
-			{
-				if (bAddSubMask)
-					SNMaskSet(pAddSubMask);
-				else
-					SNMaskClear(pAddSubMask);
-			}
-			else
-			{
-				SNMaskBool(pAddSubMask, &BGMask, bAddSubMask ? true : false);
-			}
+			// set or reset bits of AddSubMask based on pixels that were rendered
+			SNMaskBool(pAddSubMask, &BGMask, bAddSubMask ? true : false);
 		}
 
 		/* AURORA_V4_MODE34_DIRECT_COLOR_20260915
 		 * Expose the exact post-window/post-priority pixel set when BG1
 		 * Direct Color needs to retain tile palette metadata. */
 		if (pRenderedMask)
-		{
-			if (bAuroraBGMaskFull)
-				SNMaskSet(pRenderedMask);
-			else
-				SNMaskCopy(pRenderedMask, &BGMask);
-		}
+			SNMaskCopy(pRenderedMask, &BGMask);
 
 
 		if (!bRendered)
 		{
-			/* Full coverage overwrites every byte, so _RenderBGData_O's
-			 * preliminary memset(256) is redundant memory traffic. */
-			if (bAuroraBGMaskFull)
-			{
-				PROF_ENTER("_RenderBGData");
-				_RenderBGData(pLine8, (Uint8 *)pBGPlane, &BGMask, uScrollX, 32);
-				PROF_LEAVE("_RenderBGData");
-			}
-			else
-			{
-				PROF_ENTER("_RenderBGData_O");
-				_RenderBGData_O(pLine8, (Uint8 *)pBGPlane, &BGMask, uScrollX, 32);
-				PROF_LEAVE("_RenderBGData_O");
-			}
+			// render it
+			PROF_ENTER("_RenderBGData_O");
+			_RenderBGData_O(pLine8, (Uint8 *)pBGPlane, &BGMask, uScrollX, 32);
+			PROF_LEAVE("_RenderBGData_O");
 			bRendered = TRUE;
-		}
-		else
+		} else
 		{
+			// render it
 			PROF_ENTER("_RenderBGData");
 			_RenderBGData(pLine8, (Uint8 *)pBGPlane, &BGMask, uScrollX, 32);
 			PROF_LEAVE("_RenderBGData");
