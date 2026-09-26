@@ -106,11 +106,6 @@ static Bool   s_SafeFrameskipRecoveryPending = FALSE;
 static Uint32 s_SafeFrameskipTickStart = 0;
 static Uint32 s_SafeFrameskipPreFlip = 0;
 static Uint32 s_SafeFrameskipHealthyFlipRun = 0;
-/* AURORA_SAFE_FRAMESKIP_ONOFF_CATCHUP_V6_20260925
- * ON is automatic/unbounded catch-up, but after four hidden frames one
- * presentation is forced solely to break sprite/flicker phase-lock.
- * That presentation must never erase real timing debt. */
-static Bool s_SafeFrameskipFlickerForcedPresent = FALSE;
 /* AURORA_SAFE_FRAMESKIP_GLOBAL_FLICKER_PHASE_GUARD_V1_20260923
  * Level 1 only, all cores: periodically swap one skipped/presented pair so
  * intentional every-other-frame flicker cannot phase-lock to the hidden
@@ -139,7 +134,6 @@ static void _MainLoopSafeFrameskipResetTiming(void)
     s_SafeFrameskipTickStart = 0;
     s_SafeFrameskipPreFlip = 0;
     s_SafeFrameskipHealthyFlipRun = 0;
-    s_SafeFrameskipFlickerForcedPresent = FALSE;
 }
 
 static void _MainLoopSafeFrameskipLearn(Uint32 delta, Bool gameplay)
@@ -202,32 +196,22 @@ static void _MainLoopSafeFrameskipLearn(Uint32 delta, Bool gameplay)
 
     s_SafeFrameskipSamples[s_SafeFrameskipSamplePos] = delta;
     s_SafeFrameskipSamplePos = (s_SafeFrameskipSamplePos + 1u) % 3u;
-
-    {
-        const Uint32 learnedPeriod = _MainLoopSafeFrameskipMedian3(
-            s_SafeFrameskipSamples[0],
-            s_SafeFrameskipSamples[1],
-            s_SafeFrameskipSamples[2]);
-
-        /* AURORA_SAFE_FRAMESKIP_VBLANK_CAP_REAL_DEBT_V2_1_20260926
-         * Non-gameplay presentations are VBlank-paced and may retrain host
-         * cadence. Gameplay may make the estimate tighter, but NEVER longer:
-         * a missed VBlank is load, not a new refresh rate. */
-        if (!gameplay || learnedPeriod <= s_SafeFrameskipPeriod)
-            s_SafeFrameskipPeriod = learnedPeriod;
-    }
+    s_SafeFrameskipPeriod = _MainLoopSafeFrameskipMedian3(
+        s_SafeFrameskipSamples[0],
+        s_SafeFrameskipSamples[1],
+        s_SafeFrameskipSamples[2]);
 }
 
 Int32 MainLoopSafeFrameskipGetLevel(void)
 {
-    /* V6 compatibility ABI: old callers see only 0=OFF or 1=ON. */
-    return s_SafeFrameskipLevel > 0 ? 1 : 0;
+    return s_SafeFrameskipLevel;
 }
 
 void MainLoopSafeFrameskipSetLevel(Int32 level)
 {
-    /* V6: every historical non-zero level maps to the single ON mode. */
-    s_SafeFrameskipLevel = level > 0 ? 1 : 0;
+    if (level < 0) level = 0;
+    if (level > 9) level = 9;
+    s_SafeFrameskipLevel = level;
     /* AURORA_EXTREME_CD_VIDEO_FIRST_V1_20260830 */
     s_SafeFrameskipCdAudioWindowRequested = FALSE;
     _MainLoopSafeFrameskipResetTiming();
@@ -242,7 +226,10 @@ Bool MainLoopSafeFrameskipGetEnabled(void)
 
 void MainLoopSafeFrameskipSetEnabled(Bool enabled)
 {
-    MainLoopSafeFrameskipSetLevel(enabled ? 1 : 0);
+    if (!enabled)
+        MainLoopSafeFrameskipSetLevel(0);
+    else if (s_SafeFrameskipLevel <= 0)
+        MainLoopSafeFrameskipSetLevel(1);
 }
 
 /* AURORA_EXTREME_CD_VIDEO_FIRST_V1_20260830
@@ -359,52 +346,85 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
      * Int32 interpretation intentionally preserves short counter wraparound. */
     diff = (Int32)(s_SafeFrameskipAim - now);
 
-    /* AURORA_SAFE_FRAMESKIP_MEANINGFUL_DEBT_V7_20260925
+    /* AURORA_SAFE_FRAMESKIP_LEVEL_CADENCE_V5_20260925
      *
-     * ON is still automatic catch-up with no user max-skip ceiling, but only
-     * debt larger than one complete learned host period justifies hiding
-     * another video frame.
+     * The FIRST skip still uses the original full-frame debt threshold below.
+     * Only an already-active burst gets a level-scaled continuation threshold.
      *
-     * Sub-frame lateness is intentionally NOT "paid back" with frameskip.
-     * A presented frame can naturally absorb that residual phase error by
-     * spending less time (or no time) waiting for the next VBlank.  This also
-     * prevents small host jitter or audio-drain cost from sustaining a skip
-     * burst after the expensive scene has already recovered. */
-    const Bool meaningfulDebt = (diff < -target) ? TRUE : FALSE;
+     * FS1/FS2: unchanged, must still be >1 whole frame late.
+     * FS3..FS9: progressively chase smaller residual debt before presenting:
+     *            target/(level-1), reaching 1/8 frame at FS9.
+     *
+     * This makes high settings visibly more aggressive without allowing them
+     * to create a first skip in a healthy/on-time scene. */
+    Int32 burstContinueTarget = target;
+    if (s_SafeFrameskipLevel >= 3)
+    {
+        burstContinueTarget = target / (s_SafeFrameskipLevel - 1);
+        if (burstContinueTarget < 1)
+            burstContinueTarget = 1;
+    }
+
+    const Bool continueBurst =
+        (s_SafeFrameskipRecoveryPending &&
+         s_SafeFrameskipConsecutive > 0u &&
+         diff < -burstContinueTarget) ? TRUE : FALSE;
 
     /* PicoDrive Auto: if more than one target frame late, discard video,
      * limited by max_skip. Here the menu level IS max_skip. */
     /* AURORA_V13: tolerate ordinary scheduling jitter; catch up only
      * once host debt exceeds 1.25 learned VBlank periods. */
-    if (meaningfulDebt)
+    if (s_SafeFrameskipLevel == 1 &&
+        s_SafeFrameskipFlickerCompensate &&
+        diff < -target)
     {
-        /* V6 anti-flicker phase guard.
-         *
-         * Four hidden frames are enough to create a persistent visual phase
-         * lock in games that intentionally alternate sprite visibility.
-         * Force exactly one presentation, but mark it as guard-only so
-         * _AfterFlip cannot mistake it for recovered performance and rebase
-         * away genuine timing debt. */
-        if (s_SafeFrameskipFlickerSkipCount >= 4u)
+        s_SafeFrameskipFlickerCompensate = FALSE;
+        s_SafeFrameskipConsecutive = 1;
+        skip = TRUE;
+    }
+    else if (diff < -target || continueBurst)
+    {
+        if (s_SafeFrameskipConsecutive < (Uint32)s_SafeFrameskipLevel)
         {
-            s_SafeFrameskipFlickerSkipCount = 0;
-            s_SafeFrameskipFlickerForcedPresent = TRUE;
-            s_SafeFrameskipConsecutive = 0;
-            skip = FALSE;
+            if (s_SafeFrameskipLevel == 1)
+            {
+                ++s_SafeFrameskipFlickerSkipCount;
+                if (s_SafeFrameskipFlickerSkipCount >= 4u)
+                {
+                    s_SafeFrameskipFlickerSkipCount = 0;
+                    s_SafeFrameskipFlickerCompensate = TRUE;
+                    s_SafeFrameskipConsecutive = 0;
+                    skip = FALSE;
+                }
+                else
+                {
+                    ++s_SafeFrameskipConsecutive;
+                    skip = TRUE;
+                }
+            }
+            else
+            {
+                ++s_SafeFrameskipConsecutive;
+                skip = TRUE;
+            }
         }
         else
         {
-            ++s_SafeFrameskipFlickerSkipCount;
-            ++s_SafeFrameskipConsecutive;
-            skip = TRUE;
+            /* AURORA_SAFE_FRAMESKIP_SUSTAINED_DEBT_REFERENCE_V1_20260923
+             * max_skip forces a PRESENTATION boundary, not a timing reset.
+             * Keep Aim alive so sustained load can resume skipping immediately
+             * on the next eligible tick: level 1 becomes S/P/S/P instead of
+             * S/P/P/S/P/P. */
+            s_SafeFrameskipConsecutive = 0;
+            skip = FALSE;
         }
     }
     else
     {
         s_SafeFrameskipConsecutive = 0;
+        /* Slowdown ended: do not manufacture a compensation skip later. */
         s_SafeFrameskipFlickerSkipCount = 0;
         s_SafeFrameskipFlickerCompensate = FALSE;
-        s_SafeFrameskipFlickerForcedPresent = FALSE;
     }
 
     /* PicoDrive: don't go in debt too much. Keep the ideal clock no more than
@@ -482,11 +502,8 @@ static void _MainLoopSafeFrameskipAfterFlip(void)
                  (Uint64)presentedWorkDelta <= (Uint64)periodBefore)
                 ? TRUE : FALSE;
 
-            /* Slow gameplay must not teach Safe Frameskip its own slowdown.
-             * Only a frame whose REAL Take()->pre-VSync work fits the current
-             * VBlank budget may refine the gameplay estimate. */
-            if (periodBefore == 0u || healthyRecoveryWork)
-                _MainLoopSafeFrameskipLearn(delta, TRUE);
+            /* Flip-to-flip time remains the only learned video-period ruler. */
+            _MainLoopSafeFrameskipLearn(delta, TRUE);
 
             Bool recoverNow = FALSE;
 
@@ -494,23 +511,10 @@ static void _MainLoopSafeFrameskipAfterFlip(void)
             {
                 /* A real skip invalidates flip-gap cadence as a recovery ruler. */
                 s_SafeFrameskipHealthyFlipRun = 0;
-
-                if (s_SafeFrameskipFlickerForcedPresent)
-                {
-                    /* Phase-break presentation only: preserve Aim/debt. */
-                    recoverNow = FALSE;
-                    s_SafeFrameskipFlickerForcedPresent = FALSE;
-                }
-                else
-                {
-                    recoverNow = healthyRecoveryWork;
-                }
+                recoverNow = healthyRecoveryWork;
             }
-            else if (healthyFlipCadence && healthyRecoveryWork)
+            else if (healthyFlipCadence)
             {
-                /* V4's 75..125% cadence window alone is too permissive:
-                 * moderately slow work can still fall inside it. Never forgive
-                 * Aim debt unless real pre-VSync work also fits one period. */
                 if (s_SafeFrameskipHealthyFlipRun < 2u)
                     ++s_SafeFrameskipHealthyFlipRun;
                 if (s_SafeFrameskipHealthyFlipRun >= 2u)
@@ -537,18 +541,7 @@ static void _MainLoopSafeFrameskipAfterFlip(void)
     }
     else
     {
-        /* AURORA_SAFE_FRAMESKIP_VBLANK_CAP_REAL_DEBT_V2_1_20260926
-         * Menu/browser/black-screen presentations still end in GSK_SyncFlip()
-         * and contain no gameplay workload. Use their flip cadence to learn
-         * the real host VBlank period, while ResetTiming below prevents menu
-         * time itself from becoming gameplay debt. */
-        if (s_SafeFrameskipLastFlip != 0u)
-        {
-            const Uint32 delta = now - s_SafeFrameskipLastFlip;
-            _MainLoopSafeFrameskipLearn(delta, FALSE);
-        }
-        s_SafeFrameskipLastFlip = now;
-        s_SafeFrameskipTickStart = 0;
+        s_SafeFrameskipLastFlip = 0;
     }
 
     if (s_SafeFrameskipLevel <= 0 || !gameplay)

@@ -202,20 +202,10 @@ static void _MainLoopSafeFrameskipLearn(Uint32 delta, Bool gameplay)
 
     s_SafeFrameskipSamples[s_SafeFrameskipSamplePos] = delta;
     s_SafeFrameskipSamplePos = (s_SafeFrameskipSamplePos + 1u) % 3u;
-
-    {
-        const Uint32 learnedPeriod = _MainLoopSafeFrameskipMedian3(
-            s_SafeFrameskipSamples[0],
-            s_SafeFrameskipSamples[1],
-            s_SafeFrameskipSamples[2]);
-
-        /* AURORA_SAFE_FRAMESKIP_VBLANK_CAP_REAL_DEBT_V2_1_20260926
-         * Non-gameplay presentations are VBlank-paced and may retrain host
-         * cadence. Gameplay may make the estimate tighter, but NEVER longer:
-         * a missed VBlank is load, not a new refresh rate. */
-        if (!gameplay || learnedPeriod <= s_SafeFrameskipPeriod)
-            s_SafeFrameskipPeriod = learnedPeriod;
-    }
+    s_SafeFrameskipPeriod = _MainLoopSafeFrameskipMedian3(
+        s_SafeFrameskipSamples[0],
+        s_SafeFrameskipSamples[1],
+        s_SafeFrameskipSamples[2]);
 }
 
 Int32 MainLoopSafeFrameskipGetLevel(void)
@@ -359,24 +349,23 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
      * Int32 interpretation intentionally preserves short counter wraparound. */
     diff = (Int32)(s_SafeFrameskipAim - now);
 
-    /* AURORA_SAFE_FRAMESKIP_MEANINGFUL_DEBT_V7_20260925
+    /* AURORA_SAFE_FRAMESKIP_ONOFF_CATCHUP_V6_20260925
      *
-     * ON is still automatic catch-up with no user max-skip ceiling, but only
-     * debt larger than one complete learned host period justifies hiding
-     * another video frame.
-     *
-     * Sub-frame lateness is intentionally NOT "paid back" with frameskip.
-     * A presented frame can naturally absorb that residual phase error by
-     * spending less time (or no time) waiting for the next VBlank.  This also
-     * prevents small host jitter or audio-drain cost from sustaining a skip
-     * burst after the expensive scene has already recovered. */
-    const Bool meaningfulDebt = (diff < -target) ? TRUE : FALSE;
+     * First skip: unchanged and conservative (> one full learned period late).
+     * Active catch-up: keep discarding presentation while ANY real negative
+     * Aim debt remains.  This is what makes ON preserve emulation-time cadence
+     * instead of exposing slowdown as long as discarded-video execution can
+     * recover enough host time. */
+    const Bool continueBurst =
+        (s_SafeFrameskipRecoveryPending &&
+         s_SafeFrameskipConsecutive > 0u &&
+         diff < 0) ? TRUE : FALSE;
 
     /* PicoDrive Auto: if more than one target frame late, discard video,
      * limited by max_skip. Here the menu level IS max_skip. */
     /* AURORA_V13: tolerate ordinary scheduling jitter; catch up only
      * once host debt exceeds 1.25 learned VBlank periods. */
-    if (meaningfulDebt)
+    if (diff < -target || continueBurst)
     {
         /* V6 anti-flicker phase guard.
          *
@@ -482,11 +471,8 @@ static void _MainLoopSafeFrameskipAfterFlip(void)
                  (Uint64)presentedWorkDelta <= (Uint64)periodBefore)
                 ? TRUE : FALSE;
 
-            /* Slow gameplay must not teach Safe Frameskip its own slowdown.
-             * Only a frame whose REAL Take()->pre-VSync work fits the current
-             * VBlank budget may refine the gameplay estimate. */
-            if (periodBefore == 0u || healthyRecoveryWork)
-                _MainLoopSafeFrameskipLearn(delta, TRUE);
+            /* Flip-to-flip time remains the only learned video-period ruler. */
+            _MainLoopSafeFrameskipLearn(delta, TRUE);
 
             Bool recoverNow = FALSE;
 
@@ -506,11 +492,8 @@ static void _MainLoopSafeFrameskipAfterFlip(void)
                     recoverNow = healthyRecoveryWork;
                 }
             }
-            else if (healthyFlipCadence && healthyRecoveryWork)
+            else if (healthyFlipCadence)
             {
-                /* V4's 75..125% cadence window alone is too permissive:
-                 * moderately slow work can still fall inside it. Never forgive
-                 * Aim debt unless real pre-VSync work also fits one period. */
                 if (s_SafeFrameskipHealthyFlipRun < 2u)
                     ++s_SafeFrameskipHealthyFlipRun;
                 if (s_SafeFrameskipHealthyFlipRun >= 2u)
@@ -537,18 +520,7 @@ static void _MainLoopSafeFrameskipAfterFlip(void)
     }
     else
     {
-        /* AURORA_SAFE_FRAMESKIP_VBLANK_CAP_REAL_DEBT_V2_1_20260926
-         * Menu/browser/black-screen presentations still end in GSK_SyncFlip()
-         * and contain no gameplay workload. Use their flip cadence to learn
-         * the real host VBlank period, while ResetTiming below prevents menu
-         * time itself from becoming gameplay debt. */
-        if (s_SafeFrameskipLastFlip != 0u)
-        {
-            const Uint32 delta = now - s_SafeFrameskipLastFlip;
-            _MainLoopSafeFrameskipLearn(delta, FALSE);
-        }
-        s_SafeFrameskipLastFlip = now;
-        s_SafeFrameskipTickStart = 0;
+        s_SafeFrameskipLastFlip = 0;
     }
 
     if (s_SafeFrameskipLevel <= 0 || !gameplay)

@@ -1097,9 +1097,11 @@ static const char *_VideoMmceStatus()
 
 static const char *_VideoSafeFrameskipStatus()
 {
-    /* AURORA_SAFE_FRAMESKIP_BINARY_UI_DIRECT_LEVEL_V1_20260925
-     * Display the exact state consumed by MainLoopSafeFrameskipTake(). */
-    return MainLoopSafeFrameskipGetLevel() > 0 ? "On" : "Off";
+    static const char *const names[10] =
+        { "Off", "1", "2", "3", "4", "5", "6", "7", "8", "9" };
+    Int32 level = MainLoopSafeFrameskipGetLevel();
+    if (level < 0 || level > 9) level = 1;
+    return names[level];
 }
 
 static const char *_VideoFakeSRAMStatus()
@@ -1600,11 +1602,14 @@ void CVideoScreen::Input(Uint32 buttons, Uint32 trigger)
 			PicoDriveBridge_SetGgZoom(!PicoDriveBridge_GetGgZoom());
 			break;
 		case 8: /* Safe Frameskip: Off, On */
-			/* AURORA_SAFE_FRAMESKIP_BINARY_UI_DIRECT_LEVEL_V1_20260925
-			 * Toggle the exact scheduler level: 0=Off, 1=On. */
-			MainLoopSafeFrameskipSetLevel(
-				MainLoopSafeFrameskipGetLevel() > 0 ? 0 : 1);
+		{
+			Int32 level = MainLoopSafeFrameskipGetLevel();
+			level += (dir > 0) ? 1 : -1;
+			if (level > 9) level = 0;
+			if (level < 0) level = 9;
+			MainLoopSafeFrameskipSetLevel(level);
 			break;
+		}
 
 		case 50: /* Menu Music ON/OFF. */
 			BgmSetEnabled(!BgmIsEnabled());

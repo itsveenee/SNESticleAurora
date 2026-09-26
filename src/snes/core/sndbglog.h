@@ -30,11 +30,12 @@
 #endif
 
 #ifndef SNPPU_BG_CACHE
-/* AURORA_DKC_THROUGHPUT_V1_BG_CACHE_20260924
- * BG reuses the same full-VRAM physical 2/4bpp decoded CHR cache
- * already resident for OBJ. VRAM writes already invalidate this
- * shared cache through UpdateVRAMRange(). */
-#define SNPPU_BG_CACHE 1
+/* AURORA_REBUILD_BG_DIRECT_FINAL_V2_20260925
+ * Final PS2/R5900 policy after hardware A/B:
+ * keep BG on the existing optimized direct 2bpp/4bpp decode hot path.
+ * OBJ still owns the physical CHR cache and its 4bpp HFlip copy; normal BG
+ * avoids the large full-VRAM tag/data traffic. No second cache is allocated. */
+#define SNPPU_BG_CACHE 0
 #endif
 
 #if SNDBG_DEEP && !SNDBG_LOG
