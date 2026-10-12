@@ -13,12 +13,12 @@ import sys
 import tarfile
 import tempfile
 
-EXPECTED_HEAD = "02ee59546765b50d88d50210bb8ff5188ee4af2f"
+EXPECTED_HEAD = "9807e82d2138f3a1576b7e0b316f9736ecc20d96"
 EXPECTED_BLOBS = {
     "Makefile.common": "f10aecd5b405dfcb664ac2fe8da2e08f0ea86252",
-    "mednafen/pce_fast/huc6280.c": "df7e37c775d494efc12f66e7e56661c0f50579c7",
+    "mednafen/pce_fast/huc6280.c": "535df65b8b6e84ef165ef81b8be2fd568f0d47b4",
     "mednafen/pce_fast/huc6280.h": "58878a560274e09f1124bd3fce532d715ab030f4",
-    "mednafen/pce_fast/vdc.c": "ab26711b3b61c2ab714a2d397d4d9427d1b57034",
+    "mednafen/pce_fast/vdc.c": "b2c36daf22656ad34b818e186000752be517afc1",
     "mednafen/pce_fast/psg.c": "7ff88864bc5fcd96c914e08fc058e32339513c44",
     "mednafen/sound/Blip_Buffer.c": "556575f66ed74b6667711c4208f7f01dced4bfe8",
     "mednafen/include/blip/Blip_Buffer.h": "326c3ba39b280d7bfc9b99acb55658b43f901400",

@@ -63,18 +63,42 @@ jobs:
           test "$(git config -f .gitmodules --get submodule.src/third_party/gpsp.branch)" = "master"
 
 
+          # AURORA_CONTINUOUS_VERIFY_GITLINK_V1_20261012
+          # Validate exact submodule commits pinned by THIS superproject commit.
+          # A newer fork HEAD is NOT automatically a correct checkout.
+          verify_gitlink() {
+            local path="$1" expected actual
+            expected="$(git ls-tree HEAD -- "$path" | awk '$1 == "160000" && $2 == "commit" {print $3}')"
+            if [ -z "$expected" ]; then
+              echo "::error::Missing gitlink in superproject HEAD: $path"
+              return 1
+            fi
+            actual="$(git -C "$path" rev-parse HEAD)" || return 1
+            if [ "$actual" != "$expected" ]; then
+              echo "::error::Submodule $path: checkout=$actual, superproject=$expected"
+              return 1
+            fi
+            echo "Validated $path @ $actual"
+          }
+          for module in \
+            src/third_party/quicknes \
+            src/third_party/picodrive \
+            src/third_party/beetle-pce-fast \
+            src/third_party/fceumm-fds \
+            src/third_party/gambatte \
+            src/third_party/gpsp; do
+            verify_gitlink "$module"
+          done
+
           echo "Recursive submodules:"
           git submodule status --recursive
           echo "Beetle PCE Fast commit:"
           git -C src/third_party/beetle-pce-fast rev-parse HEAD
-          test "$(git -C src/third_party/beetle-pce-fast rev-parse HEAD)" = "02ee59546765b50d88d50210bb8ff5188ee4af2f"
           python3 tools/prepare_beetle_pce_fast_sources.py --source src/third_party/beetle-pce-fast --check-source
           echo "FCEUmm/FDS commit:"
           git -C src/third_party/fceumm-fds rev-parse HEAD
-          test "$(git -C src/third_party/fceumm-fds rev-parse HEAD)" = "dc77e3ca4baad08f0023f61dba9846550735b74d"
           echo "gpSP commit:"
           git -C src/third_party/gpsp rev-parse HEAD
-          test "$(git -C src/third_party/gpsp rev-parse HEAD)" = "52db8b129b46d97caf3887fca6fe4e52c93ba9d1"
 
 
       # AURORA_CONTINUOUS_PICODRIVE_SOURCE_V4_2
