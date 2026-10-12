@@ -333,18 +333,139 @@ def patch_once(path: Path, old: str, new: str, count: int = 1):
     path.write_text(s.replace(old, new, count), encoding="utf-8", newline="\n")
 
 
+
+def patch_multicore_profiler(stage: Path, profiler_header: Path) -> None:
+    """AURORA_MULTICORE_DEEP_PROFILER_V3_48_20261008: diagnostic-only."""
+    if not profiler_header.is_file():
+        raise SystemExit(f"missing Aurora external profiler header: {profiler_header}")
+    shutil.copy2(profiler_header, stage / "aurora_external_profiler.h")
+
+    def rep(rel, old, new, label, count=1):
+        p=stage/rel; s=p.read_text(encoding="utf-8"); n=s.count(old)
+        if n != count: raise SystemExit(f"GBA profiler {label}: expected {count}, found {n}")
+        p.write_text(s.replace(old,new,count),encoding="utf-8",newline="\n")
+
+    # Ensure the staged PS2 core sees the same global profiler switch.
+    rep("Makefile", "\tCFLAGS += -D_EE -I$(PS2SDK)/ee/include/ -I$(PS2SDK)/common/include/\n",
+        "\tCFLAGS += -D_EE -I$(PS2SDK)/ee/include/ -I$(PS2SDK)/common/include/\n\tCFLAGS += -DAURORA_FRONTEND_PROFILER=$(AURORA_FRONTEND_PROFILER)\n",
+        "Makefile profiler flag")
+
+    # Top-level frame partition + audio/video subchildren.
+    rep("libretro/libretro.c", '#include "../common.h"\n', '#include "../common.h"\n#include "../aurora_external_profiler.h"\n', "libretro include")
+    rep("libretro/libretro.c", "   input_poll_cb();\n   update_input();\n",
+        "   { AURORA_EXT_BEGIN(_aur_gba_t); input_poll_cb(); update_input(); AURORA_EXT_END(AURORA_EXT_CORE_GBA,AURORA_GBA_FRAME_INPUT,_aur_gba_t,1); }\n",
+        "frame input")
+    rep("libretro/libretro.c", "   #ifdef HAVE_DYNAREC\n   if (dynarec_enable)\n      execute_arm_translate(execute_cycles);\n   else\n   #endif\n   {\n      /* Sticky bits only used in interpreter */\n      clear_gamepak_stickybits();\n      execute_arm(execute_cycles);\n   }\n",
+        "   { AURORA_EXT_BEGIN(_aur_gba_t);\n   #ifdef HAVE_DYNAREC\n   if (dynarec_enable)\n      execute_arm_translate(execute_cycles);\n   else\n   #endif\n   {\n      /* Sticky bits only used in interpreter */\n      clear_gamepak_stickybits();\n      execute_arm(execute_cycles);\n   }\n   AURORA_EXT_END(AURORA_EXT_CORE_GBA,AURORA_GBA_CPU_EXEC,_aur_gba_t,1); }\n",
+        "CPU execute")
+    rep("libretro/libretro.c", "   audio_run();\n   video_run();\n",
+        "   { AURORA_EXT_BEGIN(_aur_gba_t); audio_run(); AURORA_EXT_END(AURORA_EXT_CORE_GBA,AURORA_GBA_AUDIO_RUN,_aur_gba_t,1); }\n   { AURORA_EXT_BEGIN(_aur_gba_t); video_run(); AURORA_EXT_END(AURORA_EXT_CORE_GBA,AURORA_GBA_VIDEO_RUN,_aur_gba_t,1); }\n",
+        "audio/video")
+    rep("libretro/libretro.c", "   switch (serial_mode) {\n",
+        "   AURORA_EXT_BEGIN(_aur_gba_serial);\n   switch (serial_mode) {\n", "serial begin")
+    rep("libretro/libretro.c", "   };\n\n   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated)",
+        "   };\n   AURORA_EXT_END(AURORA_EXT_CORE_GBA,AURORA_GBA_SERIAL_FRAME,_aur_gba_serial,1);\n\n   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated)", "serial end")
+    rep("libretro/libretro.c", "   samples_produced = sound_read_samples(audio_sample_buffer, samples_to_read);\n",
+        "   { AURORA_EXT_BEGIN(_aur_gba_t); samples_produced = sound_read_samples(audio_sample_buffer, samples_to_read); AURORA_EXT_END(AURORA_EXT_CORE_GBA,AURORA_GBA_AUDIO_READ,_aur_gba_t,samples_produced); }\n",
+        "audio read")
+    rep("libretro/libretro.c", "      video_post_process();\n      gba_screen_pixels_buf = gba_processed_pixels;\n",
+        "      { AURORA_EXT_BEGIN(_aur_gba_t); video_post_process(); AURORA_EXT_END(AURORA_EXT_CORE_GBA,AURORA_GBA_VIDEO_POSTPROCESS,_aur_gba_t,240u*160u); }\n      gba_screen_pixels_buf = gba_processed_pixels;\n",
+        "video postprocess")
+
+    # update_gba: nested partition inside CPU_EXEC; collect children locally.
+    p=stage/"main.c"; s=p.read_text(encoding="utf-8")
+    s=s.replace('#include "common.h"\n', '#include "common.h"\n#include "aurora_external_profiler.h"\n',1)
+    entry="""u32 function_cc update_gba(int remaining_cycles)\n{\n  u32 changed_pc = 0;\n  u32 frame_complete = 0;\n  irq_type irq_raised = IRQ_NONE;\n  int dma_cycles;\n"""
+    entry2="""u32 function_cc update_gba(int remaining_cycles)\n{\n  AURORA_EXT_BEGIN(_aur_update_total);\n  AURORA_EXT_ACCUM_DECL(_aur_timers, _aur_timers_n);\n  AURORA_EXT_ACCUM_DECL(_aur_scan, _aur_scan_n);\n  AURORA_EXT_ACCUM_DECL(_aur_sound, _aur_sound_n);\n  u32 changed_pc = 0;\n  u32 frame_complete = 0;\n  irq_type irq_raised = IRQ_NONE;\n  int dma_cycles;\n"""
+    if s.count(entry)!=1: raise SystemExit("GBA profiler update_gba entry")
+    s=s.replace(entry,entry2,1)
+    s=s.replace("    dma_cycles = update_timers(&irq_raised, completed_cycles);\n",
+                "    AURORA_EXT_ACCUM(_aur_timers, _aur_timers_n, dma_cycles = update_timers(&irq_raised, completed_cycles));\n",1)
+    s=s.replace("          update_scanline();\n",
+                "          AURORA_EXT_ACCUM(_aur_scan, _aur_scan_n, update_scanline());\n",1)
+    s=s.replace("          render_gbc_sound();\n",
+                "          AURORA_EXT_ACCUM(_aur_sound, _aur_sound_n, render_gbc_sound());\n",1)
+    ret="  return (execute_cycles - dma_cycles) | changed_pc | frame_complete;\n}\n\nvoid reset_gba"
+    ret2="""  AURORA_EXT_RECORD(AURORA_EXT_CORE_GBA,AURORA_GBA_UPDATE_TIMERS,_aur_timers,_aur_timers_n);\n  AURORA_EXT_RECORD(AURORA_EXT_CORE_GBA,AURORA_GBA_SCANLINE_TOTAL,_aur_scan,_aur_scan_n);\n  AURORA_EXT_RECORD(AURORA_EXT_CORE_GBA,AURORA_GBA_SOUND_FRAME_FLUSH,_aur_sound,_aur_sound_n);\n  AURORA_EXT_END(AURORA_EXT_CORE_GBA,AURORA_GBA_UPDATE_GBA_TOTAL,_aur_update_total,1);\n  return (execute_cycles - dma_cycles) | changed_pc | frame_complete;\n}\n\nvoid reset_gba"""
+    if s.count(ret)!=1: raise SystemExit("GBA profiler update_gba exit")
+    s=s.replace(ret,ret2,1); p.write_text(s,encoding="utf-8",newline="\n")
+
+    # All DMA sources (immediate, timer/sound, HBlank, VBlank) converge here.
+    p=stage/"gba_memory.c"; s=p.read_text(encoding="utf-8")
+    s=s.replace('#include "common.h"\n', '#include "common.h"\n#include "aurora_external_profiler.h"\n',1)
+    s=s.replace("cpu_alert_type dma_transfer(unsigned dma_chan, int *usedcycles)\n{\n  dma_transfer_type *dmach",
+                "cpu_alert_type dma_transfer(unsigned dma_chan, int *usedcycles)\n{\n  AURORA_EXT_BEGIN(_aur_dma);\n  dma_transfer_type *dmach",1)
+    tail="""  return ret;\n}\n\n// Be sure to do this after loading ROMs."""
+    tail2="""#if AURORA_FRONTEND_PROFILER\n  {\n    uint32_t _aur_dma_cycles = AuroraExternalProfilerCycle() - _aur_dma;\n    AURORA_EXT_RECORD(AURORA_EXT_CORE_GBA,AURORA_GBA_DMA_TOTAL,_aur_dma_cycles,dmach->length);\n    AURORA_EXT_RECORD(AURORA_EXT_CORE_GBA,AURORA_GBA_DMA_CH0 + dma_chan,_aur_dma_cycles,dmach->length);\n  }\n#endif\n  return ret;\n}\n\n// Be sure to do this after loading ROMs."""
+    if s.count(tail)!=1: raise SystemExit("GBA profiler DMA exit")
+    s=s.replace(tail,tail2,1); p.write_text(s,encoding="utf-8",newline="\n")
+
+    # Raster drill-down.  These are nested diagnostics; RASTER_WINDOW is the
+    # partition child of SCANLINE_TOTAL, while layer buckets may overlap through
+    # OBJ-window recursion and are therefore reported as relation=nested.
+    p=stage/"video.cc"; s=p.read_text(encoding="utf-8")
+    s=s.replace('#include "common.h"\n', '#include "common.h"\n#include "aurora_external_profiler.h"\n',1)
+    def wrap_region(text,start,end,bucket,label):
+        a=text.find(start); b=text.find(end,a+len(start))
+        if a<0 or b<0: raise SystemExit("GBA profiler raster region "+label)
+        reg=text[a:b]
+        brace=reg.find("{\n")
+        close=reg.rfind("\n}")
+        if brace<0 or close<0: raise SystemExit("GBA profiler braces "+label)
+        reg=reg[:brace+2]+"  AURORA_EXT_BEGIN(_aur_raster);\n"+reg[brace+2:close]+"\n  AURORA_EXT_END(AURORA_EXT_CORE_GBA,"+bucket+",_aur_raster,1);"+reg[close:]
+        return text[:a]+reg+text[b:]
+    s=wrap_region(s,"static void render_scanline_text(u32 layer,\n","static inline u8 lookup_pix_8bpp(","AURORA_GBA_RASTER_TEXT_BG","text")
+    s=wrap_region(s,"static void render_scanline_affine(u32 layer,\n","template<rendtype rdmode, typename buftype, unsigned mode, typename pixfmt>","AURORA_GBA_RASTER_AFFINE_BG","affine")
+    s=wrap_region(s,"void render_scanline_objs(\n","// Goes through the object list in the OAM", "AURORA_GBA_RASTER_OBJ","obj")
+    # Top-level window compositor.
+    if "void render_scanline_window(" in s:
+        s=wrap_region(s,"void render_scanline_window(","static const u8 active_layers[] = {","AURORA_GBA_RASTER_WINDOW","window")
+    # render_w_effects() has early returns. Time its stable callsites instead
+    # of the body, so all exits are covered exactly once.
+    for call in (
+        "      render_w_effects(start, end, scanline, enable_flags, &tile_mode_renderers);",
+        "      render_w_effects(start, end, scanline, enable_flags, &bitmap_mode_renderers);"
+    ):
+        if s.count(call) != 1:
+            raise SystemExit("GBA profiler effects call anchor")
+        inner = call.strip()
+        s=s.replace(call, "      { AURORA_EXT_BEGIN(_aur_raster); " + inner +
+            " AURORA_EXT_END(AURORA_EXT_CORE_GBA,AURORA_GBA_RASTER_EFFECTS,_aur_raster,end-start); }", 1)
+
+    # Bitmap modes 3/4/5 select exactly one of these BG renderers. This keeps
+    # bitmap BG separate from the OBJ work in bitmap_render_layers().
+    for call in (
+        "          rd->affine_render(start, end, scanline, palette_ram_converted);",
+        "          rd->blit_render(start, end, scanline, palette_ram_converted);",
+        "          rd->scale_render(start, end, scanline, palette_ram_converted);"
+    ):
+        if s.count(call) != 1:
+            raise SystemExit("GBA profiler bitmap call anchor")
+        inner = call.strip()
+        s=s.replace(call, "          { AURORA_EXT_BEGIN(_aur_raster); " + inner +
+            " AURORA_EXT_END(AURORA_EXT_CORE_GBA,AURORA_GBA_RASTER_BITMAP_BG,_aur_raster,end-start); }", 1)
+    p.write_text(s,encoding="utf-8",newline="\n")
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--source", required=True)
     ap.add_argument("--stage", required=True)
+    ap.add_argument("--profiler-header", required=True)
     a = ap.parse_args()
     src = Path(a.source).resolve()
     stage = Path(a.stage).resolve()
     me = Path(__file__).resolve()
+    profiler_header = Path(a.profiler_header).resolve()
+    if not profiler_header.is_file():
+        raise SystemExit(f"missing profiler header: {profiler_header}")
     if not (src / "Makefile").is_file() or not (src / "serial.c").is_file():
         raise SystemExit(f"invalid gpSP source tree: {src}")
 
     digest = tree_hash(src, me)
+    _ph = hashlib.sha256()
+    _ph.update(digest.encode("ascii"))
+    _ph.update(profiler_header.read_bytes())
+    digest = _ph.hexdigest()
     stamp = stage / ".aurora-gpsp-stage-v16"
     if stamp.is_file() and stamp.read_text().strip() == digest and \
        (stage / "aurora_tfa.c").is_file():
@@ -2330,6 +2451,8 @@ static s32 load_gamepak_raw_memory(const void *data, size_t data_size)
             raise SystemExit("gpSP V25 video audit failed: missing " + _v25_tok)
     if "aurora_gpsp_ps2_sound_drain_asm(" not in _v25_saudit:
         raise SystemExit("gpSP V25 audio audit failed: ASM bridge missing")
+
+    patch_multicore_profiler(stage, profiler_header)
 
     stamp.write_text(digest + "\n", encoding="utf-8")
     print(f"[ gpSP stage ] V21: SMALL JIT memory + 4 MiB paged ROM + TFA pre-reserve (V15 SIO) + pager I/O + full PS2 JIT cache sync: {stage}")

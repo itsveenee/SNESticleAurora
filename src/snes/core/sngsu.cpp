@@ -23,8 +23,6 @@ static inline Bool _SNGSUBankIsRam(Uint8 uBank)
     return ((Uint32)uBank - 0x70u) < 2u;
 }
 
-extern "C" void DLog(const char *fmt, ...);
-
 SNGSU::SNGSU()
 {
     m_pRom = NULL; m_uRomSize = 0; m_uRomMask = 0;
@@ -80,8 +78,6 @@ void SNGSU::Reset()
     m_StepClocks = 0;
     m_ClockCarry = 0;
     m_R14Modified = FALSE;
-    m_Runaway = 0;
-    m_WatchdogReported = FALSE;
 #if SNDBG_LOG
     memset(&m_Diag, 0, sizeof(m_Diag));
 #endif
@@ -526,7 +522,6 @@ void SNGSU::WriteReg(Uint16 uAddrLow, Uint8 uData)
         {
             m_bGo = TRUE;
             m_ClockCarry = 0;
-            m_Runaway = 0;
 #if SNDBG_LOG
             m_Diag.Starts++;
             m_Diag.CurrentJobInstructions = 0;
@@ -545,7 +540,6 @@ void SNGSU::WriteReg(Uint16 uAddrLow, Uint8 uData)
             if (!wasGo && m_bGo)
             {
                 m_ClockCarry = 0;
-                m_Runaway = 0;
 #if SNDBG_LOG
                 m_Diag.Starts++;
                 m_Diag.CurrentJobInstructions = 0;
@@ -828,36 +822,6 @@ SNGSU_ALWAYS_INLINE void SNGSU::Step()
     if (m_Diag.CurrentJobInstructions > m_Diag.MaxJobInstructions)
         m_Diag.MaxJobInstructions = m_Diag.CurrentJobInstructions;
 #endif
-    // watchdog: rede de seguranca contra um programa que nunca alcance STOP
-    // (bug nosso ou ROM corrompida).  Apos um teto de instrucoes, forca a
-    // parada (+IRQ) para nao travar a EE.  Rotinas reais do Star Fox terminam
-    // bem antes disto.
-    if (++m_Runaway > 2000000)
-    {
-        // Desenvolvimento: uma captura curta e unica permite identificar o
-        // laço real caso algum jogo ainda alcance esta rede de seguranca.
-        // Em execucao correta nada e' impresso e nao existe custo de SIO.
-        if (!m_WatchdogReported)
-        {
-            m_WatchdogReported = TRUE;
-            DLog("[gsu-watchdog] PBR=%02X PC=%04X CBR=%04X PIPE=%02X NEXT=%02X SFR=%02X%02X",
-                 (unsigned)m_PBR, (unsigned)m_R[15], (unsigned)m_CBR,
-                 (unsigned)m_Pipeline, (unsigned)RawCodeRead(m_R[15]),
-                 (unsigned)SfrHigh(), (unsigned)SfrLow());
-            DLog("[gsu-watchdog] R0=%04X R1=%04X R2=%04X R3=%04X R4=%04X R5=%04X R6=%04X R7=%04X",
-                 (unsigned)m_R[0], (unsigned)m_R[1], (unsigned)m_R[2], (unsigned)m_R[3],
-                 (unsigned)m_R[4], (unsigned)m_R[5], (unsigned)m_R[6], (unsigned)m_R[7]);
-            DLog("[gsu-watchdog] R8=%04X R9=%04X R10=%04X R11=%04X R12=%04X R13=%04X R14=%04X R15=%04X",
-                 (unsigned)m_R[8], (unsigned)m_R[9], (unsigned)m_R[10], (unsigned)m_R[11],
-                 (unsigned)m_R[12], (unsigned)m_R[13], (unsigned)m_R[14], (unsigned)m_R[15]);
-        }
-#if SNDBG_LOG
-        m_Diag.Watchdogs++;
-#endif
-        m_bGo = FALSE; m_bIrq = TRUE; m_Runaway = 0;
-        return;
-    }
-
     // Pipeline de um byte do GSU: executa o byte que ja estava prebuscado e
     // busca o byte apontado por R15. Uma escrita posterior em R15 conserva
     // esse byte como delay slot e muda somente a proxima origem de fetch.

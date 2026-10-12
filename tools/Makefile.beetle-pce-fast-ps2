@@ -30,6 +30,10 @@ CC ?= mips64r5900el-ps2-elf-gcc
 CXX ?= mips64r5900el-ps2-elf-g++
 AR ?= mips64r5900el-ps2-elf-ar
 
+# AURORA_MULTICORE_DEEP_PROFILER_V3_48_20261008
+AURORA_FRONTEND_PROFILER ?= 0
+AURORA_PROFILER_MODE_STAMP := .aurora-profiler-mode-$(AURORA_FRONTEND_PROFILER)
+
 # AURORA_PCE_INCREMENTAL_BUILD_V1_20260824
 # Keep a stable path to this external PS2 Makefile before Makefile.common
 # extends MAKEFILE_LIST. Object files depend on both build descriptions, so
@@ -47,11 +51,14 @@ WARNINGS := \
 	-Wno-strict-aliasing \
 	-Wno-unused-but-set-variable
 
+AURORA_FRONTEND_PROFILER ?= 0
+
 FLAGS += \
 	-G0 -O3 -DNDEBUG -fomit-frame-pointer -ffast-math -fno-math-errno -finline-functions -funroll-loops \
 	-fno-strict-aliasing -fwrapv -fsigned-char \
 	-ffunction-sections -fdata-sections \
-	-DPS2 -D_EE -DLSB_FIRST -DHAVE_UNISTD_H -DAURORA_PS2_PCE_FAST=1 \
+	-DPS2 -D_EE -DLSB_FIRST -DHAVE_UNISTD_H -DAURORA_PS2_PCE_FAST=1 -DAURORA_FRONTEND_PROFILER=$(AURORA_FRONTEND_PROFILER) \
+	-DAURORA_FRONTEND_PROFILER=$(AURORA_FRONTEND_PROFILER) -I. \
 	$(INCFLAGS) $(ENDIANNESS_DEFINES) $(WARNINGS) \
 	-DMEDNAFEN_VERSION_NUMERIC=931 $(CORE_DEFINE) \
 	-DSTDC_HEADERS -D__STDC_LIMIT_MACROS -D__LIBRETRO__ -D_LOW_ACCURACY_ \
@@ -75,7 +82,12 @@ DEPS := $(OBJECTS:.o=.d)
 
 # If the PS2 build recipe or upstream source list/defines change, let Make
 # rebuild the affected core objects. No unconditional clean is necessary.
-$(OBJECTS): $(AURORA_PCE_PS2_MAKEFILE) Makefile.common
+# Rebuild objects exactly once when switching normal <-> auroraprofile.
+$(AURORA_PROFILER_MODE_STAMP):
+	@rm -f .aurora-profiler-mode-0 .aurora-profiler-mode-1
+	@touch $@
+
+$(OBJECTS): $(AURORA_PCE_PS2_MAKEFILE) Makefile.common $(AURORA_PROFILER_MODE_STAMP)
 
 .PHONY: all clean
 all: $(TARGET)
@@ -94,4 +106,4 @@ $(TARGET): $(OBJECTS)
 	$(CC) -c -o $@ $< $(CPPFLAGS) $(SFLAGS)
 
 clean:
-	rm -f $(OBJECTS) $(DEPS) $(TARGET)
+	rm -f $(OBJECTS) $(DEPS) $(TARGET) .aurora-profiler-mode-0 .aurora-profiler-mode-1

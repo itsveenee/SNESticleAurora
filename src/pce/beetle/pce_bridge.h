@@ -6,6 +6,9 @@
 namespace Emu { struct SysInputT; }
 class CRenderSurface;
 class CMixBuffer;
+/* AURORA_PCE_PAD6_V1_20261009: PCE two/six button preference, runtime switch. */
+void PceBridge_Set6Button(bool enabled);
+bool PceBridge_Get6Button(void);
 bool PceBridge_Init(void);
 void PceBridge_Shutdown(void);
 bool PceBridge_LoadGame(const void *pData, size_t nBytes, size_t nCapacity, const char *pName);

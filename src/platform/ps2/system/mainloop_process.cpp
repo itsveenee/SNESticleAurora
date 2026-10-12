@@ -23,6 +23,14 @@
 #include "mainloop_safe_frameskip.h" /* AURORA_SAFE_FRAMESKIP_GG_ZOOM_V2_2 */
 #include "platform/ps2/system/aurora_runtime_trace.h"
 #if AURORA_FRONTEND_PROFILER
+#include <timer.h> /* PS2SDK monotonic BUSCLK system timer */
+#include "mainloop_load.h" /* canonical _MainLoopUnloadRom() */
+#include "mainloop_menu.h" /* CdUiReady and deferred SRAM status */
+/* AURORA_BENCHMARK_CHAINED_V3_20261010_PROCESS_INCLUDE_BEGIN */
+#if AURORA_FRONTEND_PROFILER
+#include "aurora_benchmark.h"
+#endif
+/* AURORA_BENCHMARK_CHAINED_V3_20261010_PROCESS_INCLUDE_END */
 #include "platform/ps2/system/aurora_frontend_profiler.h"
 #endif
 #if AURORA_C4_PROFILER
@@ -42,6 +50,12 @@
 #include "gskit_backend.h"
 
 #include "types.h"
+/* AURORA_V37_PROFILER_USB_HOTPLUG_ONESHOT_20261011 — strictly profiler-only host tooling.
+ * No USB driver discovery, SIF enumeration, or controller/mouse scan. */
+#if AURORA_FRONTEND_PROFILER
+#include <sys/stat.h>
+#include "mainloop.h" /* MainResetEmulator(): same action as menu Reset emulator */
+#endif
 #include "console.h"
 #include "input.h"
 #include "snes.h"
@@ -72,8 +86,140 @@ static Bool _AudioGameplayWasActive = FALSE;
 static Emu::System *_AudioGameplaySystem = NULL;
 static Bool _SnesMouseWasActive = FALSE;
 static Bool _UsbMouseGameplayWasActive = FALSE;
+/* AURORA_V37_PROFILER_USB_HOTPLUG_ONESHOT_20261011
+ * PROFILER BUILDS ONLY. Every 60 completed frontend frames, perform up to
+ * three filesystem-root stat() calls, NOT a USB hardware/device scan.
+ * Identifies individual mount names so hotplug on mass1 still works when
+ * mass0 is already mounted. mass: is an alias on some drivers.
+ *
+ * A device present when this ELF boots never causes a reset: each path is
+ * initialized from UNKNOWN. Require two consecutive confirmed absences to
+ * arm, then two presences to trigger. One shot per unplug/replug cycle.
+ * The check runs AFTER AuroraFrontendProfilerTickEnd / PROF_LEAVE, so its
+ * sporadic host I/O latency is NOT charged to the sampled emulation frame.
+ * This does not change core, sound, frameskip or state loading.
+ */
+#if AURORA_FRONTEND_PROFILER
+static void AuroraV37ProfilerUsbInsertionReset(void)
+{
+    enum { UNKNOWN = 0, ABSENT = 1, PRESENT = 2, CONFIRM = 2, INTERVAL = 60 };
+    static const char *const roots[] = { "mass0:/", "mass1:/", "mass:/" };
+    static unsigned char state[3] = { UNKNOWN, UNKNOWN, UNKNOWN };
+    static unsigned char yes[3] = { 0, 0, 0 };
+    static unsigned char no[3] = { 0, 0, 0 };
+    static unsigned tick = 0;
+
+    if (++tick < INTERVAL) return;
+    tick = 0;
+    for (unsigned i = 0; i < 3; ++i)
+    {
+        struct stat info;
+        const bool present = (stat(roots[i], &info) == 0);
+        if (present)
+        {
+            no[i] = 0;
+            if (yes[i] < CONFIRM) ++yes[i];
+            if (yes[i] == CONFIRM)
+            {
+                const bool wasAbsent = (state[i] == ABSENT);
+                state[i] = PRESENT;
+                if (wasAbsent)
+                {
+                    /* Latch BEFORE calling the boot loader; even if the
+                     * ELF could not be reloaded we never retry in a loop. */
+                    /* mass: may alias mass0:. Latch all root identities
+                     * so a failed reload cannot cause a second reboot
+                     * just because the alias is observed next second. */
+                    for (unsigned j = 0; j < 3; ++j)
+                    {
+                        state[j] = PRESENT;
+                        yes[j] = no[j] = 0;
+                    }
+                    MainResetEmulator();
+                    return;
+                }
+            }
+        }
+        else
+        {
+            yes[i] = 0;
+            if (no[i] < CONFIRM) ++no[i];
+            if (no[i] == CONFIRM)
+                state[i] = ABSENT;
+        }
+    }
+}
+#endif /* AURORA_FRONTEND_PROFILER */
 
 
+#if AURORA_FRONTEND_PROFILER
+/* AURORA_PROFILER_AUTO20_STATELOAD_V21_20261009
+ * Pure host-time diagnostic lifetime; no emulated/timing policy changes.
+ * GetTimerSystemTime() is PS2SDK's 64-bit BUSCLK monotonic timer. */
+static Uint64 s_AuroraBenchmarkStartBusclk = 0;
+static Emu::System *s_AuroraBenchmarkOwner = NULL;
+
+void MainLoopProfilerAutoCloseCancel(void)
+{
+    s_AuroraBenchmarkStartBusclk = 0;
+    s_AuroraBenchmarkOwner = NULL;
+}
+
+void MainLoopProfilerAutoCloseArmAfterStateLoad(void)
+{
+    const Uint64 now = (Uint64)GetTimerSystemTime();
+    MainLoopProfilerAutoCloseCancel();
+    if (!_pSystem || !now)
+        return;
+    if (!AuroraFrontendProfilerAutoCloseBeginWindow())
+        return;
+    s_AuroraBenchmarkOwner = _pSystem;
+    s_AuroraBenchmarkStartBusclk = now;
+}
+
+/* Call only AFTER AuroraFrontendProfilerTickEnd(), never during ExecuteFrame.
+ * Quiesce CD via the normal menu path and let deferred SRAM persist first.
+ * Close only if diagnostic dump reached mass0 successfully. */
+static void MainLoopProfilerAutoCloseAfterTick(void)
+{
+    if (!s_AuroraBenchmarkOwner || !s_AuroraBenchmarkStartBusclk)
+        return;
+    if (!_pSystem || _pSystem != s_AuroraBenchmarkOwner)
+    {
+        MainLoopProfilerAutoCloseCancel();
+        return;
+    }
+    const Uint64 elapsed = (Uint64)GetTimerSystemTime() -
+        s_AuroraBenchmarkStartBusclk;
+    if (elapsed < (Uint64)20u * (Uint64)kBUSCLK)
+        return;
+
+    if (!_bMenu)
+        _MenuEnable(TRUE);
+    if (!_bMenu || !MainLoopCdUiReady() || MainLoopSramSaveBusy())
+        return;
+
+    if (!AuroraFrontendProfilerAutoCloseSave())
+    {
+        MainLoopProfilerAutoCloseCancel();
+        MainLoopStatusPrintf(240,
+            "Auto benchmark log failed: ROM kept open in menu.");
+        return;
+    }
+
+    MainLoopProfilerAutoCloseCancel();
+    _MainLoopUnloadRom();
+    if (_MainLoop_pBrowserScreen)
+        _MainLoopSetScreen((CScreen *)_MainLoop_pBrowserScreen);
+    _MenuEnable(TRUE);
+}
+#endif
+
+/* AURORA_BENCHMARK_CHAINED_V3_20261010_PROCESS_LOCAL_BEGIN */
+#if AURORA_FRONTEND_PROFILER
+    Uint32 benchmarkExecutedFrames=0;
+#endif
+/* AURORA_BENCHMARK_CHAINED_V3_20261010_PROCESS_LOCAL_END */
 Bool MainLoopProcess()
 {
     NetPlayRPCInputT NetInput;
@@ -894,12 +1040,23 @@ Bool MainLoopProcess()
 #endif
 #if AURORA_FRONTEND_PROFILER
     AuroraFrontendProfilerTickEnd();
+/* AURORA_BENCHMARK_CHAINED_V3_20261010_PROCESS_TICK_BEGIN */
+    AuroraBenchmarkTick();
+/* AURORA_BENCHMARK_CHAINED_V3_20261010_PROCESS_TICK_END */
+    /* AURORA_PROFILER_AUTO20_STATELOAD_V21_20261009:
+     * seal/flush a completed 20s state-load window, then close the ROM. */
+    MainLoopProfilerAutoCloseAfterTick();
 #endif
     PROF_LEAVE("Frame");
 
     #if PROF_ENABLED
     ProfProcess();
     #endif
+
+#if AURORA_FRONTEND_PROFILER
+    /* AURORA_V37_PROFILER_USB_HOTPLUG_ONESHOT_20261011 — after timing scopes and profiler records close. */
+    AuroraV37ProfilerUsbInsertionReset();
+#endif
 
     return TRUE;
 }

@@ -121,13 +121,43 @@ enum AuroraSnesDeepBucketE
     AURORA_SNES_DEEP_OBJ_MISS_OPAQUE = 65,
     AURORA_SNES_DEEP_OBJ_HFLIP_TILES = 66,
     AURORA_SNES_DEEP_OBJ_SECOND_TABLE_TILES = 67,
-    AURORA_SNES_DEEP_COUNT = 68
+    /* AURORA_LUT_OBJ2_FINAL_V3_41_20261008
+     * cycles = post-fetch compactor only; units = transparent rows removed. */
+    AURORA_SNES_DEEP_OBJ_COMPACT = 68,
+    AURORA_SNES_DEEP_COUNT = 69
 };
 void AuroraFrontendProfilerSnesDeepRecord(
     Uint32 bucket, Uint32 cycles, Uint32 units);
 void AuroraFrontendProfilerSnesChrTraitsRecord(
     Uint32 bitDepth, Uint32 opaqueRows, Uint32 transparentRows,
     Uint32 flip0OpaqueRows, Uint32 flippedOpaqueRows);
+/* AURORA_V23_3_TRAITS_COST_DECL_20261010: declaration used by snppurender8.cpp. */
+void AuroraFrontendProfilerSnesChrTraitsCost(Uint32 ticks);
+
+/* AURORA_SNES_MICROSCOPE_V3_27_20261006
+ * Diagnostic-only aggregate recorders.  Callers are compile-gated by
+ * AURORA_FRONTEND_PROFILER, so normal builds gain no hot-path work. */
+void AuroraFrontendProfilerSnesChr4LocalityRecord(
+    Uint32 tiles, Uint32 opaqueTiles,
+    Uint32 paletteReuses, Uint32 paletteRuns,
+    Uint32 flipSame, Uint32 flipChanges,
+    Uint32 rowSame, Uint32 rowPlus16, Uint32 rowMinus16, Uint32 rowOther);
+void AuroraFrontendProfilerSnesObjMicroscopeRecord(
+    Uint32 hitTiles, Uint32 hitCycles,
+    Uint32 missTiles, Uint32 missCycles,
+    Uint32 hitTransparent, Uint32 hitFullOpaque, Uint32 hitPartial,
+    Uint32 missTransparent, Uint32 missFullOpaque, Uint32 missPartial,
+    Uint32 rowSame, Uint32 rowPlus16, Uint32 rowMinus16, Uint32 rowOther);
+/* AURORA_CHR4_REUSE_MICROSCOPE_V3_28_20261007
+ * Final CHR4 correlation lens; diagnostic-only. */
+/* AURORA_CHR4_PATH_BG_MICROSCOPE_V3_29_20261007 */
+void AuroraFrontendProfilerSnesChr4ReuseRecord(
+    Uint32 bgIndex, Uint32 pathIndex, Uint32 tiles, Uint32 opaqueTiles,
+    Uint32 opaqueTransitions, Uint32 adjacentOpaqueTransitions,
+    Uint32 paletteIndexReuses, Uint32 decodeKeyReuses,
+    Uint32 rowSameFlipChanged, Uint32 pixelKeyReuses,
+    Uint32 adjacentPaletteIndexReuses, Uint32 adjacentDecodeKeyReuses,
+    Uint32 adjacentPixelKeyReuses);
 #ifdef __cplusplus
 }
 #endif

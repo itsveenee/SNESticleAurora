@@ -18,6 +18,7 @@
 #include "nes/quicknes/quicknes_bridge.h"
 #include "nes/fceumm/fceumm_fds_bridge.h" /* AURORA_FCEUMM_FDS_V0_6_SIDE_SWAP */
 #include "sega/picodrive/picodrive_bridge.h"
+#include "pce/beetle/pce_bridge.h" /* AURORA_PCE_PAD6_V1_2_TURBO_20261009 */
 #include "memcard.h"
 #include "prof.h"
 
@@ -422,39 +423,63 @@ Uint16 _MainLoopInput(Uint32 pad)
         return _MainLoopSnesInput(uFds);
     }
 
-	/* AURORA_PCE_EXPERIMENTAL_V3
-	 * Cross=I, Square=II, Circle=Turbo I, Triangle=Turbo II. */
+	/* AURORA_PCE_PAD6_V1_2_TURBO_20261009
+	 * 2-button: preserve Circle=Turbo I and Triangle=Turbo II.
+	 * 6-button: Circle=III, L1=IV, Triangle=V, R1=VI.
+	 * R2 + any mapped action is turbo, not a PCE mode switch.
+	 * D-pad, Start and Select remain continuously asserted. */
 	if (_pSystem == _pPce)
 	{
-		/* AURORA_R2_DEDICATED_TURBO_OR_V1
-		 * Circle=Turbo I, Triangle=Turbo II;
-		 * R2+Cross=Turbo I, R2+Square=Turbo II. */
 		const Bool bR2 = (pad & PAD_R2) ? TRUE : FALSE;
-		const Bool bTurboI =
-			((pad & PAD_CIRCLE) || (bR2 && (pad & PAD_CROSS))) ? TRUE : FALSE;
-		const Bool bTurboII =
-			((pad & PAD_TRIANGLE) || (bR2 && (pad & PAD_SQUARE))) ? TRUE : FALSE;
-		Uint32 uPce = pad & ~(PAD_SQUARE | PAD_CROSS | PAD_TRIANGLE | PAD_CIRCLE | PAD_R2);
+		/* Preserve the original PCE slower turbo cadence:
+		 * Max -> Half, Half -> Quarter, Quarter -> Quarter. */
+		Uint32 shift = (Uint32)_MainLoop_TurboSpeed + 1U;
+		if (shift > (Uint32)MAINLOOP_TURBO_SPEED_QUARTER)
+			shift = (Uint32)MAINLOOP_TURBO_SPEED_QUARTER;
+		const Uint32 elapsed =
+			_MainLoop_TurboHostFrame - _MainLoop_TurboHostPhaseBase;
+		const Bool on = (((elapsed >> shift) & 1U) == 0U)
+			? TRUE : FALSE;
 
-		/* AURORA_PCE_TURBO_CADENCE_V1
-		 * PCE autofire needs one slower host cadence than the shared setting:
-		 * Max -> Half, Half -> Quarter, Quarter remains Quarter. */
-		Uint32 uPceTurboShift = (Uint32)_MainLoop_TurboSpeed + 1U;
-		if (uPceTurboShift > (Uint32)MAINLOOP_TURBO_SPEED_QUARTER)
-			uPceTurboShift = (Uint32)MAINLOOP_TURBO_SPEED_QUARTER;
-		const Uint32 uPceTurboElapsed = _MainLoop_TurboHostFrame - _MainLoop_TurboHostPhaseBase;
-		const Bool bTurboOn = (((uPceTurboElapsed >> uPceTurboShift) & 1U) == 0U) ? TRUE : FALSE;
+		if (!PceBridge_Get6Button())
+		{
+			/* Exact legacy 2-button OR behavior: dedicated turbo or R2 chord.
+			 * Drop raw Circle/Triangle and synthesize only I/II carriers. */
+			const Bool turboI =
+				((pad & PAD_CIRCLE) || (bR2 && (pad & PAD_CROSS))) ? TRUE : FALSE;
+			const Bool turboII =
+				((pad & PAD_TRIANGLE) || (bR2 && (pad & PAD_SQUARE))) ? TRUE : FALSE;
+			Uint32 uPce = pad & ~(PAD_SQUARE | PAD_CROSS |
+				PAD_TRIANGLE | PAD_CIRCLE | PAD_R2);
+			if (!bR2)
+			{
+				/* The original PCE frontend swaps X/Square carriers. */
+				if (pad & PAD_CROSS)  uPce |= PAD_SQUARE; /* I */
+				if (pad & PAD_SQUARE) uPce |= PAD_CROSS;  /* II */
+			}
+			if (on)
+			{
+				if (turboI)  uPce |= PAD_SQUARE; /* I */
+				if (turboII) uPce |= PAD_CROSS;  /* II */
+			}
+			return _MainLoopSnesInput(uPce);
+		}
 
-		if (!bR2)
+		/* Full native six-button layout, unchanged from v1.1. */
+		const Uint32 turboButtons =
+			PAD_CROSS | PAD_SQUARE | PAD_CIRCLE |
+			PAD_L1 | PAD_TRIANGLE | PAD_R1;
+		Uint32 uPce = pad & ~PAD_R2;
+		if (bR2)
 		{
-			if (pad & PAD_CROSS)  uPce |= PAD_SQUARE;
-			if (pad & PAD_SQUARE) uPce |= PAD_CROSS;
+			uPce &= ~turboButtons;
+			if (on)
+				uPce |= pad & turboButtons;
 		}
-		if (bTurboOn)
-		{
-			if (bTurboI)  uPce |= PAD_SQUARE;
-			if (bTurboII) uPce |= PAD_CROSS;
-		}
+		const Uint32 pair = uPce & (PAD_CROSS | PAD_SQUARE);
+		uPce &= ~(PAD_CROSS | PAD_SQUARE);
+		if (pair & PAD_CROSS) uPce |= PAD_SQUARE;
+		if (pair & PAD_SQUARE) uPce |= PAD_CROSS;
 		return _MainLoopSnesInput(uPce);
 	}
 

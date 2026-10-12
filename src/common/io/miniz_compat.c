@@ -132,7 +132,9 @@ static size_t miniz_filexio_read_func(
         {
                 int pos = fileXioLseek(
                         reader->fd, (int)file_ofs, FIO_SEEK_SET);
-                if (pos < 0)
+                /* AURORA_ZIP_ISSUE36_V3_1_20261008: a successful but
+                 * incomplete seek must not feed wrong bytes into miniz. */
+                if (pos != (int)file_ofs)
                         return 0;
                 reader->pos = pos;
         }
@@ -144,7 +146,7 @@ static size_t miniz_filexio_read_func(
                         ? 0x7FFFFFFF : (int)remain;
                 int got = fileXioRead(reader->fd, dst + total, want);
 
-                if (got <= 0)
+                if (got <= 0 || got > want)
                         break;
 
                 total += (size_t)got;

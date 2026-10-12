@@ -21,6 +21,7 @@
 extern AudMixBuffer *_AudMix;
 #include "snio.h"
 #include "snppurender.h"
+#include "platform/ps2/system/aurora_external_profiler.h" /* AURORA_MULTICORE_DEEP_PROFILER_V3_48_20261008 */
 #include "snrom.h"
 
 extern "C" {
@@ -1890,6 +1891,7 @@ void PicoDriveBridge_RunFrame(Emu::SysInputT *pInput,
      * Sega Pico keeps retro_run() because that glue owns page/pen/overlay
      * events. All other supported Sega hardware feeds PicoIn directly and
      * calls PicoFrame() through the PS2-native core entry point. */
+    AURORA_EXT_BEGIN(_aur_sega_core_run);
     if (PicoIn.AHW & PAHW_PICO)
     {
         PicoDriveLibretro_SetSkipNextVideoFrame(skipVideo ? 1 : 0);
@@ -1924,6 +1926,8 @@ void PicoDriveBridge_RunFrame(Emu::SysInputT *pInput,
             inputMasks, 2, skipVideo ? 1 : 0, refreshVariables);
     }
 
+    AURORA_EXT_END(AURORA_EXT_CORE_SEGA,AURORA_SEGA_BRIDGE_CORE_RUN,_aur_sega_core_run,1);
+
     /* AURORA_SUPER_MAGIC_DRIVE_V1_20260902 */
     if (PicoDriveAurora_SmdIsActive())
         PicoDriveAurora_SmdPostFrame();
@@ -1950,14 +1954,14 @@ void PicoDriveBridge_RunFrame(Emu::SysInputT *pInput,
         if (!PicoDriveBridge_CanDirectGsVideo())
         {
             s_DirectPixelsValid = false;
-            pdRenderToAurora(pTarget);
+            { AURORA_EXT_BEGIN(_aur_sega_bridge); pdRenderToAurora(pTarget); AURORA_EXT_END(AURORA_EXT_CORE_SEGA,AURORA_SEGA_BRIDGE_RENDER,_aur_sega_bridge,1); }
         }
     }
 
     /* One actual emulated frame only. Never leak sacrifice to a later
      * frame, a 0-frame cadence tick, or subsequently loaded Sega hardware. */
     if (s_pMix)
-        s_pMix->Flush();
+        { AURORA_EXT_BEGIN(_aur_sega_bridge); s_pMix->Flush(); AURORA_EXT_END(AURORA_EXT_CORE_SEGA,AURORA_SEGA_BRIDGE_MIX_FLUSH,_aur_sega_bridge,1); }
     s_pMix = NULL;
 }
 

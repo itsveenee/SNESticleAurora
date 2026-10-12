@@ -16,6 +16,11 @@
 #include <unistd.h>
 
 #include "mainloop_debug.h"
+/* AURORA_BENCHMARK_CHAINED_V3_20261010_INIT_INCLUDE_BEGIN */
+#if AURORA_FRONTEND_PROFILER
+#include "aurora_benchmark.h"
+#endif
+/* AURORA_BENCHMARK_CHAINED_V3_20261010_INIT_INCLUDE_END */
 #include "mainloop_shared.h"
 #include "mainloop_iop.h"
 #include "mainloop_net.h"
@@ -750,6 +755,11 @@ TextureUpload(&_OutTex, _fbTexture[0]->GetLinePtr(0));
 	}
 #endif
 
+/* AURORA_BENCHMARK_CHAINED_V3_20261010_INIT_BOOT_BEGIN */
+#if AURORA_FRONTEND_PROFILER
+    AuroraBenchmarkBoot();
+#endif
+/* AURORA_BENCHMARK_CHAINED_V3_20261010_INIT_BOOT_END */
     return TRUE;
 }
 

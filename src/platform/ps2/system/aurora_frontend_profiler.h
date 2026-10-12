@@ -40,6 +40,9 @@ enum AuroraFrontendCoreE
 
 void AuroraFrontendProfilerTickBegin(void);
 void AuroraFrontendProfilerSetContext(Uint32 state, Uint32 core);
+/* AURORA_BENCHMARK_CHAINED_V3_20261010_PROF_HEADER_BEGIN */
+Bool AuroraFrontendProfilerBatchBegin(void);
+/* AURORA_BENCHMARK_CHAINED_V3_20261010_PROF_HEADER_END */
 void AuroraFrontendProfilerTickEnd(void);
 void AuroraFrontendProfilerSafeFrameskip(
     Bool enabled, Bool allowed, Bool skipped);
@@ -116,6 +119,8 @@ void AuroraFrontendProfilerSnesBgChrRecord(
 /* AURORA_SNES_DEEP_OPT_V3_14_20261005 */
 void AuroraFrontendProfilerSnesDeepRecord(
     Uint32 bucket, Uint32 cycles, Uint32 units);
+/* AURORA_V23_SNES_BGCHR_TRAITS_COST_20261009: profiler-only collector cost; no emulation changes. */
+void AuroraFrontendProfilerSnesChrTraitsCost(Uint32 ticks);
 void AuroraFrontendProfilerSnesChrTraitsRecord(
     Uint32 bitDepth, Uint32 opaqueRows, Uint32 transparentRows,
     Uint32 flip0OpaqueRows, Uint32 flippedOpaqueRows);
@@ -156,6 +161,11 @@ void AuroraFrontendProfilerSnesDspEchoEnd(void);
 void AuroraFrontendProfilerSnesDspFinalBegin(void);
 void AuroraFrontendProfilerSnesDspFinalEnd(void);
 
+/* AURORA_PROFILER_AUTO20_STATELOAD_V21_20261009
+ * Start a new host/frontend benchmark and synchronously save at end-of-ROM.
+ * Do not touch emulated CPU clocks, memory, frame policies or audio. */
+Bool AuroraFrontendProfilerAutoCloseBeginWindow(void);
+Bool AuroraFrontendProfilerAutoCloseSave(void);
 void AuroraFrontendProfilerMenuEnter(void);
 void AuroraFrontendProfilerMenuUpdate(Bool canWrite);
 

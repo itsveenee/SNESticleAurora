@@ -12,6 +12,7 @@
  */
 #include "platform/ps2/system/aurora_snes_cost_profiler.h" /* AURORA_SNES_DEEP_FP_COST_INCLUDE_V3_14_6_20261006 */
 #include "aurora_frontend_profiler.h"
+#include "aurora_external_profiler.h" /* AURORA_MULTICORE_DEEP_PROFILER_V3_48_20261008 */
 
 #if AURORA_FRONTEND_PROFILER
 
@@ -96,6 +97,11 @@ struct FrameT
     Bool fsAllowed;
     Bool fsSkipped;
 
+    /* AURORA_V45_VBLANK_CADENCE_PROFILER_ONLY_20261011: per-host-tick observational timestamps only. */
+    Uint32 v45PreFlipWork;
+    Uint32 v45FlipStamp;
+    Bool v45Presented;
+
     Bool fsDetailSeen;
     Uint32 fsPeriod;
     Int32 fsDiff;
@@ -167,11 +173,72 @@ struct FrameT
     Uint32 snesBgChrMeasuredCycles;
     Uint32 snesBgChrMeasuredDecodeCycles;
     Uint32 snesBgChrBadRecords;
+    Uint32 snesBgChrTraitsCycles; /* AURORA_V23_SNES_BGCHR_TRAITS_COST_20261009 */
 
     /* AURORA_SNES_DEEP_OPT_V3_14_20261005 */
-    Uint32 snesDeepCalls[68];
-    Uint32 snesDeepUnits[68];
-    Uint32 snesDeepCycles[68];
+    Uint32 snesDeepCalls[69];
+    Uint32 snesDeepUnits[69];
+    Uint32 snesDeepCycles[69];
+
+    /* AURORA_MULTICORE_DEEP_PROFILER_V3_48_20261008 */
+    Uint32 externalCalls[AURORA_EXT_BUCKET_MAX];
+    Uint32 externalUnits[AURORA_EXT_BUCKET_MAX];
+    Uint32 externalCycles[AURORA_EXT_BUCKET_MAX];
+
+    /* AURORA_SNES_MICROSCOPE_V3_27_20261006 */
+    Uint32 snesChr4LocalityCalls;
+    Uint32 snesChr4LocalityTiles;
+    Uint32 snesChr4OpaqueTiles;
+    Uint32 snesChr4PaletteReuses;
+    Uint32 snesChr4PaletteRuns;
+    Uint32 snesChr4FlipSame;
+    Uint32 snesChr4FlipChanges;
+    Uint32 snesChr4RowSame;
+    Uint32 snesChr4RowPlus16;
+    Uint32 snesChr4RowMinus16;
+    Uint32 snesChr4RowOther;
+
+    Uint32 snesObjMicroscopeCalls;
+    Uint32 snesObjHitTiles;
+    Uint32 snesObjHitCycles;
+    Uint32 snesObjMissTiles;
+    Uint32 snesObjMissCycles;
+    Uint32 snesObjHitTransparent;
+    Uint32 snesObjHitFullOpaque;
+    Uint32 snesObjHitPartial;
+    Uint32 snesObjMicMissTransparent;
+    Uint32 snesObjMicMissFullOpaque;
+    Uint32 snesObjMicMissPartial;
+    Uint32 snesObjRowSame;
+    Uint32 snesObjRowPlus16;
+    Uint32 snesObjRowMinus16;
+    Uint32 snesObjRowOther;
+
+    /* AURORA_CHR4_REUSE_MICROSCOPE_V3_28_20261007 */
+    Uint32 snesChr4OpaqueTransitions;
+    Uint32 snesChr4AdjacentOpaqueTransitions;
+    Uint32 snesChr4PaletteIndexReuses;
+    Uint32 snesChr4DecodeKeyReuses;
+    Uint32 snesChr4RowSameFlipChanged;
+    Uint32 snesChr4PixelKeyReuses;
+    Uint32 snesChr4AdjacentPaletteIndexReuses;
+    Uint32 snesChr4AdjacentDecodeKeyReuses;
+    Uint32 snesChr4AdjacentPixelKeyReuses;
+
+    /* AURORA_CHR4_PATH_BG_MICROSCOPE_V3_29_20261007
+     * [BG0..3][NOOFFSET,OFFSET,M5_MAIN,M5_SUB,M6_MAIN,M6_SUB]. */
+    Uint32 snesChr4CellCalls[4][6];
+    Uint32 snesChr4CellTiles[4][6];
+    Uint32 snesChr4CellOpaqueTiles[4][6];
+    Uint32 snesChr4CellOpaqueTransitions[4][6];
+    Uint32 snesChr4CellAdjacentOpaqueTransitions[4][6];
+    Uint32 snesChr4CellPaletteIndexReuses[4][6];
+    Uint32 snesChr4CellDecodeKeyReuses[4][6];
+    Uint32 snesChr4CellRowSameFlipChanged[4][6];
+    Uint32 snesChr4CellPixelKeyReuses[4][6];
+    Uint32 snesChr4CellAdjacentPaletteIndexReuses[4][6];
+    Uint32 snesChr4CellAdjacentDecodeKeyReuses[4][6];
+    Uint32 snesChr4CellAdjacentPixelKeyReuses[4][6];
 
     /* AURORA_SNES_DSP_VOICES_PROFILER_V3_5_1_20261005 */
     Uint32 dspVoiceEnvelopeCalls;
@@ -270,11 +337,72 @@ struct BucketT
     Uint64 snesBgChrMeasuredCycles;
     Uint64 snesBgChrMeasuredDecodeCycles;
     Uint64 snesBgChrBadRecords;
+    Uint64 snesBgChrTraitsCycles; /* AURORA_V23_SNES_BGCHR_TRAITS_COST_20261009 */
 
     /* AURORA_SNES_DEEP_OPT_V3_14_20261005 */
-    Uint64 snesDeepCalls[68];
-    Uint64 snesDeepUnits[68];
-    Uint64 snesDeepCycles[68];
+    Uint64 snesDeepCalls[69];
+    Uint64 snesDeepUnits[69];
+    Uint64 snesDeepCycles[69];
+
+    /* AURORA_MULTICORE_DEEP_PROFILER_V3_48_20261008 */
+    Uint64 externalCalls[AURORA_EXT_BUCKET_MAX];
+    Uint64 externalUnits[AURORA_EXT_BUCKET_MAX];
+    Uint64 externalCycles[AURORA_EXT_BUCKET_MAX];
+
+    /* AURORA_SNES_MICROSCOPE_V3_27_20261006 */
+    Uint64 snesChr4LocalityCalls;
+    Uint64 snesChr4LocalityTiles;
+    Uint64 snesChr4OpaqueTiles;
+    Uint64 snesChr4PaletteReuses;
+    Uint64 snesChr4PaletteRuns;
+    Uint64 snesChr4FlipSame;
+    Uint64 snesChr4FlipChanges;
+    Uint64 snesChr4RowSame;
+    Uint64 snesChr4RowPlus16;
+    Uint64 snesChr4RowMinus16;
+    Uint64 snesChr4RowOther;
+
+    Uint64 snesObjMicroscopeCalls;
+    Uint64 snesObjHitTiles;
+    Uint64 snesObjHitCycles;
+    Uint64 snesObjMissTiles;
+    Uint64 snesObjMissCycles;
+    Uint64 snesObjHitTransparent;
+    Uint64 snesObjHitFullOpaque;
+    Uint64 snesObjHitPartial;
+    Uint64 snesObjMicMissTransparent;
+    Uint64 snesObjMicMissFullOpaque;
+    Uint64 snesObjMicMissPartial;
+    Uint64 snesObjRowSame;
+    Uint64 snesObjRowPlus16;
+    Uint64 snesObjRowMinus16;
+    Uint64 snesObjRowOther;
+
+    /* AURORA_CHR4_REUSE_MICROSCOPE_V3_28_20261007 */
+    Uint64 snesChr4OpaqueTransitions;
+    Uint64 snesChr4AdjacentOpaqueTransitions;
+    Uint64 snesChr4PaletteIndexReuses;
+    Uint64 snesChr4DecodeKeyReuses;
+    Uint64 snesChr4RowSameFlipChanged;
+    Uint64 snesChr4PixelKeyReuses;
+    Uint64 snesChr4AdjacentPaletteIndexReuses;
+    Uint64 snesChr4AdjacentDecodeKeyReuses;
+    Uint64 snesChr4AdjacentPixelKeyReuses;
+
+    /* AURORA_CHR4_PATH_BG_MICROSCOPE_V3_29_20261007
+     * [BG0..3][NOOFFSET,OFFSET,M5_MAIN,M5_SUB,M6_MAIN,M6_SUB]. */
+    Uint64 snesChr4CellCalls[4][6];
+    Uint64 snesChr4CellTiles[4][6];
+    Uint64 snesChr4CellOpaqueTiles[4][6];
+    Uint64 snesChr4CellOpaqueTransitions[4][6];
+    Uint64 snesChr4CellAdjacentOpaqueTransitions[4][6];
+    Uint64 snesChr4CellPaletteIndexReuses[4][6];
+    Uint64 snesChr4CellDecodeKeyReuses[4][6];
+    Uint64 snesChr4CellRowSameFlipChanged[4][6];
+    Uint64 snesChr4CellPixelKeyReuses[4][6];
+    Uint64 snesChr4CellAdjacentPaletteIndexReuses[4][6];
+    Uint64 snesChr4CellAdjacentDecodeKeyReuses[4][6];
+    Uint64 snesChr4CellAdjacentPixelKeyReuses[4][6];
 
     Uint64 dspVoiceEnvelopeCalls;
     Uint64 dspVoiceEnvelopeActive;
@@ -345,8 +473,24 @@ struct FsDiagT
     Uint64 recoveryWorkSum;
 };
 
+/* AURORA_V45_VBLANK_CADENCE_PROFILER_ONLY_20261011
+ * All counters live in the existing frontend profiler TU.  No GS IRQ,
+ * scheduling decisions or presentation changes. */
+struct V45CadenceT
+{
+    Uint64 presented, skipped;
+    Uint64 periodSamples, periodSum, preWorkSum, waitSum;
+    Uint64 preWorkOverPeriod, preWorkOver2Periods;
+    Uint64 intervalPairs, gapSum, expectedGapSum, excessGapSum;
+    Uint64 gapExcessHalfPeriod, pairsAfterSkips, skipsBetweenSum;
+    Uint64 gapHistogram[5]; /* <1P, [1,2)P, [2,3)P, [3,4)P, >=4P */
+    Uint32 lastPresentStamp, lastPresentPeriod, skipsSincePresent;
+    Bool haveLastPresent;
+};
+
 struct StatsT
 {
+    V45CadenceT v45[AURORA_FP_CORE_COUNT];
     BucketT stateAll[AURORA_FP_STATE_COUNT];
     BucketT stateNormal[AURORA_FP_STATE_COUNT];
     BucketT stateSpike[AURORA_FP_STATE_COUNT];
@@ -764,12 +908,82 @@ static void AccumulateBucket(BucketT &b, Uint32 tick, const DerivedT &d)
             b.snesBgChrMeasuredDecodeCycles +=
                 s_frame.snesBgChrMeasuredDecodeCycles;
             b.snesBgChrBadRecords += s_frame.snesBgChrBadRecords;
-            for (Uint32 i = 0; i < 68u; ++i)
+            b.snesBgChrTraitsCycles += s_frame.snesBgChrTraitsCycles;
+            for (Uint32 i = 0; i < 69u; ++i)
             {
                 b.snesDeepCalls[i] += s_frame.snesDeepCalls[i];
                 b.snesDeepUnits[i] += s_frame.snesDeepUnits[i];
                 b.snesDeepCycles[i] += s_frame.snesDeepCycles[i];
             }
+
+            b.snesChr4LocalityCalls += s_frame.snesChr4LocalityCalls;
+            b.snesChr4LocalityTiles += s_frame.snesChr4LocalityTiles;
+            b.snesChr4OpaqueTiles += s_frame.snesChr4OpaqueTiles;
+            b.snesChr4PaletteReuses += s_frame.snesChr4PaletteReuses;
+            b.snesChr4PaletteRuns += s_frame.snesChr4PaletteRuns;
+            b.snesChr4FlipSame += s_frame.snesChr4FlipSame;
+            b.snesChr4FlipChanges += s_frame.snesChr4FlipChanges;
+            b.snesChr4RowSame += s_frame.snesChr4RowSame;
+            b.snesChr4RowPlus16 += s_frame.snesChr4RowPlus16;
+            b.snesChr4RowMinus16 += s_frame.snesChr4RowMinus16;
+            b.snesChr4RowOther += s_frame.snesChr4RowOther;
+
+            b.snesObjMicroscopeCalls += s_frame.snesObjMicroscopeCalls;
+            b.snesObjHitTiles += s_frame.snesObjHitTiles;
+            b.snesObjHitCycles += s_frame.snesObjHitCycles;
+            b.snesObjMissTiles += s_frame.snesObjMissTiles;
+            b.snesObjMissCycles += s_frame.snesObjMissCycles;
+            b.snesObjHitTransparent += s_frame.snesObjHitTransparent;
+            b.snesObjHitFullOpaque += s_frame.snesObjHitFullOpaque;
+            b.snesObjHitPartial += s_frame.snesObjHitPartial;
+            b.snesObjMicMissTransparent += s_frame.snesObjMicMissTransparent;
+            b.snesObjMicMissFullOpaque += s_frame.snesObjMicMissFullOpaque;
+            b.snesObjMicMissPartial += s_frame.snesObjMicMissPartial;
+            b.snesObjRowSame += s_frame.snesObjRowSame;
+            b.snesObjRowPlus16 += s_frame.snesObjRowPlus16;
+            b.snesObjRowMinus16 += s_frame.snesObjRowMinus16;
+            b.snesObjRowOther += s_frame.snesObjRowOther;
+
+            b.snesChr4OpaqueTransitions += s_frame.snesChr4OpaqueTransitions;
+            b.snesChr4AdjacentOpaqueTransitions += s_frame.snesChr4AdjacentOpaqueTransitions;
+            b.snesChr4PaletteIndexReuses += s_frame.snesChr4PaletteIndexReuses;
+            b.snesChr4DecodeKeyReuses += s_frame.snesChr4DecodeKeyReuses;
+            b.snesChr4RowSameFlipChanged += s_frame.snesChr4RowSameFlipChanged;
+            b.snesChr4PixelKeyReuses += s_frame.snesChr4PixelKeyReuses;
+            b.snesChr4AdjacentPaletteIndexReuses += s_frame.snesChr4AdjacentPaletteIndexReuses;
+            b.snesChr4AdjacentDecodeKeyReuses += s_frame.snesChr4AdjacentDecodeKeyReuses;
+            b.snesChr4AdjacentPixelKeyReuses += s_frame.snesChr4AdjacentPixelKeyReuses;
+
+            for (Uint32 uBG = 0; uBG < 4u; ++uBG)
+            {
+                for (Uint32 uPath = 0; uPath < 6u; ++uPath)
+                {
+                    b.snesChr4CellCalls[uBG][uPath] += s_frame.snesChr4CellCalls[uBG][uPath];
+                    b.snesChr4CellTiles[uBG][uPath] += s_frame.snesChr4CellTiles[uBG][uPath];
+                    b.snesChr4CellOpaqueTiles[uBG][uPath] += s_frame.snesChr4CellOpaqueTiles[uBG][uPath];
+                    b.snesChr4CellOpaqueTransitions[uBG][uPath] += s_frame.snesChr4CellOpaqueTransitions[uBG][uPath];
+                    b.snesChr4CellAdjacentOpaqueTransitions[uBG][uPath] += s_frame.snesChr4CellAdjacentOpaqueTransitions[uBG][uPath];
+                    b.snesChr4CellPaletteIndexReuses[uBG][uPath] += s_frame.snesChr4CellPaletteIndexReuses[uBG][uPath];
+                    b.snesChr4CellDecodeKeyReuses[uBG][uPath] += s_frame.snesChr4CellDecodeKeyReuses[uBG][uPath];
+                    b.snesChr4CellRowSameFlipChanged[uBG][uPath] += s_frame.snesChr4CellRowSameFlipChanged[uBG][uPath];
+                    b.snesChr4CellPixelKeyReuses[uBG][uPath] += s_frame.snesChr4CellPixelKeyReuses[uBG][uPath];
+                    b.snesChr4CellAdjacentPaletteIndexReuses[uBG][uPath] += s_frame.snesChr4CellAdjacentPaletteIndexReuses[uBG][uPath];
+                    b.snesChr4CellAdjacentDecodeKeyReuses[uBG][uPath] += s_frame.snesChr4CellAdjacentDecodeKeyReuses[uBG][uPath];
+                    b.snesChr4CellAdjacentPixelKeyReuses[uBG][uPath] += s_frame.snesChr4CellAdjacentPixelKeyReuses[uBG][uPath];
+                }
+            }
+        }
+    }
+
+    if (s_frame.core == AURORA_FP_CORE_PCE ||
+        s_frame.core == AURORA_FP_CORE_GBA ||
+        s_frame.core == AURORA_FP_CORE_SEGA)
+    {
+        for (Uint32 i=0; i<AURORA_EXT_BUCKET_MAX; ++i)
+        {
+            b.externalCalls[i] += s_frame.externalCalls[i];
+            b.externalUnits[i] += s_frame.externalUnits[i];
+            b.externalCycles[i] += s_frame.externalCycles[i];
         }
     }
 
@@ -1442,6 +1656,29 @@ static Bool WriteSnesBgChrSummarySet(
         (unsigned long long)b.snesBgChrBadRecords) >= 0;
 }
 
+/* AURORA_V23_SNES_BGCHR_TRAITS_COST_20261009
+ * Estimates observer/collector cost inside parent BGCHR; not a core speedup. */
+static Bool WriteSnesBgChrTraitsCostSet(
+    FILE *fp, const char *title, const BucketT *set)
+{
+    const BucketT &b = set[AURORA_FP_CORE_SNES];
+    const Uint64 frames = b.frames;
+    const Uint64 bgchr = b.snesPpuCycles[5];
+    const Uint64 measured = b.snesBgChrMeasuredCycles;
+    const Uint64 outer = bgchr >= measured ? bgchr - measured : 0u;
+    const Uint64 traits = b.snesBgChrTraitsCycles;
+    const Uint64 leftover = outer >= traits ? outer - traits : 0u;
+    return fprintf(fp,
+        "\n[%s]\n"
+        "frames,traits_scan_avg,outer_ex_traits_avg,outer_raw_avg\n"
+        "%llu,%llu,%llu,%llu\n",
+        title,
+        (unsigned long long)frames,
+        (unsigned long long)Avg(traits, frames),
+        (unsigned long long)Avg(leftover, frames),
+        (unsigned long long)Avg(outer, frames)) >= 0;
+}
+
 static Bool WriteSnesBgChrLayerDepthSet(
     FILE *fp, const char *title, const BucketT *set)
 {
@@ -1517,10 +1754,266 @@ static Bool WriteSnesBgChrFlagsSet(
     return TRUE;
 }
 
+/* AURORA_SNES_MICROSCOPE_REPORT_V3_26_20261006 */
+static Bool WriteSnesChr4LocalitySet(
+    FILE *fp, const char *title, const BucketT *set)
+{
+    const BucketT &b = set[AURORA_FP_CORE_SNES];
+    const Uint64 f = b.frames;
+    const Uint64 flipTransitions = b.snesChr4FlipSame + b.snesChr4FlipChanges;
+    const Uint64 rowTransitions = b.snesChr4RowSame + b.snesChr4RowPlus16 +
+        b.snesChr4RowMinus16 + b.snesChr4RowOther;
+    const Uint64 rowPm16 = b.snesChr4RowPlus16 + b.snesChr4RowMinus16;
+    const Uint64 rowPredictable = b.snesChr4RowSame + rowPm16;
+
+    if (fprintf(fp,
+        "\n[%s]\n"
+        "kind,calls_avg_x100,tiles_avg_x100,opaque_tiles_avg_x100,"
+        "palette_reusable_avg_x100,palette_runs_avg_x100,"
+        "palette_reuse_pct_x100,palette_avg_run_x1000,"
+        "flip_same_avg_x100,flip_change_avg_x100,flip_same_pct_x100,"
+        "row_same_avg_x100,row_plus16_avg_x100,row_minus16_avg_x100,"
+        "row_other_avg_x100,row_pm16_pct_x100,row_predictable_pct_x100\n",
+        title) < 0) return FALSE;
+
+    return fprintf(fp,
+        "CHR4,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
+        "%llu,%llu,%llu,%llu,%llu,%llu\n",
+        (unsigned long long)SnesScaledDiv(b.snesChr4LocalityCalls, f, 100u),
+        (unsigned long long)SnesScaledDiv(b.snesChr4LocalityTiles, f, 100u),
+        (unsigned long long)SnesScaledDiv(b.snesChr4OpaqueTiles, f, 100u),
+        (unsigned long long)SnesScaledDiv(b.snesChr4PaletteReuses, f, 100u),
+        (unsigned long long)SnesScaledDiv(b.snesChr4PaletteRuns, f, 100u),
+        (unsigned long long)SnesScaledDiv(b.snesChr4PaletteReuses,
+            b.snesChr4OpaqueTiles, 10000u),
+        (unsigned long long)SnesScaledDiv(b.snesChr4OpaqueTiles,
+            b.snesChr4PaletteRuns, 1000u),
+        (unsigned long long)SnesScaledDiv(b.snesChr4FlipSame, f, 100u),
+        (unsigned long long)SnesScaledDiv(b.snesChr4FlipChanges, f, 100u),
+        (unsigned long long)SnesScaledDiv(b.snesChr4FlipSame,
+            flipTransitions, 10000u),
+        (unsigned long long)SnesScaledDiv(b.snesChr4RowSame, f, 100u),
+        (unsigned long long)SnesScaledDiv(b.snesChr4RowPlus16, f, 100u),
+        (unsigned long long)SnesScaledDiv(b.snesChr4RowMinus16, f, 100u),
+        (unsigned long long)SnesScaledDiv(b.snesChr4RowOther, f, 100u),
+        (unsigned long long)SnesScaledDiv(rowPm16, rowTransitions, 10000u),
+        (unsigned long long)SnesScaledDiv(rowPredictable, rowTransitions, 10000u)) >= 0;
+}
+
+static Bool WriteSnesObjMicroscopeSet(
+    FILE *fp, const char *title, const BucketT *set)
+{
+    const BucketT &b = set[AURORA_FP_CORE_SNES];
+    const Uint64 f = b.frames;
+    const Uint64 totalTiles = b.snesObjHitTiles + b.snesObjMissTiles;
+    const Uint64 hitPathX1000 = SnesScaledDiv(
+        b.snesObjHitCycles, b.snesObjHitTiles, 1000u);
+    const Uint64 missPathX1000 = SnesScaledDiv(
+        b.snesObjMissCycles, b.snesObjMissTiles, 1000u);
+    const Uint64 missExtraX1000 = missPathX1000 >= hitPathX1000
+        ? missPathX1000 - hitPathX1000 : 0u;
+    const Uint64 rowTransitions = b.snesObjRowSame + b.snesObjRowPlus16 +
+        b.snesObjRowMinus16 + b.snesObjRowOther;
+    const Uint64 rowPm16 = b.snesObjRowPlus16 + b.snesObjRowMinus16;
+    const Uint64 rowPredictable = b.snesObjRowSame + rowPm16;
+
+    if (fprintf(fp,
+        "\n[%s]\n"
+        "kind,calls_avg_x100,hit_tiles_avg_x100,miss_tiles_avg_x100,hit_pct_x100,"
+        "hit_path_cycles_avg,miss_path_cycles_avg,hit_path_cycles_per_tile_x1000,"
+        "miss_path_cycles_per_tile_x1000,miss_extra_cycles_per_tile_x1000,"
+        "hit_transparent_avg_x100,hit_full_opaque_avg_x100,hit_partial_avg_x100,"
+        "hit_transparent_pct_x100,hit_full_opaque_pct_x100,hit_partial_pct_x100,"
+        "miss_transparent_avg_x100,miss_full_opaque_avg_x100,miss_partial_avg_x100,"
+        "row_same_avg_x100,row_plus16_avg_x100,row_minus16_avg_x100,row_other_avg_x100,"
+        "row_pm16_pct_x100,row_predictable_pct_x100\n",
+        title) < 0) return FALSE;
+
+    return fprintf(fp,
+        "OBJ,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
+        "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
+        "%llu,%llu,%llu,%llu,%llu,%llu\n",
+        (unsigned long long)SnesScaledDiv(b.snesObjMicroscopeCalls, f, 100u),
+        (unsigned long long)SnesScaledDiv(b.snesObjHitTiles, f, 100u),
+        (unsigned long long)SnesScaledDiv(b.snesObjMissTiles, f, 100u),
+        (unsigned long long)SnesScaledDiv(b.snesObjHitTiles, totalTiles, 10000u),
+        (unsigned long long)Avg(b.snesObjHitCycles, f),
+        (unsigned long long)Avg(b.snesObjMissCycles, f),
+        (unsigned long long)hitPathX1000,
+        (unsigned long long)missPathX1000,
+        (unsigned long long)missExtraX1000,
+        (unsigned long long)SnesScaledDiv(b.snesObjHitTransparent, f, 100u),
+        (unsigned long long)SnesScaledDiv(b.snesObjHitFullOpaque, f, 100u),
+        (unsigned long long)SnesScaledDiv(b.snesObjHitPartial, f, 100u),
+        (unsigned long long)SnesScaledDiv(b.snesObjHitTransparent,
+            b.snesObjHitTiles, 10000u),
+        (unsigned long long)SnesScaledDiv(b.snesObjHitFullOpaque,
+            b.snesObjHitTiles, 10000u),
+        (unsigned long long)SnesScaledDiv(b.snesObjHitPartial,
+            b.snesObjHitTiles, 10000u),
+        (unsigned long long)SnesScaledDiv(b.snesObjMicMissTransparent, f, 100u),
+        (unsigned long long)SnesScaledDiv(b.snesObjMicMissFullOpaque, f, 100u),
+        (unsigned long long)SnesScaledDiv(b.snesObjMicMissPartial, f, 100u),
+        (unsigned long long)SnesScaledDiv(b.snesObjRowSame, f, 100u),
+        (unsigned long long)SnesScaledDiv(b.snesObjRowPlus16, f, 100u),
+        (unsigned long long)SnesScaledDiv(b.snesObjRowMinus16, f, 100u),
+        (unsigned long long)SnesScaledDiv(b.snesObjRowOther, f, 100u),
+        (unsigned long long)SnesScaledDiv(rowPm16, rowTransitions, 10000u),
+        (unsigned long long)SnesScaledDiv(rowPredictable, rowTransitions, 10000u)) >= 0;
+}
+
+/* AURORA_CHR4_REUSE_REPORT_V3_28_20261007 */
+static Bool WriteSnesChr4ReuseSet(
+    FILE *fp, const char *title, const BucketT *set)
+{
+    const BucketT &b = set[AURORA_FP_CORE_SNES];
+    const Uint64 f = b.frames;
+    const Uint64 opaque = b.snesChr4OpaqueTiles;
+    const Uint64 palRuns = opaque >= b.snesChr4PaletteIndexReuses
+        ? opaque - b.snesChr4PaletteIndexReuses : 0u;
+    const Uint64 decodeRuns = opaque >= b.snesChr4DecodeKeyReuses
+        ? opaque - b.snesChr4DecodeKeyReuses : 0u;
+    const Uint64 pixelRuns = opaque >= b.snesChr4PixelKeyReuses
+        ? opaque - b.snesChr4PixelKeyReuses : 0u;
+    const Uint64 sameRowAny =
+        b.snesChr4DecodeKeyReuses + b.snesChr4RowSameFlipChanged;
+
+    if (fprintf(fp,
+        "\n[%s]\n"
+        "kind,opaque_tiles_avg_x100,opaque_transitions_avg_x100,"
+        "adjacent_opaque_transitions_avg_x100,"
+        "palette_index_reuse_avg_x100,palette_index_reuse_pct_x100,"
+        "palette_index_avg_run_x1000,"
+        "decode_key_reuse_avg_x100,decode_key_reuse_pct_x100,"
+        "decode_key_avg_run_x1000,"
+        "row_same_flip_changed_avg_x100,row_same_any_pct_x100,"
+        "pixel_key_reuse_avg_x100,pixel_key_reuse_pct_x100,"
+        "pixel_key_avg_run_x1000,"
+        "adjacent_palette_index_reuse_pct_x100,"
+        "adjacent_decode_key_reuse_pct_x100,"
+        "adjacent_pixel_key_reuse_pct_x100\n",
+        title) < 0) return FALSE;
+
+    return fprintf(fp,
+        "CHR4,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
+        "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
+        (unsigned long long)SnesScaledDiv(opaque, f, 100u),
+        (unsigned long long)SnesScaledDiv(b.snesChr4OpaqueTransitions, f, 100u),
+        (unsigned long long)SnesScaledDiv(
+            b.snesChr4AdjacentOpaqueTransitions, f, 100u),
+        (unsigned long long)SnesScaledDiv(
+            b.snesChr4PaletteIndexReuses, f, 100u),
+        (unsigned long long)SnesScaledDiv(
+            b.snesChr4PaletteIndexReuses, opaque, 10000u),
+        (unsigned long long)SnesScaledDiv(opaque, palRuns, 1000u),
+        (unsigned long long)SnesScaledDiv(
+            b.snesChr4DecodeKeyReuses, f, 100u),
+        (unsigned long long)SnesScaledDiv(
+            b.snesChr4DecodeKeyReuses, opaque, 10000u),
+        (unsigned long long)SnesScaledDiv(opaque, decodeRuns, 1000u),
+        (unsigned long long)SnesScaledDiv(
+            b.snesChr4RowSameFlipChanged, f, 100u),
+        (unsigned long long)SnesScaledDiv(
+            sameRowAny, b.snesChr4OpaqueTransitions, 10000u),
+        (unsigned long long)SnesScaledDiv(
+            b.snesChr4PixelKeyReuses, f, 100u),
+        (unsigned long long)SnesScaledDiv(
+            b.snesChr4PixelKeyReuses, opaque, 10000u),
+        (unsigned long long)SnesScaledDiv(opaque, pixelRuns, 1000u),
+        (unsigned long long)SnesScaledDiv(
+            b.snesChr4AdjacentPaletteIndexReuses,
+            b.snesChr4AdjacentOpaqueTransitions, 10000u),
+        (unsigned long long)SnesScaledDiv(
+            b.snesChr4AdjacentDecodeKeyReuses,
+            b.snesChr4AdjacentOpaqueTransitions, 10000u),
+        (unsigned long long)SnesScaledDiv(
+            b.snesChr4AdjacentPixelKeyReuses,
+            b.snesChr4AdjacentOpaqueTransitions, 10000u)) >= 0;
+}
+
+/* AURORA_CHR4_PATH_BG_REPORT_V3_29_20261007 */
+static const char *SnesChr4PathName(Uint32 path)
+{
+    static const char *const names[6] = {
+        "NOOFFSET", "OFFSET", "MODE5_MAIN", "MODE5_SUB",
+        "MODE6_MAIN", "MODE6_SUB"
+    };
+    return path < 6u ? names[path] : "BAD";
+}
+
+static Bool WriteSnesChr4ReuseMatrixSet(
+    FILE *fp, const char *title, const BucketT *set)
+{
+    const BucketT &b = set[AURORA_FP_CORE_SNES];
+    const Uint64 f = b.frames;
+
+    if (fprintf(fp,
+        "\n[%s]\n"
+        "bg,path,calls_avg_x100,tiles_avg_x100,opaque_avg_x100,opaque_pct_x100,"
+        "opaque_transitions_avg_x100,palette_reuse_of_transitions_pct_x100,"
+        "palette_avg_run_x1000,decode_reuse_of_transitions_pct_x100,"
+        "decode_avg_run_x1000,row_same_any_of_transitions_pct_x100,"
+        "pixel_reuse_of_transitions_pct_x100,pixel_avg_run_x1000,"
+        "adjacent_transitions_avg_x100,adjacent_palette_reuse_pct_x100,"
+        "adjacent_decode_reuse_pct_x100,adjacent_pixel_reuse_pct_x100\n",
+        title) < 0) return FALSE;
+
+    for (Uint32 bg = 0; bg < 4u; ++bg)
+    {
+        for (Uint32 path = 0; path < 6u; ++path)
+        {
+            const Uint64 calls = b.snesChr4CellCalls[bg][path];
+            if (!calls)
+                continue;
+            const Uint64 tiles = b.snesChr4CellTiles[bg][path];
+            const Uint64 opaque = b.snesChr4CellOpaqueTiles[bg][path];
+            const Uint64 transitions = b.snesChr4CellOpaqueTransitions[bg][path];
+            const Uint64 adjacent = b.snesChr4CellAdjacentOpaqueTransitions[bg][path];
+            const Uint64 palReuse = b.snesChr4CellPaletteIndexReuses[bg][path];
+            const Uint64 decodeReuse = b.snesChr4CellDecodeKeyReuses[bg][path];
+            const Uint64 rowFlipChange = b.snesChr4CellRowSameFlipChanged[bg][path];
+            const Uint64 pixelReuse = b.snesChr4CellPixelKeyReuses[bg][path];
+            const Uint64 palRuns = opaque >= palReuse ? opaque - palReuse : 0u;
+            const Uint64 decodeRuns = opaque >= decodeReuse ? opaque - decodeReuse : 0u;
+            const Uint64 pixelRuns = opaque >= pixelReuse ? opaque - pixelReuse : 0u;
+
+            if (fprintf(fp,
+                "BG%u,%s,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
+                "%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
+                (unsigned)bg, SnesChr4PathName(path),
+                (unsigned long long)SnesScaledDiv(calls, f, 100u),
+                (unsigned long long)SnesScaledDiv(tiles, f, 100u),
+                (unsigned long long)SnesScaledDiv(opaque, f, 100u),
+                (unsigned long long)SnesScaledDiv(opaque, tiles, 10000u),
+                (unsigned long long)SnesScaledDiv(transitions, f, 100u),
+                (unsigned long long)SnesScaledDiv(palReuse, transitions, 10000u),
+                (unsigned long long)SnesScaledDiv(opaque, palRuns, 1000u),
+                (unsigned long long)SnesScaledDiv(decodeReuse, transitions, 10000u),
+                (unsigned long long)SnesScaledDiv(opaque, decodeRuns, 1000u),
+                (unsigned long long)SnesScaledDiv(
+                    decodeReuse + rowFlipChange, transitions, 10000u),
+                (unsigned long long)SnesScaledDiv(pixelReuse, transitions, 10000u),
+                (unsigned long long)SnesScaledDiv(opaque, pixelRuns, 1000u),
+                (unsigned long long)SnesScaledDiv(adjacent, f, 100u),
+                (unsigned long long)SnesScaledDiv(
+                    b.snesChr4CellAdjacentPaletteIndexReuses[bg][path],
+                    adjacent, 10000u),
+                (unsigned long long)SnesScaledDiv(
+                    b.snesChr4CellAdjacentDecodeKeyReuses[bg][path],
+                    adjacent, 10000u),
+                (unsigned long long)SnesScaledDiv(
+                    b.snesChr4CellAdjacentPixelKeyReuses[bg][path],
+                    adjacent, 10000u)) < 0)
+                return FALSE;
+        }
+    }
+    return TRUE;
+}
+
 /* AURORA_SNES_DEEP_OPT_V3_14_20261005 */
 static const char *SnesDeepName(Uint32 i)
 {
-    static const char *const names[68] = {
+    static const char *const names[69] = {
         "M7_SETUP",
         "M7_FETCH_REPEAT_DY0",
         "M7_FETCH_REPEAT_UNITX",
@@ -1588,9 +2081,10 @@ static const char *SnesDeepName(Uint32 i)
         "OBJ_MISS_TRANSPARENT",
         "OBJ_MISS_OPAQUE",
         "OBJ_HFLIP_TILES",
-        "OBJ_SECOND_TABLE_TILES"
+        "OBJ_SECOND_TABLE_TILES",
+        "OBJ_COMPACT"
     };
-    return i < 68u ? names[i] : "?";
+    return i < 69u ? names[i] : "?";
 }
 
 static Bool WriteSnesDeepSet(FILE *fp, const char *title, const BucketT *set)
@@ -1601,7 +2095,7 @@ static Bool WriteSnesDeepSet(FILE *fp, const char *title, const BucketT *set)
         "\n[%s]\n"
         "bucket,calls_avg_x100,units_avg_x100,cycles_avg,cycles_per_call_x1000,cycles_per_unit_x1000\n",
         title) < 0) return FALSE;
-    for (Uint32 i = 0; i < 68u; ++i)
+    for (Uint32 i = 0; i < 69u; ++i)
     {
         if (fprintf(fp, "%s,%llu,%llu,%llu,%llu,%llu\n",
             SnesDeepName(i),
@@ -1637,7 +2131,8 @@ static Bool WriteSnesDeepReconcileSet(FILE *fp, const char *title, const BucketT
     bgmain += b.snesDeepCycles[40];
     for (Uint32 i=25u;i<=28u;++i) bgsub += b.snesDeepCycles[i];
     bgsub += b.snesDeepCycles[41];
-    obj = b.snesDeepCycles[29] + b.snesDeepCycles[30];
+    obj = b.snesDeepCycles[29] + b.snesDeepCycles[30] +
+        b.snesDeepCycles[AURORA_SNES_DEEP_OBJ_COMPACT];
     hdma = b.snesDeepCycles[31] + b.snesDeepCycles[32];
     for (Uint32 i=33u;i<=36u;++i) mdma += b.snesDeepCycles[i];
     cpu = b.snesDeepCycles[37] + b.snesDeepCycles[38];
@@ -1654,6 +2149,329 @@ static Bool WriteSnesDeepReconcileSet(FILE *fp, const char *title, const BucketT
     if (!WriteSnesDeepReconcileRow(fp,"MDMA",f,b.span[SPAN_SNES_MDMA],mdma)) return FALSE;
     if (!WriteSnesDeepReconcileRow(fp,"HDMA",f,b.span[SPAN_SNES_HDMA_DATA],hdma)) return FALSE;
     if (!WriteSnesDeepReconcileRow(fp,"CPU",f,b.snesCostCycles[0],cpu)) return FALSE;
+    return TRUE;
+}
+
+/* AURORA_MULTICORE_DEEP_PROFILER_V3_48_20261008 */
+enum AuroraExternalRelationE
+{
+    AURORA_EXT_PARTITION = 0,
+    AURORA_EXT_NESTED = 1
+};
+struct AuroraExternalMetaT
+{
+    const char *name;
+    Int32 parent; /* -1 = SPAN_CORE */
+    Uint8 relation;
+};
+
+static const AuroraExternalMetaT s_pceDeepMeta[AURORA_PCE_BUCKET_COUNT] =
+{
+    {"BRIDGE_RETRO_RUN", -1, AURORA_EXT_PARTITION},
+    {"BRIDGE_RENDER", -1, AURORA_EXT_PARTITION},
+    {"BRIDGE_MIX_FLUSH", -1, AURORA_EXT_PARTITION},
+    {"RETRO_INPUT", AURORA_PCE_BRIDGE_RETRO_RUN, AURORA_EXT_PARTITION},
+    {"EMULATE_TOTAL", AURORA_PCE_BRIDGE_RETRO_RUN, AURORA_EXT_PARTITION},
+    {"RETRO_VIDEO_CB", AURORA_PCE_BRIDGE_RETRO_RUN, AURORA_EXT_PARTITION},
+    {"RETRO_AUDIO_CB", AURORA_PCE_BRIDGE_RETRO_RUN, AURORA_EXT_PARTITION},
+    {"EMU_INPUT_FRAME", AURORA_PCE_EMULATE_TOTAL, AURORA_EXT_PARTITION},
+    {"VDC_FRAME", AURORA_PCE_EMULATE_TOTAL, AURORA_EXT_PARTITION},
+    {"EMU_CD_FINAL", AURORA_PCE_EMULATE_TOTAL, AURORA_EXT_PARTITION},
+    {"EMU_PSG_END", AURORA_PCE_EMULATE_TOTAL, AURORA_EXT_PARTITION},
+    {"EMU_BLIP_READ", AURORA_PCE_EMULATE_TOTAL, AURORA_EXT_PARTITION},
+    {"VDC_CPU", AURORA_PCE_VDC_FRAME, AURORA_EXT_PARTITION},
+    {"VDC_BG", AURORA_PCE_VDC_FRAME, AURORA_EXT_PARTITION},
+    {"VDC_SPR", AURORA_PCE_VDC_FRAME, AURORA_EXT_PARTITION},
+    {"VDC_MIX", AURORA_PCE_VDC_FRAME, AURORA_EXT_PARTITION},
+    {"VDC_OVERSCAN", AURORA_PCE_VDC_FRAME, AURORA_EXT_PARTITION},
+    {"VDC_DMA", AURORA_PCE_VDC_FRAME, AURORA_EXT_PARTITION},
+    {"VDC_SATDMA", AURORA_PCE_VDC_FRAME, AURORA_EXT_PARTITION},
+    {"VDC_CD_SYNC", AURORA_PCE_VDC_FRAME, AURORA_EXT_PARTITION},
+    {"PSG_UPDATE", -1, AURORA_EXT_NESTED},
+    {"CD_RUN", -1, AURORA_EXT_NESTED},
+    {"CD_DRIVE", AURORA_PCE_CD_RUN, AURORA_EXT_NESTED},
+    {"CD_ADPCM", AURORA_PCE_CD_RUN, AURORA_EXT_NESTED},
+    {"CD_FADER", AURORA_PCE_CD_RUN, AURORA_EXT_NESTED},
+
+    /* AURORA_PCE_SPRITE_DEEP_PROFILER_V3_49_20261008 */
+    {"SPR_PREP", AURORA_PCE_VDC_SPR, AURORA_EXT_PARTITION},
+    {"SPR_CLEAR", AURORA_PCE_VDC_SPR, AURORA_EXT_PARTITION},
+    {"SPR_DRAW", AURORA_PCE_VDC_SPR, AURORA_EXT_PARTITION},
+
+    {"SPR_WORK_LINES", AURORA_PCE_VDC_SPR, AURORA_EXT_NESTED},
+    {"SPR_WORK_NONEMPTY_LINES", AURORA_PCE_VDC_SPR, AURORA_EXT_NESTED},
+    {"SPR_WORK_LINE_UNITS", AURORA_PCE_VDC_SPR, AURORA_EXT_NESTED},
+    {"SPR_WORK_NATIVE_SELECTED", AURORA_PCE_VDC_SPR, AURORA_EXT_NESTED},
+    {"SPR_WORK_POST_LIMIT", AURORA_PCE_VDC_SPR, AURORA_EXT_NESTED},
+    {"SPR_WORK_SOURCE_SPRITES", AURORA_PCE_VDC_SPR, AURORA_EXT_NESTED},
+    {"SPR_WORK_OVERFLOW_LINES", AURORA_PCE_VDC_SPR, AURORA_EXT_NESTED},
+    {"SPR_WORK_GE8_LINES", AURORA_PCE_VDC_SPR, AURORA_EXT_NESTED},
+    {"SPR_WORK_GE12_LINES", AURORA_PCE_VDC_SPR, AURORA_EXT_NESTED},
+    {"SPR_WORK_GE16_LINES", AURORA_PCE_VDC_SPR, AURORA_EXT_NESTED},
+    {"SPR_WORK_MAX_UNITS", AURORA_PCE_VDC_SPR, AURORA_EXT_NESTED},
+    {"SPR_WORK_MAX_SOURCES", AURORA_PCE_VDC_SPR, AURORA_EXT_NESTED},
+    {"SPR_WORK_OFFSCREEN", AURORA_PCE_VDC_SPR, AURORA_EXT_NESTED},
+    {"SPR_WORK_PARTIAL_CLIP", AURORA_PCE_VDC_SPR, AURORA_EXT_NESTED},
+    {"SPR_WORK_DRAWN_UNITS", AURORA_PCE_VDC_SPR, AURORA_EXT_NESTED},
+    {"SPR_WORK_ZERO_CHUNKS", AURORA_PCE_VDC_SPR, AURORA_EXT_NESTED},
+    {"SPR_WORK_OPAQUE_CHUNKS", AURORA_PCE_VDC_SPR, AURORA_EXT_NESTED},
+    {"SPR_WORK_MIXED_CHUNKS", AURORA_PCE_VDC_SPR, AURORA_EXT_NESTED},
+    {"SPR_WORK_SPRITE0_UNITS", AURORA_PCE_VDC_SPR, AURORA_EXT_NESTED},
+    {"SPR_WORK_WRITTEN_PIXELS", AURORA_PCE_VDC_SPR, AURORA_EXT_NESTED}
+};
+
+static const AuroraExternalMetaT s_gbaDeepMeta[AURORA_GBA_BUCKET_COUNT] =
+{
+    {"FRAME_INPUT", -1, AURORA_EXT_PARTITION},
+    {"CPU_EXEC", -1, AURORA_EXT_PARTITION},
+    {"AUDIO_RUN", -1, AURORA_EXT_PARTITION},
+    {"VIDEO_RUN", -1, AURORA_EXT_PARTITION},
+    {"SERIAL_FRAME", -1, AURORA_EXT_PARTITION},
+    {"UPDATE_GBA_TOTAL", AURORA_GBA_CPU_EXEC, AURORA_EXT_PARTITION},
+    {"UPDATE_TIMERS", AURORA_GBA_UPDATE_GBA_TOTAL, AURORA_EXT_PARTITION},
+    {"SCANLINE_TOTAL", AURORA_GBA_UPDATE_GBA_TOTAL, AURORA_EXT_PARTITION},
+    {"SOUND_FRAME_FLUSH", AURORA_GBA_UPDATE_GBA_TOTAL, AURORA_EXT_PARTITION},
+    {"DMA_TOTAL", AURORA_GBA_UPDATE_GBA_TOTAL, AURORA_EXT_NESTED},
+    {"RASTER_WINDOW", AURORA_GBA_SCANLINE_TOTAL, AURORA_EXT_PARTITION},
+    {"RASTER_TEXT_BG", AURORA_GBA_RASTER_WINDOW, AURORA_EXT_NESTED},
+    {"RASTER_AFFINE_BG", AURORA_GBA_RASTER_WINDOW, AURORA_EXT_NESTED},
+    {"RASTER_BITMAP_BG", AURORA_GBA_RASTER_WINDOW, AURORA_EXT_NESTED},
+    {"RASTER_OBJ", AURORA_GBA_RASTER_WINDOW, AURORA_EXT_NESTED},
+    {"RASTER_EFFECTS", AURORA_GBA_RASTER_WINDOW, AURORA_EXT_NESTED},
+    {"DMA_CH0", AURORA_GBA_DMA_TOTAL, AURORA_EXT_PARTITION},
+    {"DMA_CH1", AURORA_GBA_DMA_TOTAL, AURORA_EXT_PARTITION},
+    {"DMA_CH2", AURORA_GBA_DMA_TOTAL, AURORA_EXT_PARTITION},
+    {"DMA_CH3", AURORA_GBA_DMA_TOTAL, AURORA_EXT_PARTITION},
+    {"AUDIO_READ", AURORA_GBA_AUDIO_RUN, AURORA_EXT_PARTITION},
+    {"VIDEO_POSTPROCESS", AURORA_GBA_VIDEO_RUN, AURORA_EXT_PARTITION}
+};
+
+static const AuroraExternalMetaT s_segaDeepMeta[AURORA_SEGA_BUCKET_COUNT] =
+{
+    {"BRIDGE_CORE_RUN", -1, AURORA_EXT_PARTITION},
+    {"BRIDGE_RENDER", -1, AURORA_EXT_PARTITION},
+    {"BRIDGE_MIX_FLUSH", -1, AURORA_EXT_PARTITION},
+    {"PICO_FRAME", AURORA_SEGA_BRIDGE_CORE_RUN, AURORA_EXT_PARTITION},
+    {"FRAME_HINTS", AURORA_SEGA_PICO_FRAME, AURORA_EXT_PARTITION},
+    {"M68K", AURORA_SEGA_FRAME_HINTS, AURORA_EXT_NESTED},
+    {"Z80", AURORA_SEGA_FRAME_HINTS, AURORA_EXT_NESTED},
+    {"VDP_SYNC", AURORA_SEGA_FRAME_HINTS, AURORA_EXT_NESTED},
+    {"VDP_FULL", AURORA_SEGA_FRAME_HINTS, AURORA_EXT_NESTED},
+    {"SOUND_TOTAL", AURORA_SEGA_FRAME_HINTS, AURORA_EXT_PARTITION},
+    {"SOUND_PSG", AURORA_SEGA_FRAME_HINTS, AURORA_EXT_NESTED},
+    {"SOUND_DAC", AURORA_SEGA_SOUND_TOTAL, AURORA_EXT_PARTITION},
+    {"SOUND_FM", AURORA_SEGA_FRAME_HINTS, AURORA_EXT_NESTED},
+    {"SOUND_PCM", AURORA_SEGA_SOUND_TOTAL, AURORA_EXT_PARTITION},
+    {"SOUND_CDDA", AURORA_SEGA_SOUND_TOTAL, AURORA_EXT_PARTITION},
+    {"SOUND_MIX", AURORA_SEGA_SOUND_TOTAL, AURORA_EXT_PARTITION},
+    {"TIMERS", AURORA_SEGA_FRAME_HINTS, AURORA_EXT_PARTITION},
+    {"MCD_S68K", AURORA_SEGA_BRIDGE_CORE_RUN, AURORA_EXT_NESTED}
+};
+
+static Bool WriteExternalDeepSet(FILE *fp, const char *title,
+    const BucketT *set, Uint32 core,
+    const AuroraExternalMetaT *meta, Uint32 count)
+{
+    const BucketT &b = set[core];
+    const Uint64 frames = b.frames;
+    if (!frames) return TRUE;
+    if (fprintf(fp,
+        "\n[%s]\n"
+        "bucket,parent,relation,calls_avg_x100,units_avg_x100,cycles_avg,cycles_per_call_x1000,cycles_per_unit_x1000,pct_parent_x100\n",
+        title) < 0) return FALSE;
+    for (Uint32 i=0; i<count; ++i)
+    {
+        const Int32 parent = meta[i].parent;
+        const Uint64 parentCycles = parent < 0
+            ? b.span[SPAN_CORE] : b.externalCycles[(Uint32)parent];
+        const char *parentName = parent < 0 ? "CORE" : meta[parent].name;
+        if (fprintf(fp, "%s,%s,%s,%llu,%llu,%llu,%llu,%llu,%llu\n",
+            meta[i].name, parentName,
+            meta[i].relation == AURORA_EXT_PARTITION ? "partition" : "nested",
+            (unsigned long long)SnesScaledDiv(b.externalCalls[i], frames, 100u),
+            (unsigned long long)SnesScaledDiv(b.externalUnits[i], frames, 100u),
+            (unsigned long long)Avg(b.externalCycles[i], frames),
+            (unsigned long long)SnesScaledDiv(b.externalCycles[i], b.externalCalls[i], 1000u),
+            (unsigned long long)SnesScaledDiv(b.externalCycles[i], b.externalUnits[i], 1000u),
+            (unsigned long long)SnesScaledDiv(b.externalCycles[i], parentCycles, 10000u)) < 0)
+            return FALSE;
+    }
+    return TRUE;
+}
+
+static Bool WriteExternalReconcileSet(FILE *fp, const char *title,
+    const BucketT *set, Uint32 core,
+    const AuroraExternalMetaT *meta, Uint32 count)
+{
+    const BucketT &b = set[core];
+    const Uint64 frames = b.frames;
+    if (!frames) return TRUE;
+    if (fprintf(fp,
+        "\n[%s]\nparent,parent_avg,partition_children_avg,residual_avg,coverage_pct_x100\n",
+        title) < 0) return FALSE;
+
+    for (Int32 parent=-1; parent<(Int32)count; ++parent)
+    {
+        Uint64 child = 0;
+        Uint32 n = 0;
+        for (Uint32 i=0; i<count; ++i)
+        {
+            if (meta[i].relation == AURORA_EXT_PARTITION && meta[i].parent == parent)
+            {
+                child += b.externalCycles[i];
+                ++n;
+            }
+        }
+        if (!n) continue;
+        const Uint64 parentCycles = parent < 0
+            ? b.span[SPAN_CORE] : b.externalCycles[(Uint32)parent];
+        const Uint64 residual = parentCycles >= child ? parentCycles - child : 0u;
+        const char *name = parent < 0 ? "CORE" : meta[parent].name;
+        if (fprintf(fp, "%s,%llu,%llu,%llu,%llu\n",
+            name,
+            (unsigned long long)Avg(parentCycles, frames),
+            (unsigned long long)Avg(child, frames),
+            (unsigned long long)Avg(residual, frames),
+            (unsigned long long)SnesScaledDiv(child, parentCycles, 10000u)) < 0)
+            return FALSE;
+    }
+    return TRUE;
+}
+
+static Bool WriteExternalCoreProfiler(FILE *fp, const char *suffix,
+    const BucketT *set, Uint32 core)
+{
+    char deepTitle[48];
+    char reconTitle[48];
+    const char *prefix = NULL;
+    const AuroraExternalMetaT *meta = NULL;
+    Uint32 count = 0;
+    switch(core)
+    {
+        case AURORA_FP_CORE_PCE:
+            prefix="PCE"; meta=s_pceDeepMeta; count=AURORA_PCE_BUCKET_COUNT; break;
+        case AURORA_FP_CORE_GBA:
+            prefix="GBA"; meta=s_gbaDeepMeta; count=AURORA_GBA_BUCKET_COUNT; break;
+        case AURORA_FP_CORE_SEGA:
+            prefix="SEGA"; meta=s_segaDeepMeta; count=AURORA_SEGA_BUCKET_COUNT; break;
+        default:
+            return TRUE;
+    }
+    snprintf(deepTitle, sizeof(deepTitle), "%s_DEEP_%s", prefix, suffix);
+    snprintf(reconTitle, sizeof(reconTitle), "%s_RECONCILE_%s", prefix, suffix);
+    return WriteExternalDeepSet(fp, deepTitle, set, core, meta, count) &&
+           WriteExternalReconcileSet(fp, reconTitle, set, core, meta, count);
+}
+
+/* AURORA_PCE_SPRITE_DEEP_PROFILER_V3_49_20261008 */
+static Bool WritePceSpriteWorkSet(FILE *fp, const char *title,
+    const BucketT *set)
+{
+    const BucketT &b = set[AURORA_FP_CORE_PCE];
+    const Uint64 frames = b.frames;
+    if (!frames) return TRUE;
+
+    const Uint64 lines = b.externalUnits[AURORA_PCE_SPR_WORK_LINES];
+    const Uint64 nonempty = b.externalUnits[AURORA_PCE_SPR_WORK_NONEMPTY_LINES];
+    const Uint64 units = b.externalUnits[AURORA_PCE_SPR_WORK_LINE_UNITS];
+    const Uint64 nativeSelected = b.externalUnits[AURORA_PCE_SPR_WORK_NATIVE_SELECTED];
+    const Uint64 postLimit = b.externalUnits[AURORA_PCE_SPR_WORK_POST_LIMIT];
+    const Uint64 sources = b.externalUnits[AURORA_PCE_SPR_WORK_SOURCE_SPRITES];
+    const Uint64 overflow = b.externalUnits[AURORA_PCE_SPR_WORK_OVERFLOW_LINES];
+    const Uint64 ge8 = b.externalUnits[AURORA_PCE_SPR_WORK_GE8_LINES];
+    const Uint64 ge12 = b.externalUnits[AURORA_PCE_SPR_WORK_GE12_LINES];
+    const Uint64 ge16 = b.externalUnits[AURORA_PCE_SPR_WORK_GE16_LINES];
+    const Uint64 maxUnits = b.externalUnits[AURORA_PCE_SPR_WORK_MAX_UNITS];
+    const Uint64 maxSources = b.externalUnits[AURORA_PCE_SPR_WORK_MAX_SOURCES];
+    const Uint64 offscreen = b.externalUnits[AURORA_PCE_SPR_WORK_OFFSCREEN];
+    const Uint64 partial = b.externalUnits[AURORA_PCE_SPR_WORK_PARTIAL_CLIP];
+    const Uint64 drawn = b.externalUnits[AURORA_PCE_SPR_WORK_DRAWN_UNITS];
+    const Uint64 zeroChunks = b.externalUnits[AURORA_PCE_SPR_WORK_ZERO_CHUNKS];
+    const Uint64 opaqueChunks = b.externalUnits[AURORA_PCE_SPR_WORK_OPAQUE_CHUNKS];
+    const Uint64 mixedChunks = b.externalUnits[AURORA_PCE_SPR_WORK_MIXED_CHUNKS];
+    const Uint64 sprite0 = b.externalUnits[AURORA_PCE_SPR_WORK_SPRITE0_UNITS];
+    const Uint64 pixels = b.externalUnits[AURORA_PCE_SPR_WORK_WRITTEN_PIXELS];
+    const Uint64 chunks = zeroChunks + opaqueChunks + mixedChunks;
+
+    if (fprintf(fp,
+        "\n[%s]\n"
+        "frames,spr_lines_avg_x100,nonempty_line_pct_x100,line_units_avg_x100,units_per_line_x1000,native_selected_avg_x100,post_limit_avg_x100,source_sprites_avg_x100,sources_per_nonempty_line_x1000,overflow_lines_avg_x100,overflow_line_pct_x100,ge8_line_pct_x100,ge12_line_pct_x100,ge16_line_pct_x100,max_units_per_frame_avg_x100,max_sources_per_frame_avg_x100,offscreen_avg_x100,partial_clip_avg_x100,drawn_units_avg_x100,zero_chunks_avg_x100,opaque_chunks_avg_x100,mixed_chunks_avg_x100,zero_chunk_pct_x100,opaque_chunk_pct_x100,mixed_chunk_pct_x100,sprite0_units_avg_x100,written_pixels_avg_x100,written_pixels_per_drawn_unit_x1000\n"
+        "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
+        title,
+        (unsigned long long)frames,
+        (unsigned long long)SnesScaledDiv(lines, frames, 100u),
+        (unsigned long long)SnesScaledDiv(nonempty, lines, 10000u),
+        (unsigned long long)SnesScaledDiv(units, frames, 100u),
+        (unsigned long long)SnesScaledDiv(units, lines, 1000u),
+        (unsigned long long)SnesScaledDiv(nativeSelected, frames, 100u),
+        (unsigned long long)SnesScaledDiv(postLimit, frames, 100u),
+        (unsigned long long)SnesScaledDiv(sources, frames, 100u),
+        (unsigned long long)SnesScaledDiv(sources, nonempty, 1000u),
+        (unsigned long long)SnesScaledDiv(overflow, frames, 100u),
+        (unsigned long long)SnesScaledDiv(overflow, lines, 10000u),
+        (unsigned long long)SnesScaledDiv(ge8, lines, 10000u),
+        (unsigned long long)SnesScaledDiv(ge12, lines, 10000u),
+        (unsigned long long)SnesScaledDiv(ge16, lines, 10000u),
+        (unsigned long long)SnesScaledDiv(maxUnits, frames, 100u),
+        (unsigned long long)SnesScaledDiv(maxSources, frames, 100u),
+        (unsigned long long)SnesScaledDiv(offscreen, frames, 100u),
+        (unsigned long long)SnesScaledDiv(partial, frames, 100u),
+        (unsigned long long)SnesScaledDiv(drawn, frames, 100u),
+        (unsigned long long)SnesScaledDiv(zeroChunks, frames, 100u),
+        (unsigned long long)SnesScaledDiv(opaqueChunks, frames, 100u),
+        (unsigned long long)SnesScaledDiv(mixedChunks, frames, 100u),
+        (unsigned long long)SnesScaledDiv(zeroChunks, chunks, 10000u),
+        (unsigned long long)SnesScaledDiv(opaqueChunks, chunks, 10000u),
+        (unsigned long long)SnesScaledDiv(mixedChunks, chunks, 10000u),
+        (unsigned long long)SnesScaledDiv(sprite0, frames, 100u),
+        (unsigned long long)SnesScaledDiv(pixels, frames, 100u),
+        (unsigned long long)SnesScaledDiv(pixels, drawn, 1000u)) < 0)
+        return FALSE;
+    return TRUE;
+}
+
+static Bool WriteV45Cadence(FILE *fp, const StatsT &s)
+{
+    if (fprintf(fp,
+        "\n[V45_VBLANK_CADENCE]\n"
+        "core,presented,skipped,period_samples,period_avg,preflip_work_avg,"
+        "preflip_over_1p,preflip_over_2p,syncflip_wait_avg,"
+        "interval_pairs,interval_gap_avg,nominal_gap_avg,"
+        "excess_gap_avg,excess_gap_gt_half_p,pairs_after_skips,"
+        "skips_between,pairs_lt_1p,pairs_1_2p,pairs_2_3p,"
+        "pairs_3_4p,pairs_ge_4p\n") < 0)
+        return FALSE;
+    for (Uint32 core = 0; core < AURORA_FP_CORE_COUNT; ++core)
+    {
+        const V45CadenceT &c = s.v45[core];
+        if (!c.presented && !c.skipped) continue;
+        if (fprintf(fp,
+            "%s,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
+            "%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
+            "%llu,%llu,%llu,%llu,%llu\n",
+            CoreName(core),
+            (unsigned long long)c.presented,
+            (unsigned long long)c.skipped,
+            (unsigned long long)c.periodSamples,
+            (unsigned long long)Avg(c.periodSum,c.periodSamples),
+            (unsigned long long)Avg(c.preWorkSum,c.periodSamples),
+            (unsigned long long)c.preWorkOverPeriod,
+            (unsigned long long)c.preWorkOver2Periods,
+            (unsigned long long)Avg(c.waitSum,c.periodSamples),
+            (unsigned long long)c.intervalPairs,
+            (unsigned long long)Avg(c.gapSum,c.intervalPairs),
+            (unsigned long long)Avg(c.expectedGapSum,c.intervalPairs),
+            (unsigned long long)Avg(c.excessGapSum,c.intervalPairs),
+            (unsigned long long)c.gapExcessHalfPeriod,
+            (unsigned long long)c.pairsAfterSkips,
+            (unsigned long long)c.skipsBetweenSum,
+            (unsigned long long)c.gapHistogram[0],
+            (unsigned long long)c.gapHistogram[1],
+            (unsigned long long)c.gapHistogram[2],
+            (unsigned long long)c.gapHistogram[3],
+            (unsigned long long)c.gapHistogram[4]) < 0)
+            return FALSE;
+    }
     return TRUE;
 }
 
@@ -1693,6 +2511,83 @@ static Bool WriteSafeFrameskipDiagnostic(FILE *fp, const StatsT &s)
             return FALSE;
     }
     return TRUE;
+}
+
+/* AURORA_V45_VBLANK_CADENCE_PROFILER_ONLY_20261011
+ * Called once at the end of each GAMEPLAY host tick.  Timebase is COP0 COUNT;
+ * all recorded timestamps come from reads the existing profiler already took.
+ * 'expected gap' is ONLY a comparison heuristic based on hidden host ticks,
+ * not a counter of missed hardware vertical retraces. */
+static void V45RecordCadence(Uint32 core)
+{
+    if (core >= AURORA_FP_CORE_COUNT) return;
+    V45CadenceT &c = s_live.v45[core];
+    if (s_frame.fsSkipped)
+    {
+        ++c.skipped;
+        if (c.haveLastPresent && c.skipsSincePresent < 1000000u)
+            ++c.skipsSincePresent;
+        return;
+    }
+    if (!s_frame.v45Presented)
+    {
+        /* Interrupted presentation/UI transition: do not bridge time gaps. */
+        c.haveLastPresent = FALSE;
+        c.skipsSincePresent = 0u;
+        return;
+    }
+    ++c.presented;
+    const Uint32 period = s_frame.fsDetailSeen ? s_frame.fsPeriod : 0u;
+    if (period != 0u)
+    {
+        ++c.periodSamples;
+        c.periodSum += period;
+        c.preWorkSum += s_frame.v45PreFlipWork;
+        c.waitSum += s_frame.cycles[SPAN_VBLANK];
+        if (s_frame.v45PreFlipWork > period) ++c.preWorkOverPeriod;
+        if ((Uint64)s_frame.v45PreFlipWork > (Uint64)period * 2u)
+            ++c.preWorkOver2Periods;
+    }
+    if (c.haveLastPresent && c.lastPresentPeriod != 0u && period != 0u)
+    {
+        /* Modular subtraction supports one wrap of COP0 COUNT. */
+        const Uint32 gap = (Uint32)(s_frame.v45FlipStamp - c.lastPresentStamp);
+        const Uint32 refPeriod = (period / 2u) + (c.lastPresentPeriod / 2u)
+            + ((period & 1u) && (c.lastPresentPeriod & 1u) ? 1u : 0u);
+        const Uint64 expected = (Uint64)refPeriod * (1u + c.skipsSincePresent);
+        ++c.intervalPairs;
+        c.gapSum += gap;
+        c.expectedGapSum += expected;
+        if (gap > expected)
+            c.excessGapSum += (Uint64)gap - expected;
+        if ((Uint64)gap > expected + (Uint64)refPeriod / 2u)
+            ++c.gapExcessHalfPeriod;
+        if (c.skipsSincePresent)
+        {
+            ++c.pairsAfterSkips;
+            c.skipsBetweenSum += c.skipsSincePresent;
+        }
+        const Uint64 g = gap, p = refPeriod;
+        const Uint32 bin = g < p ? 0u :
+                           g < 2u*p ? 1u :
+                           g < 3u*p ? 2u :
+                           g < 4u*p ? 3u : 4u;
+        ++c.gapHistogram[bin];
+    }
+    c.lastPresentStamp = s_frame.v45FlipStamp;
+    c.lastPresentPeriod = period;
+    c.skipsSincePresent = 0u;
+    c.haveLastPresent = TRUE;
+}
+
+static void V45BreakCadenceChain(void)
+{
+    /* Not clearing aggregate counters: just isolate menu/unload transitions. */
+    for (Uint32 core = 0; core < AURORA_FP_CORE_COUNT; ++core)
+    {
+        s_live.v45[core].haveLastPresent = FALSE;
+        s_live.v45[core].skipsSincePresent = 0u;
+    }
 }
 
 static void AccumulateSafeFrameskipDiagnostic(Uint32 core)
@@ -1765,13 +2660,92 @@ static Bool WriteIdentityHeader(FILE *fp)
         ? TRUE : FALSE;
 }
 
+/* AURORA_PCE_V3_DIAGNOSTIC_20261008: PCE-only dump, profiling TU only. */
+extern "C" void PCE_AuroraPceV3WriteDiag(FILE *fp);
+
+/* AURORA_V25_PROFILE_GUIDED_20261010: report-only metrics, no hotpath hooks.
+ * Counts and costs are observational and do not prove counterfactual savings.
+ * Bucket dimensions: depth 0=2bpp, 1=4bpp; deep opaque/transparent units.
+ */
+extern "C" void PCE_AuroraV25PceBmtSnapshot(Uint32 *out);
+static Bool WriteV25CandidateReport(FILE *fp, const StatsT &s)
+{
+    if (fprintf(fp,
+        "\n[V25_BUILD_FEATURES]\n"
+        "feature,status\n"
+        "build,v25.4-bmt-isolated-20261010\n"
+        "snes_chr2_raw_zero,v24-enabled\n"
+        "snes_chr4_branchless,v24-experimental\n"
+        "pce_bmt_delay_slot,v24-enabled\n"
+        "pce_bmt_counter,isolated-noinline-v25.4\n") < 0) return FALSE;
+    const BucketT &b = s.coreNormal[AURORA_FP_CORE_SNES];
+    const Uint64 f = b.frames;
+    if (fprintf(fp,
+        "\n[V25_SNES_KERNEL_NORMAL]\n"
+        "depth,calls_avg_x100,tiles_avg_x100,decode_avg,post_avg,"
+        "decode_per_tile_x1000,transparent_rows_avg_x100,"
+        "opaque_rows_avg_x100,flip0_opaque_avg_x100\n") < 0) return FALSE;
+    for (Uint32 depth = 0; depth < 2u; ++depth)
+    {
+        Uint64 calls=0,tiles=0,cycles=0,decode=0;
+        for(Uint32 layer=0;layer<4u;++layer)
+        {
+            calls += b.snesBgChrCalls[layer][depth];
+            tiles += b.snesBgChrTiles[layer][depth];
+            cycles += b.snesBgChrCycles[layer][depth];
+            decode += b.snesBgChrDecodeCycles[layer][depth];
+        }
+        const Uint32 base = depth ? 44u : 42u;
+        const Uint32 flip = depth ? 48u : 46u;
+        if (fprintf(fp,"%u,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
+            (unsigned)(depth ? 4u : 2u),
+            (unsigned long long)SnesScaledDiv(calls,f,100u),
+            (unsigned long long)SnesScaledDiv(tiles,f,100u),
+            (unsigned long long)Avg(decode,f),
+            (unsigned long long)Avg(cycles>=decode ? cycles-decode:0u,f),
+            (unsigned long long)SnesScaledDiv(decode,tiles,1000u),
+            (unsigned long long)SnesScaledDiv(b.snesDeepUnits[base+1u],f,100u),
+            (unsigned long long)SnesScaledDiv(b.snesDeepUnits[base],f,100u),
+            (unsigned long long)SnesScaledDiv(b.snesDeepUnits[flip],f,100u)) < 0)
+            return FALSE;
+    }
+    const Uint64 parent = b.snesPpuCycles[5];
+    const Uint64 measured = b.snesBgChrMeasuredCycles;
+    const Uint64 raw = parent >= measured ? parent - measured : 0u;
+    const Uint64 traits = b.snesBgChrTraitsCycles;
+    const Uint64 rest = raw >= traits ? raw - traits : 0u;
+    if (fprintf(fp,
+        "\n[V25_SNES_BGCHR_RESIDUAL_NORMAL]\n"
+        "frames,bgchr_avg,measured_avg,traits_avg,outer_avg,outer_ex_traits_avg\n"
+        "%llu,%llu,%llu,%llu,%llu,%llu\n",
+        (unsigned long long)f,
+        (unsigned long long)Avg(parent,f),
+        (unsigned long long)Avg(measured,f),
+        (unsigned long long)Avg(traits,f),
+        (unsigned long long)Avg(raw,f),
+        (unsigned long long)Avg(rest,f)) < 0) return FALSE;
+    if (s_pending.meta.core == AURORA_FP_CORE_PCE)
+    {
+        Uint32 v[8] = {0};
+        PCE_AuroraV25PceBmtSnapshot(v);
+        return fprintf(fp,
+            "\n[V25_PCE_BMT_USAGE]\n"
+            "reset_domain,calls_tii,bytes_tii,calls_tdd,bytes_tdd,"
+            "sampled_tii,ticks_tii,sampled_tdd,ticks_tdd\n"
+            "since_last_HuC6280_Reset,%u,%u,%u,%u,%u,%u,%u,%u\n",
+            (unsigned)v[0], (unsigned)v[1], (unsigned)v[2], (unsigned)v[3],
+            (unsigned)v[4], (unsigned)v[5], (unsigned)v[6], (unsigned)v[7]) >= 0;
+    }
+    return TRUE;
+}
+
 static Bool WriteDump(FILE *fp)
 {
     const StatsT &s = s_pending.stats;
 
     if (fprintf(fp,
-        "SNESticleAurora frontend profiler v4.6\n"
-        "schema=aurora-frontend-v4.6\n"
+        "SNESticleAurora frontend profiler v4.11\n"
+        "schema=aurora-frontend-v4.11\n"
         "timestamp=%04u-%02u-%02u %02u:%02u:%02u\n"
         "sample_frames=%llu gameplay=%llu menu_with_core=%llu idle_ui=%llu\n"
         "normal_frames=%llu spike_frames=%llu "
@@ -1793,6 +2767,10 @@ static Bool WriteDump(FILE *fp)
 
     if (!WriteIdentityHeader(fp))
         return FALSE;
+    if (!WriteV25CandidateReport(fp, s)) return FALSE;
+
+    if (s_pending.meta.core == AURORA_FP_CORE_PCE)
+        PCE_AuroraPceV3WriteDiag(fp);
 
     if (fprintf(fp,
         "\n[METRIC_NOTES]\n"
@@ -1823,6 +2801,7 @@ static Bool WriteDump(FILE *fp)
     if (!WriteSafeFrameskipSet(fp, "SAFE_FRAMESKIP_NORMAL", s.fsNormal)) return FALSE;
     if (!WriteSafeFrameskipSet(fp, "SAFE_FRAMESKIP_SPIKE", s.fsSpike)) return FALSE;
     if (!WriteSafeFrameskipDiagnostic(fp, s)) return FALSE;
+    if (!WriteV45Cadence(fp, s)) return FALSE; /* AURORA_V45_VBLANK_CADENCE_PROFILER_ONLY_20261011 */
 
     if (!WriteAudioSet(fp, "AURORA_AUDIO_ALL", s.coreAll)) return FALSE;
     if (!WriteAudioSet(fp, "AURORA_AUDIO_NORMAL", s.coreNormal)) return FALSE;
@@ -1846,15 +2825,31 @@ static Bool WriteDump(FILE *fp)
 
     if (!WriteSnesBgChrSummarySet(fp, "SNES_BG_CHR_SUMMARY_ALL", s.coreAll)) return FALSE;
     if (!WriteSnesBgChrSummarySet(fp, "SNES_BG_CHR_SUMMARY_NORMAL", s.coreNormal)) return FALSE;
+    if (!WriteSnesBgChrTraitsCostSet(fp, "SNES_BG_CHR_TRAITS_COST_ALL", s.coreAll)) return FALSE;
+    if (!WriteSnesBgChrTraitsCostSet(fp, "SNES_BG_CHR_TRAITS_COST_NORMAL", s.coreNormal)) return FALSE;
     if (!WriteSnesBgChrLayerDepthSet(fp, "SNES_BG_CHR_LAYER_DEPTH_ALL", s.coreAll)) return FALSE;
     if (!WriteSnesBgChrLayerDepthSet(fp, "SNES_BG_CHR_LAYER_DEPTH_NORMAL", s.coreNormal)) return FALSE;
     if (!WriteSnesBgChrFlagsSet(fp, "SNES_BG_CHR_FLAGS_ALL", s.coreAll)) return FALSE;
     if (!WriteSnesBgChrFlagsSet(fp, "SNES_BG_CHR_FLAGS_NORMAL", s.coreNormal)) return FALSE;
 
+    if (!WriteSnesChr4LocalitySet(fp, "SNES_CHR4_LOCALITY_ALL", s.coreAll)) return FALSE;
+    if (!WriteSnesChr4LocalitySet(fp, "SNES_CHR4_LOCALITY_NORMAL", s.coreNormal)) return FALSE;
+    if (!WriteSnesObjMicroscopeSet(fp, "SNES_OBJ_MICROSCOPE_ALL", s.coreAll)) return FALSE;
+    if (!WriteSnesObjMicroscopeSet(fp, "SNES_OBJ_MICROSCOPE_NORMAL", s.coreNormal)) return FALSE;
+    if (!WriteSnesChr4ReuseSet(fp, "SNES_CHR4_REUSE_ALL", s.coreAll)) return FALSE;
+    if (!WriteSnesChr4ReuseSet(fp, "SNES_CHR4_REUSE_NORMAL", s.coreNormal)) return FALSE;
+    if (!WriteSnesChr4ReuseMatrixSet(fp, "SNES_CHR4_REUSE_MATRIX_ALL", s.coreAll)) return FALSE;
+    if (!WriteSnesChr4ReuseMatrixSet(fp, "SNES_CHR4_REUSE_MATRIX_NORMAL", s.coreNormal)) return FALSE;
+
     if (!WriteSnesDeepSet(fp, "SNES_DEEP_BREAKDOWN_ALL", s.coreAll)) return FALSE;
     if (!WriteSnesDeepSet(fp, "SNES_DEEP_BREAKDOWN_NORMAL", s.coreNormal)) return FALSE;
     if (!WriteSnesDeepReconcileSet(fp, "SNES_DEEP_RECONCILE_ALL", s.coreAll)) return FALSE;
     if (!WriteSnesDeepReconcileSet(fp, "SNES_DEEP_RECONCILE_NORMAL", s.coreNormal)) return FALSE;
+
+    if (!WriteExternalCoreProfiler(fp, "ALL", s.coreAll, s_pending.meta.core)) return FALSE;
+    if (!WriteExternalCoreProfiler(fp, "NORMAL", s.coreNormal, s_pending.meta.core)) return FALSE;
+    if (!WritePceSpriteWorkSet(fp, "PCE_SPRITE_WORK_ALL", s.coreAll)) return FALSE;
+    if (!WritePceSpriteWorkSet(fp, "PCE_SPRITE_WORK_NORMAL", s.coreNormal)) return FALSE;
 
     if (fprintf(fp,
         "\n[WORST_FRONTEND]\n"
@@ -1912,6 +2907,22 @@ static Bool WriteDump(FILE *fp)
         "- SNES SPC requested/consumed cycles and DSP samples/chunks are read-only diagnostics; emulated audio timing is not changed.\n"
         "- skip_pct_x100 is percentage times 100 among allowed FS_ON ticks (e.g. 1250 = 12.50%%).\n"
         "- Standalone auroraprofile is the clean frontend baseline; do not combine with c4profile for final numbers.\n"
+        "- v4.7 CHR4 locality is collected after BGCHR measured end; use SNES_BG_CHR measured fields for cross-build decode timing.\n"
+        "- v4.7 OBJ per-tile path timers include diagnostic counter-read overhead; compare HIT vs MISS inside the same v4.7 build.\n"
+        "- CHR4 palette_runs is the predicted minimum LUT-load count for a one-register cache across opaque rows; transparent rows preserve the candidate palette.\n"
+        "- CHR4/OBJ row +/-16 classifications use wrapped 0x8000-word VRAM deltas.\n"
+        "- v4.8 CHR4_REUSE compares opaque rows to the previous opaque row; transparent rows do not evict the hypothetical one-entry register cache.\n"
+        "- decode_key means resolved source-row + H-flip; pixel_key additionally includes palette index (uPal & 7). Priority bit remains independent.\n"
+        "- adjacent_* ratios require the immediately previous physical tile to be opaque and show the simpler no-gap reuse ceiling.\n"
+        "- v4.9 CHR4_REUSE_MATRIX splits 4bpp reuse by BG0..3 and actual path: NOOFFSET/OFFSET/MODE5_MAIN/MODE5_SUB/MODE6_MAIN/MODE6_SUB.\n"
+        "- Mode 5/6 decode_key uses both N/N+1 source-row addresses plus H-flip; MAIN/SUB are separate because their hires packing differs.\n"
+        "- General BG-by-BG timing is not duplicated here: SNES_BG_CHR_LAYER_DEPTH_* already reports cycles/tiles per BG and bit depth.\n"
+        "- v4.10 OBJ_COMPACT cycles are only the post-fetch R5900 compactor; units are fully-transparent rows removed. OBJ_FETCH_DECODE units remain physical fetched rows.\n"
+        "- v4.11 PCE/GBA/SEGA deep sections are generic (no CRC whitelist); relation=partition is additive, relation=nested is drill-down and may overlap another child.\n"
+        "- *_RECONCILE_* sums only direct partition children; residual exposes still-unattributed parent cost.\n"
+        "- v3.49 PCE SPR_PREP/CLEAR/DRAW partition VDC_SPR; PCE_SPRITE_WORK_* units are semantic counts, not emulated cycles.\n"
+        "- PCE sprite work counts 16-pixel SAT-cache units; SOURCE_SPRITES collapses adjacent halves back to original SAT entries after Aurora limiting.\n"
+        "- v3.39 Direct Color scratch-LUT impact remains attributable to existing BG_MAIN_DIRECT/BG_SUB_DIRECT deep buckets.\n"
         "- No filesystem write occurs during gameplay. Menu entry waits 60 visible menu frames before snapshot.\n"
         "- Initial no-core browser auto-snapshots once after 120 IDLE_UI frames.\n") < 0)
         return FALSE;
@@ -1950,9 +2961,9 @@ static Bool SavePending(void)
     BgmIOEnd();
 
     if (ok)
-        MainLoopStatusPrintf(180, "Aurora profiler v4.6 saved: %s", path);
+        MainLoopStatusPrintf(180, "Aurora profiler v4.11 saved: %s", path);
     else
-        MainLoopStatusPrintf(180, "Aurora profiler v4.6: dump write failed.");
+        MainLoopStatusPrintf(180, "Aurora profiler v4.11: dump write failed.");
 
     return ok;
 }
@@ -2078,6 +3089,7 @@ void AuroraFrontendProfilerTickEnd(void)
         else       AccumulateBucket(s_live.coreNormal[core], tick, d);
 
         const Uint32 fsClass = SafeFrameskipClassForFrame();
+        V45RecordCadence(core); /* AURORA_V45_VBLANK_CADENCE_PROFILER_ONLY_20261011 */
         AccumulateSafeFrameskipDiagnostic(core);
         AccumulateBucket(s_live.fsAll[core][fsClass], tick, d);
         if (spike)
@@ -2087,10 +3099,12 @@ void AuroraFrontendProfilerTickEnd(void)
     }
     else if (state == AURORA_FP_MENU_WITH_CORE)
     {
+        V45BreakCadenceChain(); /* AURORA_V45_VBLANK_CADENCE_PROFILER_ONLY_20261011 */
         ++s_live.menuFrames;
     }
     else
     {
+        V45BreakCadenceChain();
         ++s_live.idleFrames;
     }
 
@@ -2166,8 +3180,27 @@ void AuroraFrontendProfilerUiBegin(void) { BeginSpan(SPAN_UI); }
 void AuroraFrontendProfilerUiEnd(void) { EndSpan(SPAN_UI); }
 void AuroraFrontendProfilerGpFlushBegin(void) { BeginSpan(SPAN_GP_FLUSH); }
 void AuroraFrontendProfilerGpFlushEnd(void) { EndSpan(SPAN_GP_FLUSH); }
-void AuroraFrontendProfilerVBlankBegin(void) { BeginSpan(SPAN_VBLANK); }
-void AuroraFrontendProfilerVBlankEnd(void) { EndSpan(SPAN_VBLANK); }
+/* AURORA_V45_VBLANK_CADENCE_PROFILER_ONLY_20261011
+ * Reuse BeginSpan/EndSpan timestamps; NO additional COP0 read in hot path. */
+void AuroraFrontendProfilerVBlankBegin(void)
+{
+    BeginSpan(SPAN_VBLANK);
+    if (s_frame.open && s_frame.spanOpen[SPAN_VBLANK])
+        s_frame.v45PreFlipWork =
+            (Uint32)(s_frame.spanStart[SPAN_VBLANK] - s_frame.start);
+}
+void AuroraFrontendProfilerVBlankEnd(void)
+{
+    const Bool hadOpenSpan = s_frame.open && s_frame.spanOpen[SPAN_VBLANK];
+    EndSpan(SPAN_VBLANK);
+    if (hadOpenSpan)
+    {
+        /* EndSpan() has already stored this precise end timestamp. */
+        s_frame.v45FlipStamp = s_frame.spanStart[SPAN_VBLANK]
+                               + s_frame.cycles[SPAN_VBLANK];
+        s_frame.v45Presented = TRUE;
+    }
+}
 void AuroraFrontendProfilerAudioDrainBegin(void) { BeginSpan(SPAN_AUDIO_DRAIN); }
 void AuroraFrontendProfilerAudioDrainEnd(void) { EndSpan(SPAN_AUDIO_DRAIN); }
 
@@ -2243,16 +3276,41 @@ void AuroraFrontendProfilerSnesBgChrRecord(
     }
 }
 
+/* AURORA_MULTICORE_DEEP_PROFILER_V3_48_20261008 */
+void AuroraFrontendProfilerExternalRecord(
+    uint32_t core, uint32_t bucket, uint32_t cycles, uint32_t units)
+{
+    if (!s_frame.open || s_frame.core != core ||
+        bucket >= AURORA_EXT_BUCKET_MAX ||
+        (core != AURORA_EXT_CORE_PCE &&
+         core != AURORA_EXT_CORE_GBA &&
+         core != AURORA_EXT_CORE_SEGA))
+        return;
+    ++s_frame.externalCalls[bucket];
+    s_frame.externalUnits[bucket] += units;
+    s_frame.externalCycles[bucket] += cycles;
+}
+
 /* AURORA_SNES_DEEP_OPT_V3_14_20261005 */
 void AuroraFrontendProfilerSnesDeepRecord(
     Uint32 bucket, Uint32 cycles, Uint32 units)
 {
     if (!s_frame.open || s_frame.core != AURORA_FP_CORE_SNES ||
-        s_frame.snesProfileInvalid || bucket >= 68u)
+        s_frame.snesProfileInvalid || bucket >= 69u)
         return;
     ++s_frame.snesDeepCalls[bucket];
     s_frame.snesDeepUnits[bucket] += units;
     s_frame.snesDeepCycles[bucket] += cycles;
+}
+
+/* AURORA_V23_SNES_BGCHR_TRAITS_COST_20261009
+ * Approximate cost of the existing 33-tile traits collector (auroraprofile only).
+ * A pair of clock reads itself introduces small measurement overhead. */
+void AuroraFrontendProfilerSnesChrTraitsCost(Uint32 ticks)
+{
+    if (s_frame.open && s_frame.core == AURORA_FP_CORE_SNES &&
+        !s_frame.snesProfileInvalid)
+        s_frame.snesBgChrTraitsCycles += ticks;
 }
 
 void AuroraFrontendProfilerSnesChrTraitsRecord(
@@ -2274,6 +3332,96 @@ void AuroraFrontendProfilerSnesChrTraitsRecord(
     s_frame.snesDeepUnits[flipBase] += flip0OpaqueRows;
     ++s_frame.snesDeepCalls[flipBase + 1u];
     s_frame.snesDeepUnits[flipBase + 1u] += flippedOpaqueRows;
+}
+
+/* AURORA_SNES_MICROSCOPE_V3_27_20261006 */
+void AuroraFrontendProfilerSnesChr4LocalityRecord(
+    Uint32 tiles, Uint32 opaqueTiles,
+    Uint32 paletteReuses, Uint32 paletteRuns,
+    Uint32 flipSame, Uint32 flipChanges,
+    Uint32 rowSame, Uint32 rowPlus16, Uint32 rowMinus16, Uint32 rowOther)
+{
+    if (!s_frame.open || s_frame.core != AURORA_FP_CORE_SNES ||
+        s_frame.snesProfileInvalid)
+        return;
+
+    ++s_frame.snesChr4LocalityCalls;
+    s_frame.snesChr4LocalityTiles += tiles;
+    s_frame.snesChr4OpaqueTiles += opaqueTiles;
+    s_frame.snesChr4PaletteReuses += paletteReuses;
+    s_frame.snesChr4PaletteRuns += paletteRuns;
+    s_frame.snesChr4FlipSame += flipSame;
+    s_frame.snesChr4FlipChanges += flipChanges;
+    s_frame.snesChr4RowSame += rowSame;
+    s_frame.snesChr4RowPlus16 += rowPlus16;
+    s_frame.snesChr4RowMinus16 += rowMinus16;
+    s_frame.snesChr4RowOther += rowOther;
+}
+
+void AuroraFrontendProfilerSnesObjMicroscopeRecord(
+    Uint32 hitTiles, Uint32 hitCycles,
+    Uint32 missTiles, Uint32 missCycles,
+    Uint32 hitTransparent, Uint32 hitFullOpaque, Uint32 hitPartial,
+    Uint32 missTransparent, Uint32 missFullOpaque, Uint32 missPartial,
+    Uint32 rowSame, Uint32 rowPlus16, Uint32 rowMinus16, Uint32 rowOther)
+{
+    if (!s_frame.open || s_frame.core != AURORA_FP_CORE_SNES ||
+        s_frame.snesProfileInvalid)
+        return;
+
+    ++s_frame.snesObjMicroscopeCalls;
+    s_frame.snesObjHitTiles += hitTiles;
+    s_frame.snesObjHitCycles += hitCycles;
+    s_frame.snesObjMissTiles += missTiles;
+    s_frame.snesObjMissCycles += missCycles;
+    s_frame.snesObjHitTransparent += hitTransparent;
+    s_frame.snesObjHitFullOpaque += hitFullOpaque;
+    s_frame.snesObjHitPartial += hitPartial;
+    s_frame.snesObjMicMissTransparent += missTransparent;
+    s_frame.snesObjMicMissFullOpaque += missFullOpaque;
+    s_frame.snesObjMicMissPartial += missPartial;
+    s_frame.snesObjRowSame += rowSame;
+    s_frame.snesObjRowPlus16 += rowPlus16;
+    s_frame.snesObjRowMinus16 += rowMinus16;
+    s_frame.snesObjRowOther += rowOther;
+}
+
+/* AURORA_CHR4_REUSE_MICROSCOPE_V3_28_20261007 */
+/* AURORA_CHR4_PATH_BG_MICROSCOPE_V3_29_20261007 */
+void AuroraFrontendProfilerSnesChr4ReuseRecord(
+    Uint32 bgIndex, Uint32 pathIndex, Uint32 tiles, Uint32 opaqueTiles,
+    Uint32 opaqueTransitions, Uint32 adjacentOpaqueTransitions,
+    Uint32 paletteIndexReuses, Uint32 decodeKeyReuses,
+    Uint32 rowSameFlipChanged, Uint32 pixelKeyReuses,
+    Uint32 adjacentPaletteIndexReuses, Uint32 adjacentDecodeKeyReuses,
+    Uint32 adjacentPixelKeyReuses)
+{
+    if (!s_frame.open || s_frame.core != AURORA_FP_CORE_SNES ||
+        s_frame.snesProfileInvalid || bgIndex >= 4u || pathIndex >= 6u)
+        return;
+
+    s_frame.snesChr4OpaqueTransitions += opaqueTransitions;
+    s_frame.snesChr4AdjacentOpaqueTransitions += adjacentOpaqueTransitions;
+    s_frame.snesChr4PaletteIndexReuses += paletteIndexReuses;
+    s_frame.snesChr4DecodeKeyReuses += decodeKeyReuses;
+    s_frame.snesChr4RowSameFlipChanged += rowSameFlipChanged;
+    s_frame.snesChr4PixelKeyReuses += pixelKeyReuses;
+    s_frame.snesChr4AdjacentPaletteIndexReuses += adjacentPaletteIndexReuses;
+    s_frame.snesChr4AdjacentDecodeKeyReuses += adjacentDecodeKeyReuses;
+    s_frame.snesChr4AdjacentPixelKeyReuses += adjacentPixelKeyReuses;
+
+    ++s_frame.snesChr4CellCalls[bgIndex][pathIndex];
+    s_frame.snesChr4CellTiles[bgIndex][pathIndex] += tiles;
+    s_frame.snesChr4CellOpaqueTiles[bgIndex][pathIndex] += opaqueTiles;
+    s_frame.snesChr4CellOpaqueTransitions[bgIndex][pathIndex] += opaqueTransitions;
+    s_frame.snesChr4CellAdjacentOpaqueTransitions[bgIndex][pathIndex] += adjacentOpaqueTransitions;
+    s_frame.snesChr4CellPaletteIndexReuses[bgIndex][pathIndex] += paletteIndexReuses;
+    s_frame.snesChr4CellDecodeKeyReuses[bgIndex][pathIndex] += decodeKeyReuses;
+    s_frame.snesChr4CellRowSameFlipChanged[bgIndex][pathIndex] += rowSameFlipChanged;
+    s_frame.snesChr4CellPixelKeyReuses[bgIndex][pathIndex] += pixelKeyReuses;
+    s_frame.snesChr4CellAdjacentPaletteIndexReuses[bgIndex][pathIndex] += adjacentPaletteIndexReuses;
+    s_frame.snesChr4CellAdjacentDecodeKeyReuses[bgIndex][pathIndex] += adjacentDecodeKeyReuses;
+    s_frame.snesChr4CellAdjacentPixelKeyReuses[bgIndex][pathIndex] += adjacentPixelKeyReuses;
 }
 
 void AuroraFrontendProfilerSnesCostScopeEnter(Int32 bucket)
@@ -2596,6 +3744,56 @@ void AuroraFrontendProfilerSnesDspFinalBegin(void)
 void AuroraFrontendProfilerSnesDspFinalEnd(void)
     { EndSpan(SPAN_SNES_DSP_FINAL); }
 
+/* AURORA_PROFILER_AUTO20_STATELOAD_V21_20261009
+ * A savestate load defines the benchmark's start; discard frontend startup
+ * history without discarding the restored emulation state. Separate core
+ * workprof/v3 counters retain their native lifecycle. */
+Bool AuroraFrontendProfilerAutoCloseBeginWindow(void)
+{
+    /* Resolve any prior idle/menu dump instead of accidentally writing it
+     * as the benchmark's result 20s later. All I/O is during state loading,
+     * never during a measured gameplay frame. */
+    if (s_writePending)
+    {
+        if (!SavePending())
+            return FALSE;
+        s_writePending = FALSE;
+    }
+    ResetLive();
+    s_captureArmed = FALSE;
+    s_menuFramesNeeded = 0;
+    s_frame.open = FALSE; /* Discard this tick's expensive load-state I/O. */
+    return TRUE;
+}
+
+/* Only called at the end of a completed host tick, after TickEnd().
+ * Snapshot while the ROM is STILL live: PCE v3 and WorkProf dump hooks
+ * need the core/context, and normal menu's 60-frame delay is undesirable. */
+Bool AuroraFrontendProfilerAutoCloseSave(void)
+{
+    if (!s_writePending)
+    {
+        if (!s_live.gameplayFrames)
+            return FALSE;
+        SealSnapshot();
+    }
+    if (!s_writePending || !SavePending())
+        return FALSE;
+    s_writePending = FALSE;
+    return TRUE;
+}
+
+/* AURORA_BENCHMARK_CHAINED_V3_20261010_PROF_API_BEGIN */
+Bool AuroraFrontendProfilerBatchBegin(void)
+{
+    if (s_frame.open || s_writePending || s_captureArmed) return FALSE;
+    ResetLive();
+    s_menuFramesNeeded=0;
+    s_initialIdleDumpDone=TRUE;
+    return TRUE;
+}
+
+/* AURORA_BENCHMARK_CHAINED_V3_20261010_PROF_API_END */
 void AuroraFrontendProfilerMenuEnter(void)
 {
     if (s_writePending || s_captureArmed || !s_live.gameplayFrames)

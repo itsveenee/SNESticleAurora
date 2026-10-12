@@ -67,7 +67,7 @@ Bool MainLoopReinitVideoMode(Int32 mode);
 /* ------------------------------------------------------------------ */
 
 #define VIDEOCFG_MAGIC   0x53564944u   /* 'SVID' */
-#define VIDEOCFG_VERSION 53 /* AURORA_GBA_BLEND_UI_CFG53_V1_20261004: append GBA blending; v52 imported intact */
+#define VIDEOCFG_VERSION 54 /* AURORA_GBA_BLEND_UI_CFG53_V1_20261004: append GBA blending; v52 imported intact */
 /* AURORA_CFG_MODE7_FULL_ONCE_V1_6_20260905: 44 -> 45; same-layout migration, Mode7 Full once. */
 /* AURORA_CD_MUSIC_REDBOOK_V3_20260830: v43 appends shared SCD/PCE CD Red Book toggle; old configs default On. */
 /* AURORA_PCE_SCALING_LIGHTGUN_TOGGLE_V2_20260830: v42 appends Light Gun; old configs default On. */
@@ -152,8 +152,10 @@ typedef struct
 	Int32  gbcvol;        /* internal 0..400; UI /2; default 200 == unity */
 	Int32  gbavol;        /* internal 0..400; UI /2; default 200 == unity */
 	Int32  gbablending; /* v53: gpSP interframe blending, 0=Off, 1=On */
+	Int32  pce6button; /* v54: native PCE 2/6-button pad, 0=2 (default) */
 } VideoCfgT;
-#define VIDEOCFG_V52_BYTES (sizeof(VideoCfgT) - sizeof(Int32))
+#define VIDEOCFG_V53_BYTES (sizeof(VideoCfgT) - sizeof(Int32))
+#define VIDEOCFG_V52_BYTES (VIDEOCFG_V53_BYTES - sizeof(Int32))
 #define VIDEOCFG_V49_BYTES (VIDEOCFG_V52_BYTES - 2 * sizeof(Int32))
 #define VIDEOCFG_V46_BYTES (VIDEOCFG_V49_BYTES - sizeof(Int32))
 #define VIDEOCFG_V45_BYTES (VIDEOCFG_V46_BYTES - sizeof(Int32))
@@ -513,6 +515,7 @@ void VideoSettingsSave(void)
 	cfg.gbcvol = g_GbcVolume;
 	cfg.gbavol = g_GbaVolume;
 	cfg.gbablending = GpSPGetFrameBlending() ? 1 : 0;
+	cfg.pce6button = PceBridge_Get6Button() ? 1 : 0; /* AURORA_PCE_PAD6_V1_20261009 */
 	_VideoCfgPath(path);
 	BgmIOBegin();
 	MemCardWriteFile(path, (Uint8 *)&cfg, sizeof(cfg));
@@ -540,11 +543,13 @@ void VideoSettingsLoad(void)
 	g_GbcVolume = 200;
 	g_GbaVolume = 200;
 	GpSPSetFrameBlending(FALSE); /* AURORA_GBA_BLEND_UI_CFG53_V1_20261004: conservative default */
+	PceBridge_Set6Button(false); /* AURORA_PCE_PAD6_V1_20261009: preserve legacy default */
 	memset(&cfg, 0, sizeof(cfg));
 	cfg.gameboymode = 0; /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909: old configs default GBC */
 	cfg.gbcvol = 200;
 	cfg.gbavol = 200;
 	cfg.gbablending = 0;
+	cfg.pce6button = 0; /* AURORA_PCE_PAD6_V1_20261009 */
 	cfg.lightgun = 1; /* v42 default and all pre-v42 migrations: On */
 	cfg.cdmusic = 1;  /* AURORA_CD_MUSIC_REDBOOK_V3_20260830: pre-v43 default On */
 	QuicknesBridge_SetLightGunEnabled(true);
@@ -574,6 +579,16 @@ void VideoSettingsLoad(void)
 		else if (header.version == VIDEOCFG_VERSION)
 		{
 			loaded = MemCardReadFile(path, (Uint8 *)&cfg, sizeof(cfg));
+		}
+		else if (header.version == 53)
+		{
+			/* AURORA_PCE_PAD6_V1_20261009: previous layout, append-only migration. */
+			loaded = MemCardReadFile(path, (Uint8 *)&cfg, VIDEOCFG_V53_BYTES);
+			if (loaded)
+			{
+				cfg.pce6button = 0;
+				cfg.version = VIDEOCFG_VERSION;
+			}
 		}
 		else if (header.version == 52)
 		{
@@ -931,7 +946,7 @@ void VideoSettingsLoad(void)
 	 * Older migrations retain the previous one-time conservative default. */
 	/* AURORA_CFG_LOADER_REBUILD_V1_13_20260905
  * One-time migration exceptions only. */
-if (loaded && header.version != VIDEOCFG_VERSION && header.version != 52 && header.version != 49)
+if (loaded && header.version != VIDEOCFG_VERSION && header.version != 53 && header.version != 52 && header.version != 49)
 {
 	cfg.safeframeskip = 1;
 	cfg.sneshackflags &= ~SNPPU_HACK_MODE7_HALF;
@@ -1055,6 +1070,9 @@ if (cfg.famicloneaudio == 0 || cfg.famicloneaudio == 1)
 				(cfg.md6button & 2) ? MAINLOOP_MD_PAD_BCA
 				                     : MAINLOOP_MD_PAD_ABC);
 		}
+		/* AURORA_PCE_PAD6_V1_20261009: accept only boolean mode; historical configs stay at two buttons. */
+		if (cfg.pce6button == 0 || cfg.pce6button == 1)
+			PceBridge_Set6Button(cfg.pce6button != 0);
 		SNCPUSetOverclockLevel(_pSnes ? _pSnes->GetCpu() : NULL,
 		                         SNCPU_OVERCLOCK_OFF);
 	}
@@ -1120,12 +1138,14 @@ static const char *_VideoMmceStatus()
 	return "Not found";
 }
 
+#if AURORA_FRONTEND_PROFILER /* AURORA_V44_CLEAN_SAFE_FS_ON_20261011: diagnostic UI only */
 static const char *_VideoSafeFrameskipStatus()
 {
     /* AURORA_SAFE_FRAMESKIP_BINARY_UI_DIRECT_LEVEL_V1_20260925
      * Display the exact state consumed by MainLoopSafeFrameskipTake(). */
     return MainLoopSafeFrameskipGetLevel() > 0 ? "On" : "Off";
 }
+#endif /* AURORA_FRONTEND_PROFILER: AURORA_V44_CLEAN_SAFE_FS_ON_20261011 */
 
 static const char *_VideoFakeSRAMStatus()
 {
@@ -1364,8 +1384,10 @@ void CVideoScreen::Draw()
 #endif
 	_VideoRow(vy, 9, m_iSelect, "GBA blending",
 	          GpSPGetFrameBlending() ? "On" : "Off"); vy += 12;
+#if AURORA_FRONTEND_PROFILER /* AURORA_V44_CLEAN_SAFE_FS_ON_20261011: hidden in clean */
 	_VideoRow(vy, 8, m_iSelect, "Safe frameskip",
 	          _VideoSafeFrameskipStatus()); vy += 12;
+#endif
 
 	}
 	else if (iPage == 1)
@@ -1474,6 +1496,8 @@ _VideoRow(vy, 19, m_iSelect, "Exit to OSD", ""); vy += 12;
 			InputSnesMouseGetModeName()); vy += 12;
 		_VideoRow(vy, 41, m_iSelect, "MD pad",
 			PicoDriveBridge_Get6Button() ? "6-button" : "3-button"); vy += 12;
+		_VideoRow(vy, 45, m_iSelect, "PCE pad",
+			PceBridge_Get6Button() ? "6-button" : "2-button"); vy += 12; /* AURORA_PCE_PAD6_V1_20261009 */
 		_VideoRow(vy, 42, m_iSelect, "MD mapping",
 			MainLoopMdPadGetLayoutName()); vy += 12;
 		_VideoRow(vy, 43, m_iSelect, "Turbo speed",
@@ -1524,7 +1548,11 @@ void CVideoScreen::Input(Uint32 buttons, Uint32 trigger)
 			/* AURORA_GBA_BLEND_UI_CFG53_V1_20261004
 			 * Keep legacy IDs stable: hidden GG Zoom=7, Safe Frameskip=8,
 			 * new GBA blending=9. Visual order intentionally places 9 before 8. */
-			static const Int32 order[] = { 0, 1, 2, 3, 4, 5, 6, 9, 8 };
+			static const Int32 order[] = { 0, 1, 2, 3, 4, 5, 6, 9,
+#if AURORA_FRONTEND_PROFILER /* AURORA_V44_CLEAN_SAFE_FS_ON_20261011 */
+				8,
+#endif
+			};
 			const Int32 count = (Int32)(sizeof(order) / sizeof(order[0]));
 			Int32 pos = 0;
 			while (pos < count && order[pos] != m_iSelect) pos++;
@@ -1536,6 +1564,18 @@ void CVideoScreen::Input(Uint32 buttons, Uint32 trigger)
 		else if (m_iSelect >= 50 && (trigger & (PAD_UP | PAD_DOWN)))
 		{
 			static const Int32 order[] = { 50, 51, 52, 53, 54, 59, 60, 55, 56, 57, 58 };
+			const Int32 count = (Int32)(sizeof(order) / sizeof(order[0]));
+			Int32 pos = 0;
+			while (pos < count && order[pos] != m_iSelect) pos++;
+			if (pos >= count) pos = 0;
+			if (trigger & PAD_UP)   pos = (pos + count - 1) % count;
+			if (trigger & PAD_DOWN) pos = (pos + 1) % count;
+			m_iSelect = order[pos];
+		}
+		else if (m_iSelect >= 40 && m_iSelect <= 45 &&
+		         (trigger & (PAD_UP | PAD_DOWN)))
+		{
+			static const Int32 order[] = {40, 41, 45, 42, 43, 44};
 			const Int32 count = (Int32)(sizeof(order) / sizeof(order[0]));
 			Int32 pos = 0;
 			while (pos < count && order[pos] != m_iSelect) pos++;
@@ -1655,12 +1695,14 @@ void CVideoScreen::Input(Uint32 buttons, Uint32 trigger)
 		case 7: /* Game Gear exact 3:2 zoom, 160x144 -> 240x216 */
 			PicoDriveBridge_SetGgZoom(!PicoDriveBridge_GetGgZoom());
 			break;
+#if AURORA_FRONTEND_PROFILER /* AURORA_V44_CLEAN_SAFE_FS_ON_20261011: no OFF in clean */
 		case 8: /* Safe Frameskip: Off, On */
 			/* AURORA_SAFE_FRAMESKIP_BINARY_UI_DIRECT_LEVEL_V1_20260925
 			 * Toggle the exact scheduler level: 0=Off, 1=On. */
 			MainLoopSafeFrameskipSetLevel(
 				MainLoopSafeFrameskipGetLevel() > 0 ? 0 : 1);
 			break;
+#endif /* AURORA_FRONTEND_PROFILER: AURORA_V44_CLEAN_SAFE_FS_ON_20261011 */
 
 		case 9: /* GBA blending */
 			GpSPSetFrameBlending(!GpSPGetFrameBlending());
@@ -1906,6 +1948,9 @@ case 17: /* Famiclone Audio */
 		case 41:
 			/* AURORA_PICODRIVE_CURRENT_6BUTTON */
 			PicoDriveBridge_Set6Button(!PicoDriveBridge_Get6Button());
+			break;
+		case 45: /* AURORA_PCE_PAD6_V1_20261009 */
+			PceBridge_Set6Button(!PceBridge_Get6Button());
 			break;
 		case 42:
 			MainLoopMdPadCycleLayoutDir(dir);

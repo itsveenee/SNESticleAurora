@@ -4739,10 +4739,10 @@ m_PPU.SetRegionPAL(bPAL);
 					(unsigned)(Uint8)pr->m7latch);
 			}
 			#if SNDBG_DEEP
-			DLog("[snes-gsu] ins=%u start/stop/abort/wd=%u/%u/%u/%u max=%u cur=%u plot/rpix=%u/%u ramw=%u",
+			DLog("[snes-gsu] ins=%u start/stop/abort=%u/%u/%u max=%u cur=%u plot/rpix=%u/%u ramw=%u",
 				(unsigned)gd.Instructions, (unsigned)gd.Starts,
 				(unsigned)gd.Stops, (unsigned)gd.Aborts,
-				(unsigned)gd.Watchdogs, (unsigned)gd.MaxJobInstructions,
+				(unsigned)gd.MaxJobInstructions,
 				(unsigned)gd.CurrentJobInstructions, (unsigned)gd.Plots,
 				(unsigned)gd.Rpix, (unsigned)gd.RamWrites);
 			DLog("[snes-gsu] cache hit/miss=%u/%u branch=%u/%u jump=%u go=%u",
@@ -4750,9 +4750,9 @@ m_PPU.SetRegionPAL(bPAL);
 				(unsigned)gd.BranchesTaken, (unsigned)gd.Branches,
 				(unsigned)gd.Jumps, (unsigned)(m_GSU.IsRunning() ? 1 : 0));
 			#else
-			DLog("[snes-gsu] detail=off start/stop/abort/wd=%u/%u/%u/%u go=%u (use SNES_DIAGNOSTICS=2 for instruction counters)",
+			DLog("[snes-gsu] detail=off start/stop/abort=%u/%u/%u go=%u (use SNES_DIAGNOSTICS=2 for instruction counters)",
 				(unsigned)gd.Starts, (unsigned)gd.Stops,
-				(unsigned)gd.Aborts, (unsigned)gd.Watchdogs,
+				(unsigned)gd.Aborts,
 				(unsigned)(m_GSU.IsRunning() ? 1 : 0));
 			#endif
 			g_TmgWinFrames  = 0;

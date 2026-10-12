@@ -49,20 +49,17 @@ If the repository was cloned without `--recurse-submodules`, run
 * Famicom Disk System (firmware not included), press L2+TRIANGLE to change the disk side.
 * Famiclone audio option for NES games (swap duty cycles, a known hardware bug in some Famiclones you can intentionally turn on).
 * Changed SRAM and RAM initialization for both NES and SNES. This will fix all the very few games that rely on specific initial values to work properly.
-* Mega Drive / Genesis + Sega Master System / Mark III + Game Gear + Sega CD emulation with PicoDrive.
-* PC Engine / TurboGrafx-16 HuCard and PC Engine CD emulation with Beetle PCE Fast.
-* Game Boy + Color emulation with Gambatte.
-* Game Boy Advance emulation with gpSP.
 * Fixes and improvements for the 240p display modes, improved screen positioning and overscan settings for each system and graphical resolution/modes.
-* Dedicated turbo buttons for NES, GB, GBC, PCE, GG and SMS games.
-* Turbo button toggle (hold R2+ANY BUTTON).
+* Dedicated turbo buttons for NES, GB, GBC, PCE, GG and SMS games (circle and triangle).
+* Turbo input (hold R2+ANY BUTTON).
 * In-game soft reset (L2+SELECT).
 * SNES and MD mouse emulation.
 * ASCII Turbo File for Famicom, Super Famicom, Game Boy and Game Boy Advance (accessory for many ASCII games).
 * Battle Box for Famicom (accessory for Armadillo).
 * Arkanoid Pad for Famicom (accessory for Arkanoid and Arkanoid II).
-* Famicom Microphone (L2+START).
+* Famicom microphone (L2+START).
 * NES Zapper / Famicom Light Gun (X to shoot, L2+SQUARE to simulate shooting away from the screen).
+* PC Engine 6-button pad *(don't use it with 2-button games!)*
 * Region select (all consoles).
 
 #### User interface:
@@ -77,19 +74,20 @@ If the repository was cloned without `--recurse-submodules`, run
 
 #### To be added:
 * More light guns support (SNES, MD, SMS).
-* PC Engine 6-button controller.
+* SMS paddle controller.
 * SMB connection and MMCE support *(current implementations do not work).*
 * 32X emulation *(currently disabled).*
 * Other stupid *(or not-so-stupid)* ideas I might come up with. Thanks!
 
 ## Emulation progress
 
-#### FIXED:
+#### Fixed:
 * PC Engine alternative video modes (Ninja Spirits, Aoi Blink, Toumaden, Puyo Puyo and more) implemented.
 * Pilotwings (SNES) and Secret of Mana (SNES) mode 7 rendering, also fixes other games that rely on it.
 * Secret of Mana (SNES) mode 5 rendering, also fixes other games that rely on it.
 * Addams Family (SNES) graphical glitches and timing issues fixed.
 * Sunset Riders (SNES) graphical glitches fixed.
+* Super Mario All-Stars (SNES) graphical glitches fixed.
 * Sonic Blast Man (SNES) wrong colors fixed.
 * Ys (SMS) graphical glitches fixed.
 * J.R.R. Tolkien's The Lord of the Rings (SNES) black screen fixed.
@@ -99,19 +97,18 @@ If the repository was cloned without `--recurse-submodules`, run
 * Magical Pop'n (SNES) freeze fixed.
 * Accele Brid (SNES) freeze fixed.
 * Killer Instinct (SNES) freeze fixed.
+* Super Mario Advance (GBA) freeze fixed.
 * Many other graphical glitches and inaccuracies on many games and emulated systems were fixed.
 
-#### TO BE FIXED:
+#### To be fixed:
 * Top Gear (SNES) performance *(in progress, safe frameskip helps a lot).*
 * Speedy Gonzales in Los Gatos Banditos (SNES) performance *(in progress, safe frameskip won't help much).*
-* SNES SA-1 Emulation (experimental state).
-* SNES FX1 and FX2 emulation (experimental state).
-* PC Engine CD and Sega CD performance (experimental state).
+* SNES SA-1 Emulation (experimental state, unplayable).
+* SNES FX1 and FX2 emulation (experimental state, unplayable).
+* PC Engine CD and Sega CD performance (experimental state, many games are playable).
 * Krazy Creatures (NES) minor graphical glitches.
-* Super Mario World 2 (SNES) performance (Super FX2).
 * Any other games with performance or graphical issues.
 
 ## Special thanks
 * Pavel (@eXo12): invaluable beta testing, feedbacks and motivation which helped me immensely. Thanks!
 * Aurora: it's a secret to everybody.
- 

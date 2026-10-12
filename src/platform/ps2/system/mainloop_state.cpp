@@ -5136,6 +5136,11 @@ Bool _MainLoopLoadState()
             );
             ConPrint("State loaded: %s\n", pCandidate->Path);
             ML_TRACE("State load ok: %s", pCandidate->Path);
+#if AURORA_FRONTEND_PROFILER
+            /* AURORA_PROFILER_AUTO20_STATELOAD_V21_20261009
+             * Arm ONLY after a successful, fully restored savestate. */
+            MainLoopProfilerAutoCloseArmAfterStateLoad();
+#endif
             return TRUE;
         }
 
@@ -5168,6 +5173,23 @@ Bool _MainLoopLoadState()
     return FALSE;
 }
 
+/* AURORA_BENCHMARK_CHAINED_V3_20261010_STATE_CPP_BEGIN */
+/* AUTO/device search and slot 1, without persisting settings. */
+#if AURORA_FRONTEND_PROFILER
+Bool MainLoopBenchmarkLoadStateSlot1()
+{
+    const MainLoopStateDeviceE oldDevice=_MainLoop_StateDevice;
+    const Int32 oldSlot=_MainLoop_StateSlot;
+    _MainLoop_StateDevice=MAINLOOP_STATEDEVICE_AUTO;
+    _MainLoop_StateSlot=0;
+    const Bool ok=_MainLoopLoadState();
+    _MainLoop_StateDevice=oldDevice;
+    _MainLoop_StateSlot=oldSlot;
+    return ok;
+}
+#endif
+
+/* AURORA_BENCHMARK_CHAINED_V3_20261010_STATE_CPP_END */
 Bool _MainLoopSaveState()
 {
     MainLoopSegaStateScratchGuard SegaScratchGuard;

@@ -17,6 +17,7 @@
 extern AudMixBuffer *_AudMix;
 #include "snio.h"
 #include "snppurender.h"
+#include "platform/ps2/system/aurora_external_profiler.h" /* AURORA_MULTICORE_DEEP_PROFILER_V3_48_20261008 */
 extern "C" {
 #include "gs.h"
 #include "gpprim.h"
@@ -49,6 +50,7 @@ size_t PCE_retro_get_memory_size(unsigned);
 void PCE_retro_get_system_av_info(struct retro_system_av_info *);
 /* AURORA_V15_MULTICORE_SPRITE_LIMIT_20260824: PS2-only renderer hook inside the Beetle fork. */
 void PCE_AuroraSetSpriteLimiter(int level, int mode);
+void PCE_AuroraSet6Button(int enabled); /* AURORA_PCE_PAD6_V1_20261009 */
 void PCE_AuroraSetSkipNextVideoFrame(int skip); /* AURORA_SAFE_FRAMESKIP_GG_ZOOM_V2_2 */
 /* AURORA_EXTREME_CD_VIDEO_FIRST_V1_20260830 */
 void PCE_AuroraSetCdAudioSafeWindow(int allowed);
@@ -66,6 +68,7 @@ void PCE_AuroraCdAsyncResume(void);
 }
 
 static bool s_Initialized = false;
+static bool s_PceSixButton = false; /* AURORA_PCE_PAD6_V1_20261009 */
 static bool s_GameLoaded = false;
 /* AURORA_V4_11_CD_REALTIME_PACING_PCE_TOC_OFFSETS_20260830 */
 static bool s_DiscLoaded = false;
@@ -167,7 +170,8 @@ static const char *pceVariable(const char *key)
     if (!strcmp(key, "pce_fast_disable_softreset")) return "disabled";
     if (!strcmp(key, "pce_fast_mouse_sensitivity")) return "1.0";
     if (!strcmp(key, "pce_fast_palette")) return "RGB";
-    if (!strncmp(key, "pce_fast_default_joypad_type_p", 30)) return "2 Buttons";
+    if (!strncmp(key, "pce_fast_default_joypad_type_p", 30))
+        return s_PceSixButton ? "6 Buttons" : "2 Buttons";
     if (!strncmp(key, "pce_fast_sound_channel_", 23) && strstr(key, "_volume")) return "100";
     return NULL;
 }
@@ -293,9 +297,19 @@ static int16_t pceJoyMask(unsigned port)
     if (p == EMUSYS_DEVICE_DISCONNECTED) return 0;
 
     const Uint8 nes = SnesIOPadToNes8(p);
-    const unsigned m =
+    unsigned m =
         ((unsigned)nes & 0xFDU) |       /* B, Select/Run, directions */
         (((unsigned)nes & 0x02U) << 7); /* carrier Y -> libretro A (PCE I) */
+    /* AURORA_PCE_PAD6_V1_20261009: high bits are native PCE III, IV, V, VI.
+     * Circle -> Y/III, L1 -> X/IV, Triangle -> L/V, R1 -> R/VI.
+     * In 2-button mode the original low-byte-only fast path remains. */
+    if (s_PceSixButton)
+    {
+        if (p & SNESIO_JOY_A) m |= 1u << RETRO_DEVICE_ID_JOYPAD_Y;
+        if (p & SNESIO_JOY_L) m |= 1u << RETRO_DEVICE_ID_JOYPAD_X;
+        if (p & SNESIO_JOY_X) m |= 1u << RETRO_DEVICE_ID_JOYPAD_L;
+        if (p & SNESIO_JOY_R) m |= 1u << RETRO_DEVICE_ID_JOYPAD_R;
+    }
     return (int16_t)m;
 }
 
@@ -502,6 +516,21 @@ static void pceBuildInfo(const char *name, const void *data, size_t bytes)
     s_ContentInfoExt.persistent_data = data && bytes;
 }
 
+/* AURORA_PCE_PAD6_V1_20261009: live 2/6-button preference.
+ * The core's native AVPad6Enabled state is updated without reinitializing
+ * the emulator. Save-state input state remains owned by the core. */
+void PceBridge_Set6Button(bool enabled)
+{
+    s_PceSixButton = enabled;
+    if (s_GameLoaded)
+        PCE_AuroraSet6Button(enabled ? 1 : 0);
+}
+
+bool PceBridge_Get6Button(void)
+{
+    return s_PceSixButton;
+}
+
 bool PceBridge_Init(void)
 {
     if (s_Initialized) return true;
@@ -527,7 +556,7 @@ bool PceBridge_LoadGame(const void *data, size_t bytes, size_t capacity, const c
     pceBuildInfo(name,data,bytes);
     struct retro_game_info info; memset(&info,0,sizeof(info)); info.path=s_ContentName; info.data=data; info.size=bytes;
     if (!PCE_retro_load_game(&info)) { printf("[PCE] retro_load_game failed: %s (%u bytes)\n",s_ContentName,(unsigned)bytes); s_ContentData=NULL;s_ContentBytes=0;return false; }
-    s_GameLoaded=true; size_t sb=PCE_retro_get_memory_size(RETRO_MEMORY_SAVE_RAM); void *sp=PCE_retro_get_memory_data(RETRO_MEMORY_SAVE_RAM);
+    s_GameLoaded=true; PCE_AuroraSet6Button(s_PceSixButton ? 1 : 0); size_t sb=PCE_retro_get_memory_size(RETRO_MEMORY_SAVE_RAM); void *sp=PCE_retro_get_memory_data(RETRO_MEMORY_SAVE_RAM);
     s_pSramData=(sp&&sb&&sb<=0x7fffffffU)?(Uint8*)sp:NULL; s_SramBytes=s_pSramData?(Int32)sb:0;
     struct retro_system_av_info av; memset(&av,0,sizeof(av)); PCE_retro_get_system_av_info(&av);
     if (av.timing.sample_rate>=8000.0 && av.timing.sample_rate<=96000.0) s_SampleRate=(unsigned)(av.timing.sample_rate+0.5);
@@ -576,6 +605,7 @@ bool PceBridge_LoadDisc(const char *path, const char *systemPath)
     }
 
     s_GameLoaded = true;
+    PCE_AuroraSet6Button(s_PceSixButton ? 1 : 0);
     s_DiscLoaded = true;
     sb = PCE_retro_get_memory_size(RETRO_MEMORY_SAVE_RAM);
     sp = PCE_retro_get_memory_data(RETRO_MEMORY_SAVE_RAM);
@@ -660,8 +690,9 @@ void PceBridge_ResumeDiscIO(void)
     PCE_AuroraCdAsyncResume();
 }
 
-void PceBridge_Reset(void){if(s_GameLoaded)PCE_retro_reset();}
-void PceBridge_SoftReset(void){if(s_GameLoaded)PCE_retro_reset();}
+/* AURORA_PCE_PAD6_V1_1_20261009: pad selection persists across reset, without a game reload. */
+void PceBridge_Reset(void){if(s_GameLoaded){PCE_retro_reset();PCE_AuroraSet6Button(s_PceSixButton ? 1 : 0);}}
+void PceBridge_SoftReset(void){if(s_GameLoaded){PCE_retro_reset();PCE_AuroraSet6Button(s_PceSixButton ? 1 : 0);}}
 /* AURORA_PCE_EXPERIMENTAL_V10_DIRECT_GS
  * AURORA_PCE_V10_DIRECT_GS_FORMAT_FIX_R1
  * AURORA_PCE_EXPERIMENTAL_V11_DIRECT_GS_SAFE
@@ -942,23 +973,30 @@ void PceBridge_RunFrame(Emu::SysInputT *input, CRenderSurface *target, CMixBuffe
     /* AURORA_ASYNC_CDDA_VIDEO_ABSOLUTE_V4_20260830
      * CDDA has no main-thread prefetch path anymore. */
     PCE_AuroraSetCdAudioSafeWindow(0);
-    PCE_retro_run();
+    { AURORA_EXT_BEGIN(_aur_pce_bridge); PCE_retro_run(); AURORA_EXT_END(AURORA_EXT_CORE_PCE,AURORA_PCE_BRIDGE_RETRO_RUN,_aur_pce_bridge,1); }
     PCE_AuroraSetCdAudioSafeWindow(0);
     s_SkipVideoActive = false;
 
     /* V10: ordinary Beetle RGB565 geometry bypasses the RGBA32 surface. */
     if (!skipVideo && s_HaveVideo && !PceBridge_CanDirectGsVideo())
-        pceRender(target);
+        { AURORA_EXT_BEGIN(_aur_pce_bridge); pceRender(target); AURORA_EXT_END(AURORA_EXT_CORE_PCE,AURORA_PCE_BRIDGE_RENDER,_aur_pce_bridge,1); }
 
     if (s_pMix)
-        s_pMix->Flush();
+        { AURORA_EXT_BEGIN(_aur_pce_bridge); s_pMix->Flush(); AURORA_EXT_END(AURORA_EXT_CORE_PCE,AURORA_PCE_BRIDGE_MIX_FLUSH,_aur_pce_bridge,1); }
 
     s_pMix = NULL;
     s_pInput = NULL;
 }
 int PceBridge_GetStateSize(void){if(!s_GameLoaded)return 0;size_t n=PCE_retro_serialize_size();return n&&n<=0x7fffffffU?(int)n:0;}
 int PceBridge_SaveState(void *data,int bytes){int n=PceBridge_GetStateSize();return data&&n>0&&bytes>=n&&PCE_retro_serialize(data,(size_t)n)?n:0;}
-bool PceBridge_LoadState(const void *data,int bytes){return data&&bytes>0&&PCE_retro_unserialize(data,(size_t)bytes);}
+/* AURORA_PCE_PAD6_V1_1_20261009: save states restore the game, not the selected physical pad type. */
+bool PceBridge_LoadState(const void *data,int bytes)
+{
+    if (!data || bytes <= 0 || !PCE_retro_unserialize(data, (size_t)bytes))
+        return false;
+    PCE_AuroraSet6Button(s_PceSixButton ? 1 : 0);
+    return true;
+}
 int PceBridge_GetSRAMBytes(void){return s_GameLoaded?s_SramBytes:0;}
 Uint8 *PceBridge_GetSRAMData(void){return s_GameLoaded?s_pSramData:NULL;}
 unsigned PceBridge_GetSampleRate(void){return s_SampleRate;}

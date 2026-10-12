@@ -118,7 +118,30 @@ AuroraPceClearSpriteLinePS2:
     beqz    $5, .Lsprclr_done
     nop
 
+/* AURORA_V28_PCE_SPRCLR_128_UNROLL_20261010
+ * Clear 8x16B per large chunk; original 64B loop and tails are unchanged.
+ * The 8-mod-16 pointer peel above runs before any SQ. No speculative read,
+ * no out-of-range store, and no change to the write-only destination bytes. */
 .Lsprclr_aligned16:
+    sltiu   $8, $5, 32
+    bnez    $8, .Lsprclr_check64
+    nop
+
+.Lsprclr_loop128:
+    sq      $0, 0x00($4)
+    sq      $0, 0x10($4)
+    sq      $0, 0x20($4)
+    sq      $0, 0x30($4)
+    sq      $0, 0x40($4)
+    sq      $0, 0x50($4)
+    sq      $0, 0x60($4)
+    sq      $0, 0x70($4)
+    addiu   $5, $5, -32
+    sltiu   $8, $5, 32
+    beqz    $8, .Lsprclr_loop128
+    addiu   $4, $4, 0x80
+
+.Lsprclr_check64:
     sltiu   $8, $5, 16
     bnez    $8, .Lsprclr_tail8
     nop
@@ -184,10 +207,9 @@ AuroraPceBmtCopyIncPS2:
     lbu     $8, 0($5)
     sb      $8, 0($4)
     addiu   $5, $5, 1
-    addiu   $4, $4, 1
     addiu   $6, $6, -1
     bnez    $6, .Lbmt_inc_loop
-    nop
+    addiu   $4, $4, 1              /* AURORA_V24_PCE_BMT_DELAY_20261010: delay slot */
 .Lbmt_inc_done:
     jr      $31
     nop
@@ -202,10 +224,9 @@ AuroraPceBmtCopyDecPS2:
     lbu     $8, 0($5)
     sb      $8, 0($4)
     addiu   $5, $5, -1
-    addiu   $4, $4, -1
     addiu   $6, $6, -1
     bnez    $6, .Lbmt_dec_loop
-    nop
+    addiu   $4, $4, -1             /* AURORA_V24_PCE_BMT_DELAY_20261010: delay slot */
 .Lbmt_dec_done:
     jr      $31
     nop

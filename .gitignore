@@ -44,3 +44,45 @@ src/platform/ps2/iop/aurora_ps2mouse/obj/
 !tools/prepare_gpsp_aurora_sources.py
 
 !tools/strip_gambatte_sgb_stage.py
+
+# >>> AURORA_SUBMODULE_SYNC_GITIGNORE_V1 >>>
+# Compiled dependency files, static libraries, and linker output
+*.d
+*.a
+*.symbols.map
+/SNESticle.map
+
+# Python caches. Source helpers in tools/ are NOT temporary build files.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+!tools/*.py
+
+# Local experiments, snapshots, and automated patch backups
+*.pre_*
+*.before-*
+*.orig
+*.rej
+*.swp
+*.swo
+*.tmp
+*.temp
+*.profraw
+*.profdata
+*.dmp
+
+# Locally generated distribution archives at repository root
+/*.zip
+/*.7z
+/*.tar
+
+# Credentials and local machine configuration
+.env
+.env.*
+!.env.example
+
+# Tooling caches, not source code
+.cache/
+# <<< AURORA_SUBMODULE_SYNC_GITIGNORE_V1 <<<

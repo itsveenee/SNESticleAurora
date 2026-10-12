@@ -680,7 +680,7 @@ static void _MainLoopRemoveFdsZipTemp(void)
 {
     if (s_FdsZipTempPath[0])
     {
-        remove(s_FdsZipTempPath);
+        fileXioRemove(s_FdsZipTempPath);
         s_FdsZipTempPath[0] = 0;
     }
 }
@@ -698,7 +698,7 @@ static void _MainLoopRemoveGbaZipTemp(void)
 {
     if (s_GbaZipTempPath[0])
     {
-        remove(s_GbaZipTempPath);
+        fileXioRemove(s_GbaZipTempPath);
         s_GbaZipTempPath[0] = 0;
     }
 }
@@ -723,45 +723,143 @@ static Bool _MainLoopZipPathIsMemoryCard(const Char *pPath)
 }
 
 
-static Bool _MainLoopPrepareZipTempPath(
-    Char *pOut, Int32 nOutBytes, const Char *pLeaf)
+/* AURORA_ZIP_ISSUE36_V3_1_20261008
+ * ZIP temporary files are always storage-backed: USB/massN, or MX4SIO
+ * when its driver exposes a writable massN:/ or mx4sio:/ device. A bare
+ * memory card, SRAM fallback and full-ROM EE-RAM staging are forbidden.
+ * This policy does not affect firmware lookup or the SRAM destination.
+ */
+static Bool _MainLoopZipEnsureStorageDir(const Char *pDir)
 {
-    Char systemDir[512];
-    Char unzipDir[768];
     struct stat st;
-    int n;
+    int fd;
+    if (mkdir(pDir, 0777) == 0)
+        return TRUE;
+    if (stat(pDir, &st) == 0 && S_ISDIR(st.st_mode))
+        return TRUE;
+    /* Some iomanX-only devices do not expose newlib stat(). */
+    fd = fileXioDopen(pDir);
+    if (fd < 0)
+        return FALSE;
+    fileXioDclose(fd);
+    return TRUE;
+}
 
+static Bool _MainLoopZipTryStorageRoot(Char *pOut, Int32 nOutBytes,
+                                        const Char *pRoot,
+                                        const Char *pLeaf)
+{
+    Char dir[768];
+    int n, fd, closeResult;
+    const Char *parts[] = { "/SNESticle", "/SNESticle/SYSTEM",
+                            "/SNESticle/SYSTEM/UNZIP" };
+    int i;
+    if (!pOut || !pRoot || !*pRoot || !pLeaf || !*pLeaf)
+        return FALSE;
+    /* Only the two storage driver namespaces; never mcN: or mmceN:. */
+    if (strncasecmp(pRoot, "mass", 4) != 0 &&
+        strcasecmp(pRoot, "mx4sio:") != 0)
+        return FALSE;
+    for (i = 0; i < 3; ++i)
+    {
+        n = snprintf(dir, sizeof(dir), "%s%s", pRoot, parts[i]);
+        if (n < 0 || n >= (int)sizeof(dir) ||
+            !_MainLoopZipEnsureStorageDir(dir))
+            return FALSE;
+    }
+    n = snprintf(pOut, (size_t)nOutBytes, "%s/%s", dir, pLeaf);
+    if (n < 0 || n >= nOutBytes)
+    {
+        pOut[0] = 0;
+        return FALSE;
+    }
+    /* Check actual write support, not just mkdir/stat on an existing path.
+     * The same fixed filename is overwritten by the extractor immediately. */
+    fd = fileXioOpen(pOut, FIO_O_WRONLY | FIO_O_CREAT | FIO_O_TRUNC, 0666);
+    if (fd < 0)
+        return FALSE;
+    closeResult = fileXioClose(fd);
+    if (closeResult < 0)
+    {
+        fileXioRemove(pOut);
+        return FALSE;
+    }
+    /* After extraction SNES, FDS and GBA use path-based core loaders,
+     * including CFileIO::Open/fopen. Check that too before choosing a disk.
+     * This avoids placing a valid file on a device that those loaders cannot
+     * reopen, while never holding its decompressed contents in EE memory. */
+    {
+        FILE *check = fopen(pOut, "rb");
+        if (!check)
+        {
+            fileXioRemove(pOut);
+            return FALSE;
+        }
+        fclose(check);
+    }
+    fileXioRemove(pOut);
+    return TRUE;
+}
+
+static Bool _MainLoopZipSourceStorageRoot(const Char *pZipPath,
+                                          Char *pOut, size_t outBytes)
+{
+    const Char *colon;
+    size_t n, i;
+    if (!pZipPath || !pOut || outBytes < 8)
+        return FALSE;
+    colon = strchr(pZipPath, ':');
+    if (!colon) return FALSE;
+    n = (size_t)(colon - pZipPath) + 1;
+    if (n >= outBytes) return FALSE;
+    if (n == 7 && !strncasecmp(pZipPath, "mx4sio:", 7))
+    {
+        memcpy(pOut, pZipPath, n);
+        pOut[n] = 0;
+        return TRUE;
+    }
+    if (n < 5 || n > 10 || strncasecmp(pZipPath, "mass", 4))
+        return FALSE;
+    for (i = 4; i + 1 < n; ++i)
+        if (pZipPath[i] < '0' || pZipPath[i] > '9')
+            return FALSE;
+    memcpy(pOut, pZipPath, n);
+    pOut[n] = 0;
+    return TRUE;
+}
+
+static Bool _MainLoopPrepareZipTempPath(
+    Char *pOut, Int32 nOutBytes, const Char *pLeaf,
+    const Char *pZipSource)
+{
+    Char root[32];
+    Int32 i;
     if (!pOut || nOutBytes <= 0 || !pLeaf || !*pLeaf)
         return FALSE;
     pOut[0] = 0;
     s_ZipExtractBlockedOnMemoryCard = FALSE;
 
-    if (!MainLoopEnsureSystemDirectory(
-            systemDir, (Int32)sizeof(systemDir)))
-        return FALSE;
+    /* First try the device containing the ZIP: includes mass2:, mass3:,
+     * ... without assuming the source is always a plugged-in USB stick. */
+    if (_MainLoopZipSourceStorageRoot(pZipSource, root, sizeof(root)) &&
+        _MainLoopZipTryStorageRoot(pOut, nOutBytes, root, pLeaf))
+        return TRUE;
 
-    if (_MainLoopZipPathIsMemoryCard(systemDir))
+    /* Writable USB/MX4SIO fallback, never memory card, even if SRAM uses MC. */
+    for (i = 0; i < 10; ++i)
     {
-        s_ZipExtractBlockedOnMemoryCard = TRUE;
-        MainLoopModalPrintf(60 * 4,
-            "can't extract zip file on memory card");
-        return FALSE;
+        snprintf(root, sizeof(root), "mass%d:", (int)i);
+        if (_MainLoopZipTryStorageRoot(pOut, nOutBytes, root, pLeaf))
+            return TRUE;
     }
+    if (_MainLoopZipTryStorageRoot(pOut, nOutBytes, "mass:", pLeaf) ||
+        _MainLoopZipTryStorageRoot(pOut, nOutBytes, "mx4sio:", pLeaf))
+        return TRUE;
 
-    n = snprintf(unzipDir, sizeof(unzipDir),
-                 "%s/UNZIP", systemDir);
-    if (n < 0 || n >= (int)sizeof(unzipDir))
-        return FALSE;
-
-    if (mkdir(unzipDir, 0777) != 0)
-    {
-        if (stat(unzipDir, &st) != 0 || !S_ISDIR(st.st_mode))
-            return FALSE;
-    }
-
-    n = snprintf(pOut, (size_t)nOutBytes,
-                 "%s/%s", unzipDir, pLeaf);
-    return (n >= 0 && n < nOutBytes) ? TRUE : FALSE;
+    pOut[0] = 0;
+    printf("[ZIP] no writable USB/MX4SIO storage for %s\n",
+           pZipSource ? pZipSource : "UNKNOWN");
+    return FALSE;
 }
 
 /* AURORA_LOADER_REVIEW_V2_20260915
@@ -835,7 +933,8 @@ static size_t _MainLoopZipReaderRead(
     if (pReader->pos != (Int32)fileOfs)
     {
         int pos = fileXioLseek(pReader->fd, (int)fileOfs, FIO_SEEK_SET);
-        if (pos < 0)
+        /* AURORA_ZIP_ISSUE36_V3_1_20261008: no partial seek accepted. */
+        if (pos != (int)fileOfs)
             return 0;
         pReader->pos = (Int32)pos;
     }
@@ -845,7 +944,7 @@ static size_t _MainLoopZipReaderRead(
         size_t remain = nBytes - total;
         int want = remain > 0x7fffffffU ? 0x7fffffff : (int)remain;
         int got = fileXioRead(pReader->fd, pDst + total, want);
-        if (got <= 0)
+        if (got <= 0 || got > want)
             break;
         total += (size_t)got;
         pReader->pos += (Int32)got;
@@ -854,9 +953,12 @@ static size_t _MainLoopZipReaderRead(
     return total;
 }
 
+/* AURORA_ZIP_ISSUE36_V3_1_20261008: use the same iomanX/fileXio
+ * backend for ZIP output as the input reader. No fopen/fwrite on MX4SIO.
+ * Complete short writes, bound the decompressed stream and preserve CRC. */
 typedef struct MainLoopZipOutputT
 {
-    FILE *fp;
+    int fd;
     Int32 expected;
     Int32 written;
 } MainLoopZipOutputT;
@@ -865,16 +967,23 @@ static size_t _MainLoopZipOutputWrite(
     void *opaque, mz_uint64 fileOfs, const void *pBuffer, size_t nBytes)
 {
     MainLoopZipOutputT *pOut = (MainLoopZipOutputT *)opaque;
-
-    if (!pOut || !pOut->fp || !pBuffer ||
+    const Uint8 *src = (const Uint8 *)pBuffer;
+    size_t total = 0;
+    if (!pOut || pOut->fd < 0 || !pBuffer ||
         fileOfs != (mz_uint64)(Uint32)pOut->written ||
         pOut->written < 0 || pOut->written > pOut->expected ||
         nBytes > (size_t)(pOut->expected - pOut->written))
         return 0;
 
-    if (nBytes && fwrite(pBuffer, 1, nBytes, pOut->fp) != nBytes)
-        return 0;
-
+    while (total < nBytes)
+    {
+        const size_t remain = nBytes - total;
+        const int want = remain > 65536U ? 65536 : (int)remain;
+        const int got = fileXioWrite(pOut->fd, src + total, want);
+        if (got <= 0 || got > want)
+            return 0;
+        total += (size_t)got;
+    }
     pOut->written += (Int32)nBytes;
     return nBytes;
 }
@@ -892,7 +1001,8 @@ static Bool _MainLoopExtractZipEntryToFile(
     MainLoopZipOutputT output;
     mz_zip_archive zip;
     mz_zip_archive_file_stat zst;
-    struct stat fst;
+    int verifiedFd = -1;
+    const char *failedAt = "preflight";
     Bool readerOpen = FALSE;
     Bool zipOpen = FALSE;
     Bool loadingShown = FALSE;
@@ -918,12 +1028,17 @@ static Bool _MainLoopExtractZipEntryToFile(
     memset(&reader, 0, sizeof(reader));
     reader.fd = -1;
     memset(&output, 0, sizeof(output));
+    output.fd = -1;
     memset(&zip, 0, sizeof(zip));
     memset(&zst, 0, sizeof(zst));
 
     if (!_MainLoopZipReaderOpen(pZipPath, &reader))
+    {
+        printf("[ZIP] failed: source_open (%s)\n", pZipPath);
         return FALSE;
+    }
     readerOpen = TRUE;
+    failedAt = "zip_directory";
 
     zip.m_pRead = _MainLoopZipReaderRead;
     zip.m_pIO_opaque = &reader;
@@ -931,6 +1046,7 @@ static Bool _MainLoopExtractZipEntryToFile(
         goto done;
     zipOpen = TRUE;
 
+    failedAt = "member_index";
     if (uZipIndex >= mz_zip_reader_get_num_files(&zip) ||
         !mz_zip_reader_file_stat(&zip, (mz_uint)uZipIndex, &zst))
         goto done;
@@ -940,9 +1056,11 @@ static Bool _MainLoopExtractZipEntryToFile(
         strcmp(zst.m_filename, pMemberName) != 0)
         goto done;
 
-    remove(pOutPath);
-    output.fp = fopen(pOutPath, "wb");
-    if (!output.fp)
+    failedAt = "destination_open";
+    fileXioRemove(pOutPath);
+    output.fd = fileXioOpen(pOutPath,
+        FIO_O_WRONLY | FIO_O_CREAT | FIO_O_TRUNC, 0666);
+    if (output.fd < 0)
         goto done;
 
     output.expected = nExpectedBytes;
@@ -951,31 +1069,49 @@ static Bool _MainLoopExtractZipEntryToFile(
     _MainLoopLoadProgressBegin(nExpectedBytes);
     loadingShown = TRUE;
 
+    failedAt = "decompress_or_crc";
     if (!mz_zip_reader_extract_to_callback(
             &zip, (mz_uint)uZipIndex,
             _MainLoopZipOutputWrite, &output, 0))
         goto done;
 
-    if (output.written != nExpectedBytes || fflush(output.fp) != 0)
+    failedAt = "written_size";
+    if (output.written != nExpectedBytes)
         goto done;
 
-    fclose(output.fp);
-    output.fp = NULL;
+    failedAt = "destination_close";
+    {
+        const int closeResult = fileXioClose(output.fd);
+        output.fd = -1;
+        if (closeResult < 0)
+            goto done;
+    }
 
-    if (stat(pOutPath, &fst) != 0 ||
-        S_ISDIR(fst.st_mode) || fst.st_size != nExpectedBytes)
+    /* Reopen through fileXio, not newlib stat(): validate the real length. */
+    failedAt = "verify_file_size";
+    verifiedFd = fileXioOpen(pOutPath, FIO_O_RDONLY, 0);
+    if (verifiedFd < 0)
         goto done;
+    {
+        const int actual = fileXioLseek(verifiedFd, 0, FIO_SEEK_END);
+        const int closeResult = fileXioClose(verifiedFd);
+        verifiedFd = -1;
+        if (actual != nExpectedBytes || closeResult < 0)
+            goto done;
+    }
 
     if (pOutCRC)
         *pOutCRC = (Uint32)zst.m_crc32;
     ok = TRUE;
 
 done:
-    if (output.fp)
+    if (output.fd >= 0)
     {
-        fclose(output.fp);
-        output.fp = NULL;
+        fileXioClose(output.fd);
+        output.fd = -1;
     }
+    if (verifiedFd >= 0)
+        fileXioClose(verifiedFd);
     if (zipOpen)
         mz_zip_reader_end(&zip);
     if (readerOpen)
@@ -983,7 +1119,11 @@ done:
     if (loadingShown)
         _MainLoopLoadProgressFinish(ok);
     if (!ok)
-        remove(pOutPath);
+    {
+        printf("[ZIP] failed: %s (member=%s, index=%u, dest=%s)\n",
+               failedAt, pMemberName, uZipIndex, pOutPath);
+        fileXioRemove(pOutPath);
+    }
     return ok;
 }
 
@@ -1654,6 +1794,11 @@ static Uint32 _MainLoopSwcCartPayloadBytes(const char *pPath)
 
 void _MainLoopUnloadRom()
 {
+#if AURORA_FRONTEND_PROFILER
+    /* AURORA_PROFILER_AUTO20_STATELOAD_V21_20261009: never carry a
+     * previous ROM's benchmark deadline into a new core. */
+    MainLoopProfilerAutoCloseCancel();
+#endif
     /* AURORA_AUDIO_HARDCUT_ROM_UNLOAD_V1 */
     MainLoopAudioHardCut();
 
@@ -2683,11 +2828,11 @@ static Bool _MainLoopExecuteFdsZip(const char *pZipPath,
 
     if (!_MainLoopPrepareZipTempPath(
             tempPath, (Int32)sizeof(tempPath),
-            "aurora_fds_zip.fds"))
+            "aurora_fds_zip.fds", pZipPath))
     {
         if (!s_ZipExtractBlockedOnMemoryCard)
             MainLoopModalPrintf(
-                60 * 4, "ERROR: cannot create SYSTEM/UNZIP");
+                60 * 4, "ZIP requires writable USB/MX4SIO");
         return FALSE;
     }
 
@@ -2705,7 +2850,7 @@ static Bool _MainLoopExecuteFdsZip(const char *pZipPath,
                  sizeof(s_FdsZipTempPath), "%s", tempPath) >=
         (int)sizeof(s_FdsZipTempPath))
     {
-        remove(tempPath);
+        fileXioRemove(tempPath);
         s_FdsZipTempPath[0] = 0;
         MainLoopModalPrintf(60 * 4, "ERROR: FDS temp path too long");
         return FALSE;
@@ -4975,11 +5120,11 @@ static Bool _MainLoopExecuteGbaZipMemory(const char *pZipPath,
 
     if (!_MainLoopPrepareZipTempPath(
             tempPath, (Int32)sizeof(tempPath),
-            "aurora_gba_zip.gba"))
+            "aurora_gba_zip.gba", pZipPath))
     {
         if (!s_ZipExtractBlockedOnMemoryCard)
             MainLoopModalPrintf(
-                60 * 4, "ERROR: cannot create SYSTEM/UNZIP");
+                60 * 4, "ZIP requires writable USB/MX4SIO");
         return FALSE;
     }
 
@@ -4997,7 +5142,7 @@ static Bool _MainLoopExecuteGbaZipMemory(const char *pZipPath,
                  sizeof(s_GbaZipTempPath), "%s", tempPath) >=
         (int)sizeof(s_GbaZipTempPath))
     {
-        remove(tempPath);
+        fileXioRemove(tempPath);
         s_GbaZipTempPath[0] = 0;
         MainLoopModalPrintf(60 * 4, "ERROR: GBA temp path too long");
         return FALSE;
@@ -5348,11 +5493,11 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
         {
             if (!_MainLoopPrepareZipTempPath(
                     tempPath, (Int32)sizeof(tempPath),
-                    "aurora_snes_zip.sfc"))
+                    "aurora_snes_zip.sfc", pFileName))
             {
                 if (!s_ZipExtractBlockedOnMemoryCard)
                     MainLoopModalPrintf(60 * 4,
-                        "ERROR: cannot create SYSTEM/UNZIP");
+                        "ZIP requires writable USB/MX4SIO");
                 return FALSE;
             }
             if (!_MainLoopExtractZipEntryToFile(
@@ -5374,7 +5519,7 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
 
         if (!romfile.Open(pOwnedPath, "rb"))
         {
-            if (bTemp) remove(tempPath);
+            if (bTemp) fileXioRemove(tempPath);
             MainLoopModalPrintf(60 * 3, "ERROR: cannot open SNES ROM");
             return FALSE;
         }
@@ -5405,7 +5550,7 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
             }
         }
 
-        if (bTemp) remove(tempPath);
+        if (bTemp) fileXioRemove(tempPath);
 
         if (eError != Emu::Rom::LOADERROR_NONE)
         {

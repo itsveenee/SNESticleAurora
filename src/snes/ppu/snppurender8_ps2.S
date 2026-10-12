@@ -338,6 +338,10 @@ AuroraPPUFetchCHR2NoOffset64PS2:
         srl     $11,$25,8                /* p1 */
         or      $24,$2,$11               /* source opacity */
 
+        /* AURORA_V24_SNES_CHR_FAST_EXACT_20261010: raw-zero reject.
+         * The opacity mask is zero under both original orientations, so
+         * transparent tiles bypass mask-table lookup and H-flip selection. */
+        beq     $24,$0,.Lchr2_nooff_transparent
         andi    $25,$3,1
         beq     $25,$0,.Lchr2_nooff_normal
         move    $25,$13
@@ -349,7 +353,6 @@ AuroraPPUFetchCHR2NoOffset64PS2:
         lbu     $24,0($24)
         sb      $24,0($10)
 .Lchr2_nooff_mask_ready:
-        beq     $24,$0,.Lchr2_nooff_transparent
         sll     $2,$2,3
 
         addu    $2,$25,$2
@@ -368,11 +371,13 @@ AuroraPPUFetchCHR2NoOffset64PS2:
 
         sll     $11,$11,28
         sra     $11,$11,31
-        and     $2,$24,$11
+        /* Hot opaque path: useful priority calculation in branch slot. */
         b       .Lchr2_nooff_output
-        nop
+        and     $2,$24,$11
 
 .Lchr2_nooff_transparent:
+        /* Exact mask output that the original pre-branch code produced. */
+        sb      $0,0($10)
         move    $3,$0
         move    $2,$0
 
@@ -433,17 +438,18 @@ AuroraPPUFetchCHR4NoOffset64PS2:
         beq     $11,$0,.Lchr4_nooff_transparent_v10_4
         andi    $3,$3,1                  /* H-flip flag; useful delay slot */
 
-        /* $at is used only as a caller-saved leaf temporary. No stack or
-         * callee-saved GPR is touched. */
-        beq     $3,$0,.Lchr4_nooff_normal_v10_4
-        move    $2,$13
-        b       .Lchr4_nooff_opaque_v10_4
-        sb      $11,0($10)               /* H-flip mask is already oriented */
-
-.Lchr4_nooff_normal_v10_4:
-        move    $2,$12
+        /* AURORA_V24_SNES_CHR_FAST_EXACT_20261010: branchless H choice.
+         * LUT selection and opacity output are identical to v10.4. The
+         * 256-byte mask table is read-only, always valid for raw 8-bit mask. */
+        /* AURORA_V28_CHR4_MASK_LOAD_SCHEDULE_20261010
+         * Same 6 opcodes, inputs, outputs and guards as v24; issue reverse
+         * lookup earlier and hide its load-use delay behind independent MOVN.
+         * Both H-flip choices retain exact palette/mask/priority semantics. */
         addu    $1,$14,$11
-        lbu     $11,0($1)                /* reverse normal opacity mask */
+        move    $2,$12                  /* normal plane */
+        lbu     $1,0($1)                 /* reverse mask lookup */
+        movn    $2,$13,$3                /* H-flipped plane iff H bit set */
+        movz    $11,$1,$3                /* only reverse if H bit clear */
         sb      $11,0($10)
 
 .Lchr4_nooff_opaque_v10_4:
@@ -517,6 +523,62 @@ AuroraPPUFetchCHR4NoOffset64PS2:
         b       .Lchr4_nooff_done_v10_4
         nop
         .end    AuroraPPUFetchCHR4NoOffset64PS2
+/* AURORA_OBJ_POSTFETCH_COMPACT_R5900_V3_40_20261008
+ * Int32 AuroraPPUCompactOBJTransparentPS2(SnesRenderObj8T *line, Int32 n)
+ *
+ * SnesRenderObj8T is compile-time guarded in snppurender8.cpp:
+ *   size = 16, uData[SNPPU_BGPLANE_OPAQUE] = byte 13.
+ *
+ * Phase 1 is the common no-transparent fast path: scan one byte per entry and
+ * perform zero stores.  The source pointer advances in the beq delay slot.
+ * Only after the first transparent row is found do we compact later opaque
+ * quadwords forward.  Relative order is preserved, so the renderer's reverse
+ * traversal observes exactly the same opaque ordering.
+ */
+        .p2align 4
+        .globl  AuroraPPUCompactOBJTransparentPS2
+        .ent    AuroraPPUCompactOBJTransparentPS2
+AuroraPPUCompactOBJTransparentPS2:
+        move    $2,$5                   /* default: all input rows survive */
+        blez    $5,.Lobj_compact_done
+        sll     $7,$5,4                 /* byte size; harmless for n<=0 */
+        addu    $7,$4,$7                /* end = line + n*16 */
+        move    $6,$4                   /* src */
+
+.Lobj_compact_find_gap:
+        lbu     $8,13($6)               /* uOpaque */
+        beq     $8,$0,.Lobj_compact_gap
+        addiu   $6,$6,16                /* always advance to next entry */
+        bne     $6,$7,.Lobj_compact_find_gap
+        nop
+        b       .Lobj_compact_done      /* all opaque: zero stores */
+        nop
+
+.Lobj_compact_gap:
+        /* beq delay slot advanced src; dst is the transparent entry just seen. */
+        addiu   $9,$6,-16               /* dst = first transparent slot */
+        subu    $2,$9,$4
+        srl     $2,$2,4                 /* survivors before first gap */
+        beq     $6,$7,.Lobj_compact_done
+        nop
+
+.Lobj_compact_loop:
+        lbu     $8,13($6)
+        beq     $8,$0,.Lobj_compact_skip
+        addiu   $6,$6,16                /* src advances on both paths */
+        lq      $10,-16($6)             /* previous entry; 16-byte aligned */
+        sq      $10,0($9)
+        addiu   $9,$9,16
+        addiu   $2,$2,1
+.Lobj_compact_skip:
+        bne     $6,$7,.Lobj_compact_loop
+        nop
+
+.Lobj_compact_done:
+        jr      $31
+        nop
+        .end    AuroraPPUCompactOBJTransparentPS2
+
 /* AURORA_DKC_BGDATA_DELAY_SLOT_R5900_V26_20260928
  * Scheduling-only change: pointer increments occupy already-existing branch
  * delay slots.  Data, masks, qfsrv semantics and tile count are unchanged.

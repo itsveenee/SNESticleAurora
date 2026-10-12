@@ -100,6 +100,13 @@ static Uint32 _uVblankCycle;
  * Emulated CPU/audio time is never skipped. Only host video presentation and
  * its VBlank wait are omitted, exactly like the previous Safe Frameskip path.
  */
+/* AURORA_V48_3_BOUND_NORMAL_HOST_DEBT_20261012
+ * Compile-time A/B for the NORMAL Safe Frameskip host scheduler only.
+ * All video buffers, audio timing and emulated clocks are unchanged. */
+#ifndef AURORA_V48_3_BOUND_NORMAL_HOST_DEBT
+#define AURORA_V48_3_BOUND_NORMAL_HOST_DEBT 1
+#endif
+
 static Int32  s_SafeFrameskipLevel = 1;
 static Bool   s_SafeFrameskipSkipPresentation = FALSE;
 static Bool   s_SafeFrameskipGameplayActive = FALSE;
@@ -349,7 +356,12 @@ Int32 MainLoopSafeFrameskipGetLevel(void)
 
 void MainLoopSafeFrameskipSetLevel(Int32 level)
 {
+#if AURORA_FRONTEND_PROFILER
     s_SafeFrameskipLevel = level > 0 ? 1 : 0;
+#else /* AURORA_V44_CLEAN_SAFE_FS_ON_20261011: clean always ON, including old video.cfg */
+    (void)level;
+    s_SafeFrameskipLevel = 1;
+#endif
     s_SafeFrameskipCdAudioWindowRequested = FALSE;
     s_SafeFrameskipUiFreezeValid = FALSE;
     s_SafeFrameskipUiFreezeHadAim = FALSE;
@@ -505,6 +517,31 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
 
     if (s_SafeFrameskipAim == 0u)
         s_SafeFrameskipAim = now;
+
+    /* AURORA_V48_3_BOUND_NORMAL_HOST_DEBT_20261012
+     * The 32-bit COP0 host counter and the 32-bit Aim are modular.
+     * The signed (Aim - now) check below only identifies elapsed debt
+     * unambiguously while it stays below 2^31 counts.  When the normal
+     * 2/5 presentation floor is saturated, work can exceed a period
+     * indefinitely and Aim falls farther behind with every host tick.
+     * Limit stale Aim to eight measured periods while it is still
+     * unambiguously negative.  This keeps ordinary debt-driven skip
+     * decisions TRUE, including after the clamp: eight periods is
+     * far above any normal scheduler catch-up threshold.
+     * Do not modify CRC-unlimited policy, throttle, audio or core time.
+     * No unbounded loop, no 64-bit math on the normal fast path. */
+#if AURORA_V48_3_BOUND_NORMAL_HOST_DEBT
+    if (s_SafeFrameskipPeriod != 0u &&
+        s_SafeFrameskipPeriod <= 0x0FFFFFFFu &&
+        (s_SafeFrameskipUnlimitedOwner == NULL ||
+         s_SafeFrameskipUnlimitedOwner != (const void *)_pSystem))
+    {
+        const Uint32 maxDebt = s_SafeFrameskipPeriod * 8u;
+        const Int32 phase = (Int32)(s_SafeFrameskipAim - now);
+        if (phase < 0 && (Uint32)(now - s_SafeFrameskipAim) > maxDebt)
+            s_SafeFrameskipAim = now - maxDebt;
+    }
+#endif
 
     {
         const Int32 diff = (Int32)(s_SafeFrameskipAim - now);

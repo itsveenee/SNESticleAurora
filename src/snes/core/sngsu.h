@@ -40,7 +40,6 @@ struct SNGSUDiagT
     Uint32 Starts;
     Uint32 Stops;
     Uint32 Aborts;
-    Uint32 Watchdogs;
     Uint32 CurrentJobInstructions;
     Uint32 MaxJobInstructions;
     Uint32 Plots;
@@ -145,12 +144,6 @@ private:
     mutable Int32 m_StepClocks;  // clocks charged by the current instruction
     Int32  m_ClockCarry;         // instruction overrun carried into next line
     Bool   m_R14Modified;        // defer internal R14 prefetch to instruction end
-
-    // watchdog: se o programa rodar demais sem STOP (ex.: opcodes ainda
-    // incompletos durante o desenvolvimento), forca a parada e devolve o
-    // controle ao SNES, evitando travar a EE.
-    Uint32 m_Runaway;
-    Bool   m_WatchdogReported; // uma unica captura por Reset, somente em erro
 
 #if SNDBG_LOG
     SNGSUDiagT m_Diag;

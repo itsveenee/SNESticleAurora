@@ -51,7 +51,17 @@ Bool MainLoopEnsureSwcDirectory(Char *pOut, Int32 nOutBytes); /* AURORA_SWC_MEGA
 Bool MainLoopFindSystemFileDirectory(Char *pOut, Int32 nOutBytes,
                                      const Char *pFileName);
 Bool MainLoopSramNeedsMemoryCardPreflight();
+/* AURORA_BENCHMARK_CHAINED_V3_20261010_STATE_H_BEGIN */
+#if AURORA_FRONTEND_PROFILER
+Bool MainLoopBenchmarkLoadStateSlot1();
+#endif
+/* AURORA_BENCHMARK_CHAINED_V3_20261010_STATE_H_END */
 Bool _MainLoopLoadState();
+#if AURORA_FRONTEND_PROFILER
+/* AURORA_PROFILER_AUTO20_STATELOAD_V21_20261009 */
+void MainLoopProfilerAutoCloseArmAfterStateLoad(void);
+void MainLoopProfilerAutoCloseCancel(void);
+#endif
 Bool _MainLoopSaveState();
 
 void MainLoopStateSettingsLoad();
