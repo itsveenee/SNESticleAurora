@@ -60,6 +60,7 @@ If the repository was cloned without `--recurse-submodules`, run
 * Famicom microphone (L2+START).
 * NES Zapper / Famicom Light Gun (X to shoot, L2+SQUARE to simulate shooting away from the screen).
 * PC Engine 6-button pad *(don't use it with 2-button games!)*
+* PC Engine alternative video modes (Ninja Spirits, Aoi Blink, Toumaden, Puyo Puyo and more).
 * Region select (all consoles).
 
 #### User interface:
@@ -82,7 +83,6 @@ If the repository was cloned without `--recurse-submodules`, run
 ## Emulation progress
 
 #### Fixed:
-* PC Engine alternative video modes (Ninja Spirits, Aoi Blink, Toumaden, Puyo Puyo and more) implemented.
 * Pilotwings (SNES) and Secret of Mana (SNES) mode 7 rendering, also fixes other games that rely on it.
 * Secret of Mana (SNES) mode 5 rendering, also fixes other games that rely on it.
 * Addams Family (SNES) graphical glitches and timing issues fixed.
@@ -112,4 +112,3 @@ If the repository was cloned without `--recurse-submodules`, run
 ## Special thanks
 * Pavel (@eXo12): invaluable beta testing, feedbacks and motivation which helped me immensely. Thanks!
 * Aurora: it's a secret to everybody.
-    
