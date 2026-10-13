@@ -2957,7 +2957,7 @@ static Bool _MainLoopExecuteFdsZip(const char *pZipPath,
 
     if (!_MainLoopPrepareZipTempPath(
             tempPath, (Int32)sizeof(tempPath),
-            "aurora_fds_zip.fds", pOriginalPath))
+            "aurora_fds_zip.fds", pOriginalZipPath))
     {
         if (!s_ZipExtractBlockedOnMemoryCard)
             MainLoopModalPrintf(
