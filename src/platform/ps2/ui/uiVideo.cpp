@@ -3,11 +3,13 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h> /* strcasecmp: pfs0 ELF recognition */
 #include <stdio.h>
 #include <sys/stat.h>
 #define NEWLIB_PORT_AWARE
 #include <fileXio.h>
 #include <fileXio_rpc.h>
+#include <libhdd.h> /* APA partition metadata */
 #undef NEWLIB_PORT_AWARE
 #include <kernel.h>
 #include <libpad.h>
@@ -26,6 +28,7 @@ extern "C" {
 #include "memcard.h"
 #include "uiCover.h"
 #include "mainloop_bgm.h"
+#include "mainloop_ui.h" /* MainLoopStatusPrintf */
 #include "mainloop_state.h"
 #include "mainloop_input.h"
 #include "input.h"
@@ -461,21 +464,30 @@ static Bool _AuroraVideoCfgRead(
 static Bool _AuroraVideoCfgWrite(
     char *pPath, Uint8 *pData, Uint32 nBytes)
 {
+    /* AURORA_HDD_ISSUE38_VIDEO_CFG_V4_20261013 : verified HDD write.
+     * The existing file format/layout and memory-card write path are intact.
+     * fopen("wb") may create/truncate before fwrite: do not report success
+     * until a full readback and byte-for-byte comparison has succeeded. */
     AuroraVideoHddIOGuard ioGuard(pPath);
     char mapped[512];
     FILE *f;
     size_t written;
     Bool ok;
+    Uint8 verify[sizeof(VideoCfgT)];
+
     if (!_AuroraVideoCfgIsHdd(pPath))
         return MemCardWriteFile(pPath, pData, nBytes);
-    if (!_AuroraVideoCfgMappedPath(pPath, mapped, sizeof(mapped)))
+    if (!pData || nBytes != sizeof(VideoCfgT) ||
+        !_AuroraVideoCfgMappedPath(pPath, mapped, sizeof(mapped)))
+    {
+        printf("[video.cfg] invalid HDD write/path\n");
         return FALSE;
-    /* Canonical SNESticle root might not yet exist on a fresh HDD. */
+    }
     {
         char parent[512];
         char *slash;
-        if (snprintf(parent, sizeof(parent), "%s", mapped) >=
-            (int)sizeof(parent)) return FALSE;
+        int n = snprintf(parent, sizeof(parent), "%s", mapped);
+        if (n < 0 || n >= (int)sizeof(parent)) return FALSE;
         slash = strrchr(parent, '/');
         if (!slash) return FALSE;
         *slash = 0;
@@ -484,8 +496,6 @@ static Bool _AuroraVideoCfgWrite(
             struct stat st;
             if (stat(parent, &st) < 0 || !S_ISDIR(st.st_mode))
             {
-                /* AURORA_HDD_ISSUE38_V3_20261013 : some PFS implementations expose
-                 * fileXio directory operations but not newlib stat(). */
                 int dfd = fileXioDopen(parent);
                 if (dfd < 0) return FALSE;
                 fileXioDclose(dfd);
@@ -493,35 +503,159 @@ static Bool _AuroraVideoCfgWrite(
         }
     }
     f = fopen(mapped, "wb");
-    if (!f) return FALSE;
+    if (!f)
+    {
+        printf("[video.cfg] HDD fopen(write) FAILED: %s\n", mapped);
+        return FALSE;
+    }
     written = fwrite(pData, 1, nBytes, f);
-    ok = (fflush(f) == 0) ? TRUE : FALSE;
+    ok = written == nBytes && fflush(f) == 0 ? TRUE : FALSE;
     if (fclose(f) != 0) ok = FALSE;
-    return (written == nBytes && ok) ? TRUE : FALSE;
+    if (!ok)
+    {
+        printf("[video.cfg] HDD write FAILED: %u/%u bytes\n",
+               (unsigned)written, (unsigned)nBytes);
+        return FALSE;
+    }
+
+    /* Exact round-trip and EOF check: a 0-byte or partial file fails. */
+    f = fopen(mapped, "rb");
+    if (!f)
+    {
+        printf("[video.cfg] HDD readback reopen FAILED\n");
+        return FALSE;
+    }
+    size_t got = fread(verify, 1, nBytes, f);
+    int end = fgetc(f);
+    ok = got == nBytes && end == EOF && !ferror(f) &&
+         memcmp(verify, pData, nBytes) == 0 ? TRUE : FALSE;
+    if (fclose(f) != 0) ok = FALSE;
+    if (!ok)
+    {
+        printf("[video.cfg] HDD readback mismatch: got=%u expected=%u\n",
+               (unsigned)got, (unsigned)nBytes);
+        return FALSE;
+    }
+    printf("[video.cfg] HDD SAVE VERIFIED: %s (%u bytes)\n",
+           pPath, (unsigned)nBytes);
+    return TRUE;
+}
+
+/* AURORA_HDD_ISSUE38_VIDEO_CFG_V4_20261013
+ * An FHDB launcher may supply only pfs0:/path/to/ELF. After the IOP reset,
+ * pfs0: is NOT reliably mounted and no partition identity survives that alias.
+ * Locate the actual ELF, do not assume +OPL and do not enumerate at normal
+ * mc:/mass:/SMB boots. Preserve the partition identity as hdd0:/PART/... . */
+static Bool _AuroraVideoCfgResolvePfsBoot(
+    const char *bootPath, char *pOut, size_t nOut)
+{
+    enum { MAX_PFS_BOOT_PARTS = 64 };
+    char parts[MAX_PFS_BOOT_PARTS][128];
+    char logical[512], mapped[512], winner[300];
+    iox_dirent_t entry;
+    int fd, count = 0, i, matches = 0, n;
+    int previous;
+    const char *elf;
+
+    if (!pOut || !nOut) return FALSE;
+    pOut[0] = 0;
+    if (!bootPath || strncmp(bootPath, "pfs0:/", 6)) return FALSE;
+    elf = bootPath + 5; /* '/SNESticle/SNESticle.elf' */
+    if (!elf[1] || strstr(elf, "..") || strchr(elf, '\\')) return FALSE;
+    {
+        /* Require a real absolute .elf filename, never a bare directory. */
+        const char *ext = strrchr(elf, '.');
+        if (!ext || strcasecmp(ext, ".elf") != 0) return FALSE;
+    }
+    if (strlen(elf) > 240) return FALSE;
+
+    previous = HddSupportIsEnabled();
+    if (!previous) HddSupportSetEnabled(1);
+    if (HddLoadEmbeddedIrx() < 0)
+    {
+        if (!previous) HddSupportSetEnabled(0);
+        return FALSE;
+    }
+
+    /* First close the APA directory, THEN mount a PFS filesystem. */
+    fd = fileXioDopen("hdd0:");
+    if (fd < 0) return FALSE;
+    while (fileXioDread(fd, &entry) > 0)
+    {
+        size_t len;
+        if (!entry.name[0] ||
+            entry.stat.attr != ATTR_MAIN_PARTITION ||
+            entry.stat.mode != FS_TYPE_PFS)
+            continue;
+        len = strlen(entry.name);
+        if (!len || len >= sizeof(parts[0])) continue;
+        if (count >= MAX_PFS_BOOT_PARTS)
+        {
+            fileXioDclose(fd);
+            printf("[video.cfg] FHDB boot: too many PFS partitions\n");
+            return FALSE; /* Never choose from a truncated list. */
+        }
+        memcpy(parts[count++], entry.name, len + 1);
+    }
+    fileXioDclose(fd);
+    winner[0] = 0;
+
+    for (i = 0; i < count; ++i)
+    {
+        FILE *f;
+        unsigned char header[4];
+        size_t got;
+        n = snprintf(logical, sizeof(logical),
+                     "hdd0:/%s%s", parts[i], elf);
+        if (n < 0 || n >= (int)sizeof(logical) ||
+            HddMapPath(logical, mapped, sizeof(mapped)) != 1)
+            continue;
+        f = fopen(mapped, "rb");
+        if (!f) continue;
+        got = fread(header, 1, sizeof(header), f);
+        fclose(f);
+        if (got != sizeof(header) ||
+            header[0] != 0x7f || header[1] != 'E' ||
+            header[2] != 'L' || header[3] != 'F')
+            continue;
+        matches++;
+        n = snprintf(winner, sizeof(winner),
+                     "hdd0:/%s/SNESticle/video.cfg", parts[i]);
+        if (n < 0 || n >= (int)sizeof(winner)) return FALSE;
+    }
+
+    if (matches != 1)
+    {
+        printf("[video.cfg] FHDB boot ELF matches: %d (need exactly 1)\n",
+               matches);
+        return FALSE;
+    }
+    n = snprintf(pOut, nOut, "%s", winner);
+    return n >= 0 && (size_t)n < nOut ? TRUE : FALSE;
 }
 
 static Bool _AuroraVideoCfgActivateHddBootFallback(void)
 {
-    /* AURORA_HDD_ISSUE38_V3_20261013
-     * Prioritize the ELF's *partition*, not merely a memory-card config.
-     * Boot pfs0: from FHDB may lack logical partition information: in that
-     * case the already-mounted pfs0: is supported as a startup fallback.
-     * After a game is opened, prefer its unambiguous hdd0:/PART mapping. */
+    /* AURORA_HDD_ISSUE38_VIDEO_CFG_V4_20261013
+     * The ELF's partition is authoritative; a game from another partition
+     * must NOT redirect settings. Never use a stale pfs0: alias directly. */
     const char *bootDir = MainGetBootDir();
     const char *bootPath = MainGetBootPath();
-    const char *sources[3] = { bootDir, bootPath, _RomPath };
+    const char *boot[2] = { bootDir, bootPath };
     char candidate[300], mapped[512];
     int previous = HddSupportIsEnabled();
     int i;
 
-    /* A known logical HDD boot identity wins; do not silently point at
-     * another partition when the browser has remounted pfs0:. */
-    for (i = 0; i < 3; ++i)
+    /* Already pinned in a prior successful call. */
+    if (!strncmp(s_AuroraVideoHddCfg, "hdd0:", 5)) return TRUE;
+
+    /* Explicit hdd0:/PART boot identity: never search unrelated partitions. */
+    for (i = 0; i < 2; ++i)
     {
-        const char *source = sources[i];
+        const char *source = boot[i];
         if (!source || strncmp(source, "hdd0:", 5)) continue;
         if (!MainLoopHddLogicalDataPath(source, "video.cfg",
-                                         candidate, sizeof(candidate)))
+                                        candidate, sizeof(candidate)))
             continue;
         if (!previous) HddSupportSetEnabled(1);
         if (HddLoadEmbeddedIrx() >= 0 &&
@@ -533,23 +667,41 @@ static Bool _AuroraVideoCfgActivateHddBootFallback(void)
         }
         if (!previous) HddSupportSetEnabled(0);
     }
-    /* An already known logical HDD config remains valid. */
-    if (!strncmp(s_AuroraVideoHddCfg, "hdd0:", 5)) return TRUE;
 
-    /* FHDB sometimes starts the ELF via pfs0: without retaining the APA
-     * partition name in argv. Do NOT mount a different partition or probe
-     * random hdd0: partitions here. Use the partition already mounted by
-     * FHDB. Once a game is chosen the loop above can pin hdd0:/PART. */
-    if ((bootDir && !strncmp(bootDir, "pfs0:", 5)) ||
-        (bootPath && !strncmp(bootPath, "pfs0:", 5)))
+    /* pfs0: boot: after the IOP reset the former mount no longer exists.
+     * Discover the partition by the boot ELF's unique relative path. */
+    if (bootPath && !strncmp(bootPath, "pfs0:/", 6))
+    {
+        if (_AuroraVideoCfgResolvePfsBoot(
+                bootPath, candidate, sizeof(candidate)))
+        {
+            snprintf(s_AuroraVideoHddCfg,
+                     sizeof(s_AuroraVideoHddCfg), "%s", candidate);
+            printf("[video.cfg] FHDB resolved HDD boot: %s\n", candidate);
+            return TRUE;
+        }
+        /* Never use a random mounted pfs0: or a different ROM partition. */
+        printf("[video.cfg] FHDB partition unresolved; HDD config disabled\n");
+        return FALSE;
+    }
+
+    /* No HDD boot: only use a currently selected explicit logical HDD ROM.
+     * Do not load/probe the HDD on normal USB/MC/SMB-only boots. */
+    if (_RomPath[0] && !strncmp(_RomPath, "hdd0:", 5) &&
+        MainLoopHddLogicalDataPath(_RomPath, "video.cfg",
+                                   candidate, sizeof(candidate)))
     {
         if (!previous) HddSupportSetEnabled(1);
-        snprintf(s_AuroraVideoHddCfg,
-                 sizeof(s_AuroraVideoHddCfg),
-                 "pfs0:/SNESticle/video.cfg");
-        return TRUE;
+        if (HddLoadEmbeddedIrx() >= 0 &&
+            HddMapPath(candidate, mapped, sizeof(mapped)) == 1)
+        {
+            snprintf(s_AuroraVideoHddCfg,
+                     sizeof(s_AuroraVideoHddCfg), "%s", candidate);
+            return TRUE;
+        }
+        if (!previous) HddSupportSetEnabled(0);
     }
-    return s_AuroraVideoHddCfg[0] ? TRUE : FALSE;
+    return FALSE;
 }
 
 static void _VideoCfgPath(char *pOut)
@@ -693,8 +845,19 @@ void VideoSettingsSave(void)
     (void)_AuroraVideoCfgActivateHddBootFallback();
 	_VideoCfgPath(path);
 	BgmIOBegin();
-    (void)_AuroraVideoCfgWrite(path, (Uint8 *)&cfg, sizeof(cfg));
+    Bool writeOK = _AuroraVideoCfgWrite(path, (Uint8 *)&cfg, sizeof(cfg));
 	BgmIOEnd();
+    /* AURORA_HDD_ISSUE38_VIDEO_CFG_V4_20261013 : no silent false success. */
+    if (writeOK)
+        MainLoopStatusPrintf(180, _AuroraVideoCfgIsHdd(path) ?
+            "Settings saved and verified on HDD." :
+            "Settings saved.");
+    else
+    {
+        MainLoopStatusPrintf(300, "ERROR: settings NOT saved. Check storage.");
+        printf("[video.cfg] SAVE FAILED: %s (%u bytes)\n",
+               path, (unsigned)sizeof(cfg));
+    }
 }
 
 void VideoSettingsLoad(void)
