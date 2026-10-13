@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <sys/stat.h>
 #include <kernel.h>
 #include <libpad.h>
 #include "types.h"
@@ -385,10 +386,135 @@ typedef struct
 	Int32  version;
 } VideoCfgHeaderT;
 
+/* AURORA_HDD_FULL_STORAGE_SAFE_V2_20261013
+ * Keep binary layout and migration logic of video.cfg IDENTICAL.
+ * MC remains the preferred source. HDD fallback is attempted ONLY when the
+ * ELF was actually launched by an HDD path, after the video/IOP boot phase.
+ * Keep the partition in hdd0: form: pfs0: can be remounted by the browser. */
+static Char s_AuroraVideoHddCfg[300] = {0};
+extern char *MainGetBootDir();
+
+static Bool _AuroraVideoCfgIsHdd(const char *pPath)
+{
+    return pPath && !strncmp(pPath, "hdd0:", 5) && pPath[5];
+}
+
+static Bool _AuroraVideoCfgMappedPath(
+    const char *pPath, char *pOut, size_t nOut)
+{
+    int n;
+    if (!pPath || !pOut || nOut == 0) return FALSE;
+    if (_AuroraVideoCfgIsHdd(pPath))
+        return HddMapPath(pPath, pOut, (int)nOut) == 1 ? TRUE : FALSE;
+    n = snprintf(pOut, nOut, "%s", pPath);
+    return n >= 0 && (size_t)n < nOut ? TRUE : FALSE;
+}
+
+class AuroraVideoHddIOGuard
+{
+    Bool m_locked;
+public:
+    AuroraVideoHddIOGuard(const char *pPath)
+      : m_locked(_AuroraVideoCfgIsHdd(pPath))
+    {
+        if (m_locked) BgmIOBegin();
+    }
+    ~AuroraVideoHddIOGuard()
+    {
+        if (m_locked) BgmIOEnd();
+    }
+};
+
+static Bool _AuroraVideoCfgRead(
+    char *pPath, Uint8 *pData, Uint32 nBytes)
+{
+    AuroraVideoHddIOGuard ioGuard(pPath);
+    char mapped[512];
+    FILE *f;
+    size_t got;
+    if (!_AuroraVideoCfgIsHdd(pPath))
+        return MemCardReadFile(pPath, pData, nBytes);
+    if (!_AuroraVideoCfgMappedPath(pPath, mapped, sizeof(mapped)))
+        return FALSE;
+    f = fopen(mapped, "rb");
+    if (!f) return FALSE;
+    got = fread(pData, 1, nBytes, f);
+    fclose(f);
+    return got == nBytes ? TRUE : FALSE;
+}
+
+static Bool _AuroraVideoCfgWrite(
+    char *pPath, Uint8 *pData, Uint32 nBytes)
+{
+    AuroraVideoHddIOGuard ioGuard(pPath);
+    char mapped[512];
+    FILE *f;
+    size_t written;
+    Bool ok;
+    if (!_AuroraVideoCfgIsHdd(pPath))
+        return MemCardWriteFile(pPath, pData, nBytes);
+    if (!_AuroraVideoCfgMappedPath(pPath, mapped, sizeof(mapped)))
+        return FALSE;
+    /* Canonical SNESticle root might not yet exist on a fresh HDD. */
+    {
+        char parent[512];
+        char *slash;
+        if (snprintf(parent, sizeof(parent), "%s", mapped) >=
+            (int)sizeof(parent)) return FALSE;
+        slash = strrchr(parent, '/');
+        if (!slash) return FALSE;
+        *slash = 0;
+        if (mkdir(parent, 0777) < 0)
+        {
+            struct stat st;
+            if (stat(parent, &st) < 0 || !S_ISDIR(st.st_mode))
+                return FALSE;
+        }
+    }
+    f = fopen(mapped, "wb");
+    if (!f) return FALSE;
+    written = fwrite(pData, 1, nBytes, f);
+    ok = (fflush(f) == 0) ? TRUE : FALSE;
+    if (fclose(f) != 0) ok = FALSE;
+    return (written == nBytes && ok) ? TRUE : FALSE;
+}
+
+static Bool _AuroraVideoCfgActivateHddBootFallback(void)
+{
+    const char *boot = MainGetBootDir();
+    int previous = HddSupportIsEnabled();
+    char candidate[300];
+    char mapped[512];
+    int n;
+    if (s_AuroraVideoHddCfg[0]) return TRUE;
+    if (!_AuroraVideoCfgIsHdd(boot)) return FALSE;
+    /* MainGetBootDir is a DIRECTORY ending with '/', never a ROM path. */
+    if (!MainLoopHddLogicalDataPath(boot, "video.cfg",
+                                     candidate, sizeof(candidate))) return FALSE;
+
+    /* Never probe an HDD from a USB/memory-card boot. The boot path here
+     * proves that this session was launched from an internal HDD. */
+    if (!previous) HddSupportSetEnabled(1);
+    if (HddLoadEmbeddedIrx() < 0 ||
+        HddMapPath(candidate, mapped, sizeof(mapped)) != 1)
+    {
+        if (!previous) HddSupportSetEnabled(0);
+        return FALSE;
+    }
+    snprintf(s_AuroraVideoHddCfg,
+             sizeof(s_AuroraVideoHddCfg), "%s", candidate);
+    return TRUE;
+}
+
 static void _VideoCfgPath(char *pOut)
 {
-	strcpy(pOut, _SramPath);
-	strcat(pOut, "/video.cfg");
+    if (s_AuroraVideoHddCfg[0])
+        strcpy(pOut, s_AuroraVideoHddCfg);
+    else
+    {
+        strcpy(pOut, _SramPath);
+        strcat(pOut, "/video.cfg");
+    }
 }
 
 static Bool g_FamicloneAudio = FALSE;
@@ -518,7 +644,7 @@ void VideoSettingsSave(void)
 	cfg.pce6button = PceBridge_Get6Button() ? 1 : 0; /* AURORA_PCE_PAD6_V1_20261009 */
 	_VideoCfgPath(path);
 	BgmIOBegin();
-	MemCardWriteFile(path, (Uint8 *)&cfg, sizeof(cfg));
+    (void)_AuroraVideoCfgWrite(path, (Uint8 *)&cfg, sizeof(cfg));
 	BgmIOEnd();
 }
 
@@ -567,8 +693,17 @@ void VideoSettingsLoad(void)
 	_VideoApplyCompatFlags(0);
 	_VideoCfgPath(path);
 
+    /* AURORA_HDD_FULL_STORAGE_SAFE_V2_20261013 : preserve MC priority; only an actual HDD boot
+     * permits an HDD probe, never a normal mass:/mc:/ boot. */
+    memset(&header, 0, sizeof(header));
+    if (!_AuroraVideoCfgRead(path, (Uint8 *)&header, sizeof(header)) ||
+        header.magic != VIDEOCFG_MAGIC)
+    {
+        if (_AuroraVideoCfgActivateHddBootFallback())
+            _VideoCfgPath(path);
+    }
 	memset(&header, 0, sizeof(header));
-	if (MemCardReadFile(path, (Uint8 *)&header, sizeof(header)) &&
+	if (_AuroraVideoCfgRead(path, (Uint8 *)&header, sizeof(header)) &&
 	    header.magic == VIDEOCFG_MAGIC)
 	{
 		if (header.version < 16)
@@ -578,12 +713,12 @@ void VideoSettingsLoad(void)
 		}
 		else if (header.version == VIDEOCFG_VERSION)
 		{
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, sizeof(cfg));
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, sizeof(cfg));
 		}
 		else if (header.version == 53)
 		{
 			/* AURORA_PCE_PAD6_V1_20261009: previous layout, append-only migration. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, VIDEOCFG_V53_BYTES);
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, VIDEOCFG_V53_BYTES);
 			if (loaded)
 			{
 				cfg.pce6button = 0;
@@ -595,7 +730,7 @@ void VideoSettingsLoad(void)
 			/* AURORA_GBA_BLEND_UI_CFG53_V1_20261004
 			 * v52 is the exact prefix before gbablending. Preserve every
 			 * existing preference and default only the appended field Off. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, VIDEOCFG_V52_BYTES);
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, VIDEOCFG_V52_BYTES);
 			if (loaded)
 			{
 				cfg.gbablending = 0;
@@ -606,7 +741,7 @@ void VideoSettingsLoad(void)
 		{
 			/* AURORA_VOLUME_TFA_N163_V4_20260913:
 			 * v49 is the exact prefix before the two independent gains. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, VIDEOCFG_V49_BYTES);
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, VIDEOCFG_V49_BYTES);
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
 		else if (header.version == 48)
@@ -614,7 +749,7 @@ void VideoSettingsLoad(void)
 			/* AURORA_V22_VIDEOCFG49_GGZOOM_OFF_20260912
 			 * v48 is byte-identical; preserve all preferences except the
 			 * now-hidden GG Zoom setting, which migrates to Off. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, VIDEOCFG_V49_BYTES);
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, VIDEOCFG_V49_BYTES);
 			if (loaded)
 			{
 				cfg.ggzoom = 0;
@@ -624,7 +759,7 @@ void VideoSettingsLoad(void)
 		else if (header.version == 47)
 		{
 			/* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909: old 0=GB,1=SGB -> 0=GBC,1=SGB1,2=SGB2. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, VIDEOCFG_V49_BYTES);
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, VIDEOCFG_V49_BYTES);
 			if (loaded)
 			{
 				cfg.gameboymode = cfg.gameboymode ? (cfg.sgbbios ? 2 : 1) : 0;
@@ -634,7 +769,7 @@ void VideoSettingsLoad(void)
 		else if (header.version == 46)
 		{
 			/* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909: v46 had SGB model but no standalone selector. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, VIDEOCFG_V46_BYTES);
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, VIDEOCFG_V46_BYTES);
 			if (loaded)
 			{
 				cfg.gameboymode = cfg.sgbbios ? 2 : 1;
@@ -644,46 +779,46 @@ void VideoSettingsLoad(void)
 		else if (header.version == 45 || header.version == 44)
 		{
 			/* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908: v44/v45 are the exact prefix before sgbbios. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, VIDEOCFG_V45_BYTES);
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, VIDEOCFG_V45_BYTES);
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
 		else if (header.version == 43)
 		{
 			/* AURORA_CFG_LOADER_REBUILD_V1_13_20260905: v43 prefix before sgbinvert. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, VIDEOCFG_V43_BYTES);
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, VIDEOCFG_V43_BYTES);
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
 		else if (header.version == 42)
 		{
 			/* AURORA_CD_MUSIC_REDBOOK_V3_20260830
 			 * v42 is the exact v43 prefix before cdmusic; default stays On. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, VIDEOCFG_V42_BYTES);
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, VIDEOCFG_V42_BYTES);
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
 		else if (header.version == 41 || header.version == 40 || header.version == 39)
 		{
 			/* v39/v40/v41 are the exact v42 prefix before lightgun.
 			 * lightgun and cdmusic were preinitialised On. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg,
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg,
 			                         VIDEOCFG_V42_BYTES - sizeof(cfg.lightgun));
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
 		else if (header.version == 38)
 		{
 			/* v38 is the exact prefix before the two v39 fields. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, VIDEOCFG_V38_BYTES);
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, VIDEOCFG_V38_BYTES);
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
 		else if (header.version == 37)
 		{
 			/* v37 is the exact prefix before the reserved v38 slot. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, VIDEOCFG_V37_BYTES);
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, VIDEOCFG_V37_BYTES);
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
 		else if (header.version == 36)
 		{
 			/* v36 is exactly the v37 prefix without the appended PCE volume. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg,
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg,
 			        VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol));
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
@@ -691,24 +826,24 @@ void VideoSettingsLoad(void)
 		{
 			/* v35 is byte-identical in size; this slot used to be the
 			 * legacy SNES rate value and is migrated below. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, (VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol)));
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, (VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol)));
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
 		else if (header.version == 34)
 		{
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg,
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg,
 			        (VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol)) - sizeof(cfg.smscolorborder) - sizeof(cfg.smsfm));
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
 		else if (header.version == 33)
 		{
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg,
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg,
 			        ((VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol)) - sizeof(cfg.smscolorborder) - sizeof(cfg.smsfm)) - sizeof(cfg.segavol) - sizeof(cfg.segaaudiorate));
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
 		else if (header.version == 32)
 		{
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg,
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg,
 			        ((VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol)) - sizeof(cfg.smscolorborder) - sizeof(cfg.smsfm)) - sizeof(cfg.segavol) - sizeof(cfg.segaaudiorate) - sizeof(cfg.bgmtrack) - sizeof(cfg.mdrendering));
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
@@ -716,21 +851,21 @@ void VideoSettingsLoad(void)
 		{
 			/* AURORA_PICODRIVE_CURRENT_CFG_V32 */
 			memset(&cfg, 0, ((VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol)) - sizeof(cfg.smscolorborder) - sizeof(cfg.smsfm)));
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg,
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg,
 			        ((VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol)) - sizeof(cfg.smscolorborder) - sizeof(cfg.smsfm)) - sizeof(cfg.segavol) - sizeof(cfg.segaaudiorate) - sizeof(cfg.md6button) - sizeof(cfg.bgmtrack) - sizeof(cfg.mdrendering));
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
 		else if (header.version == 30)
 		{
 			/* v30 has the same byte layout as v31. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, ((VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol)) - sizeof(cfg.smscolorborder) - sizeof(cfg.smsfm)) - sizeof(cfg.segavol) - sizeof(cfg.segaaudiorate) - sizeof(cfg.md6button) - sizeof(cfg.bgmtrack) - sizeof(cfg.mdrendering));
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, ((VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol)) - sizeof(cfg.smscolorborder) - sizeof(cfg.smsfm)) - sizeof(cfg.segavol) - sizeof(cfg.segaaudiorate) - sizeof(cfg.md6button) - sizeof(cfg.bgmtrack) - sizeof(cfg.mdrendering));
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
 		else if (header.version == 29)
 		{
 			/* v29 was a temporary test config with broken menu-audio defaults.
 			 * Import its layout, then reset only those two settings once. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, ((VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol)) - sizeof(cfg.smscolorborder) - sizeof(cfg.smsfm)) - sizeof(cfg.segavol) - sizeof(cfg.segaaudiorate) - sizeof(cfg.md6button) - sizeof(cfg.bgmtrack) - sizeof(cfg.mdrendering));
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, ((VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol)) - sizeof(cfg.smscolorborder) - sizeof(cfg.smsfm)) - sizeof(cfg.segavol) - sizeof(cfg.segaaudiorate) - sizeof(cfg.md6button) - sizeof(cfg.bgmtrack) - sizeof(cfg.mdrendering));
 			if (loaded)
 			{
 				cfg.version = VIDEOCFG_VERSION;
@@ -741,26 +876,26 @@ void VideoSettingsLoad(void)
 		else if (header.version == 28)
 		{
 			/* v28 has the same byte layout; only Menu Volume semantics changed. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, ((VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol)) - sizeof(cfg.smscolorborder) - sizeof(cfg.smsfm)) - sizeof(cfg.segavol) - sizeof(cfg.segaaudiorate) - sizeof(cfg.md6button) - sizeof(cfg.bgmtrack) - sizeof(cfg.mdrendering));
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, ((VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol)) - sizeof(cfg.smscolorborder) - sizeof(cfg.smsfm)) - sizeof(cfg.segavol) - sizeof(cfg.segaaudiorate) - sizeof(cfg.md6button) - sizeof(cfg.bgmtrack) - sizeof(cfg.mdrendering));
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
 		else if (header.version == 27)
 		{
 			/* v27 is the v28/v29 prefix without bgmenable. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, ((VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol)) - sizeof(cfg.smscolorborder) - sizeof(cfg.smsfm)) - sizeof(cfg.segavol) - sizeof(cfg.segaaudiorate) - sizeof(cfg.md6button) - sizeof(cfg.bgmtrack) - sizeof(cfg.mdrendering) - sizeof(Int32));
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, ((VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol)) - sizeof(cfg.smscolorborder) - sizeof(cfg.smsfm)) - sizeof(cfg.segavol) - sizeof(cfg.segaaudiorate) - sizeof(cfg.md6button) - sizeof(cfg.bgmtrack) - sizeof(cfg.mdrendering) - sizeof(Int32));
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
 		else if (header.version == 26)
 		{
 			/* v26 has the same byte layout; only Game Volume semantics changed. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, ((VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol)) - sizeof(cfg.smscolorborder) - sizeof(cfg.smsfm)) - sizeof(cfg.segavol) - sizeof(cfg.segaaudiorate) - sizeof(cfg.md6button) - sizeof(cfg.bgmtrack) - sizeof(cfg.mdrendering) - sizeof(Int32));
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, ((VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol)) - sizeof(cfg.smscolorborder) - sizeof(cfg.smsfm)) - sizeof(cfg.segavol) - sizeof(cfg.segaaudiorate) - sizeof(cfg.md6button) - sizeof(cfg.bgmtrack) - sizeof(cfg.mdrendering) - sizeof(Int32));
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
 		else if (header.version == 25)
 		{
 			VideoCfgV25T oldcfg25;
 			memset(&oldcfg25, 0, sizeof(oldcfg25));
-			if (MemCardReadFile(path, (Uint8 *)&oldcfg25, sizeof(oldcfg25)))
+			if (_AuroraVideoCfgRead(path, (Uint8 *)&oldcfg25, sizeof(oldcfg25)))
 			{
 				memcpy(&cfg, &oldcfg25, sizeof(oldcfg25));
 				cfg.version = VIDEOCFG_VERSION;
@@ -779,7 +914,7 @@ void VideoSettingsLoad(void)
 		{
 			VideoCfgV24T oldcfg24;
 			memset(&oldcfg24, 0, sizeof(oldcfg24));
-			if (MemCardReadFile(path, (Uint8 *)&oldcfg24, sizeof(oldcfg24)))
+			if (_AuroraVideoCfgRead(path, (Uint8 *)&oldcfg24, sizeof(oldcfg24)))
 			{
 				memcpy(&cfg, &oldcfg24, sizeof(oldcfg24));
 				cfg.version = VIDEOCFG_VERSION;
@@ -791,7 +926,7 @@ void VideoSettingsLoad(void)
 		{
 			VideoCfgV23T oldcfg23;
 			memset(&oldcfg23, 0, sizeof(oldcfg23));
-			if (MemCardReadFile(path, (Uint8 *)&oldcfg23, sizeof(oldcfg23)))
+			if (_AuroraVideoCfgRead(path, (Uint8 *)&oldcfg23, sizeof(oldcfg23)))
 			{
 				memcpy(&cfg, &oldcfg23, sizeof(oldcfg23));
 				cfg.version = VIDEOCFG_VERSION;
@@ -803,7 +938,7 @@ void VideoSettingsLoad(void)
 		{
 			VideoCfgV22T oldcfg22;
 			memset(&oldcfg22, 0, sizeof(oldcfg22));
-			if (MemCardReadFile(path, (Uint8 *)&oldcfg22, sizeof(oldcfg22)))
+			if (_AuroraVideoCfgRead(path, (Uint8 *)&oldcfg22, sizeof(oldcfg22)))
 			{
 				memcpy(&cfg, &oldcfg22, sizeof(oldcfg22));
 				cfg.version = VIDEOCFG_VERSION;
@@ -817,7 +952,7 @@ void VideoSettingsLoad(void)
 		{
 			VideoCfgV20T oldcfg20;
 			memset(&oldcfg20, 0, sizeof(oldcfg20));
-			if (MemCardReadFile(path, (Uint8 *)&oldcfg20, sizeof(oldcfg20)))
+			if (_AuroraVideoCfgRead(path, (Uint8 *)&oldcfg20, sizeof(oldcfg20)))
 			{
 				memcpy(&cfg, &oldcfg20, sizeof(oldcfg20));
 				cfg.version = VIDEOCFG_VERSION;
@@ -830,7 +965,7 @@ void VideoSettingsLoad(void)
 			VideoCfgV19T oldcfg19;
 
 			memset(&oldcfg19, 0, sizeof(oldcfg19));
-			if (MemCardReadFile(path, (Uint8 *)&oldcfg19, sizeof(oldcfg19)))
+			if (_AuroraVideoCfgRead(path, (Uint8 *)&oldcfg19, sizeof(oldcfg19)))
 			{
 				memcpy(&cfg, &oldcfg19, sizeof(oldcfg19));
 				cfg.version = VIDEOCFG_VERSION;
@@ -844,7 +979,7 @@ void VideoSettingsLoad(void)
 			VideoCfgV18T oldcfg18;
 
 			memset(&oldcfg18, 0, sizeof(oldcfg18));
-			if (MemCardReadFile(path, (Uint8 *)&oldcfg18, sizeof(oldcfg18)))
+			if (_AuroraVideoCfgRead(path, (Uint8 *)&oldcfg18, sizeof(oldcfg18)))
 			{
 				memcpy(&cfg, &oldcfg18, sizeof(oldcfg18));
 				cfg.version = VIDEOCFG_VERSION;
@@ -858,7 +993,7 @@ void VideoSettingsLoad(void)
 	VideoCfgV17T oldcfg17;
 
 	memset(&oldcfg17, 0, sizeof(oldcfg17));
-	if (MemCardReadFile(path, (Uint8 *)&oldcfg17, sizeof(oldcfg17)))
+	if (_AuroraVideoCfgRead(path, (Uint8 *)&oldcfg17, sizeof(oldcfg17)))
 	{
 		memcpy(&cfg, &oldcfg17, sizeof(oldcfg17));
 		cfg.version = VIDEOCFG_VERSION;
@@ -869,7 +1004,7 @@ void VideoSettingsLoad(void)
 		else if (header.version == 16)
 		{
 			memset(&oldcfg, 0, sizeof(oldcfg));
-			if (MemCardReadFile(path, (Uint8 *)&oldcfg, sizeof(oldcfg)))
+			if (_AuroraVideoCfgRead(path, (Uint8 *)&oldcfg, sizeof(oldcfg)))
 			{
 				/* VideoCfgT only appends colorprofile to the v16 prefix. */
 				memcpy(&cfg, &oldcfg, sizeof(oldcfg));

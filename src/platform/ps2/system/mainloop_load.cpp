@@ -42,6 +42,8 @@ static char s_SmdExternalCartPath[1024] = {0}; /* AURORA_SUPER_MAGIC_DRIVE_V1_20
 #include "mainloop_load.h"
 #include "mainloop_menu.h"
 #include "embedded_irx.h"   /* HddMapPath (hdd0:/PART -> pfs0:) */
+/* AURORA_HDD_FULL_STORAGE_SAFE_V2_20261013: used by partition-local BIOS discovery. */
+extern char *MainGetBootPath();
 #include "sndbglog.h"
 
 /* AURORA_WILDCARD_32MBIT_CORE_LIFECYCLE_V1_20260914
@@ -4680,10 +4682,50 @@ static Int32 _MainLoopScanSgbStemDirectory(
     return matches > 1 ? -1 : 0;
 }
 
-static Bool _MainLoopFindStrictSgbStem(
-    const Char *pStem, Int32 kind,
+/* AURORA_HDD_FULL_STORAGE_SAFE_V2_20261013
+ * Protect the selected PFS partition for the entire strict firmware lookup
+ * while the menu background music thread could otherwise switch mounts. */
+class AuroraHddFirmwareIOGuard
+{
+    Bool m_bActive;
+public:
+    AuroraHddFirmwareIOGuard(const Char *pSource)
+      : m_bActive((pSource && !strncmp(pSource, "hdd0:", 5)) ||
+                  !strncmp(_RomPath, "hdd0:", 5))
+    {
+        if (m_bActive) BgmIOBegin();
+    }
+    ~AuroraHddFirmwareIOGuard()
+    {
+        if (m_bActive) BgmIOEnd();
+    }
+};
+
+/* The supplied ROM path is needed because _RomPath is assigned only AFTER
+ * the GBC firmware preflight succeeds. Probe ONLY the ROM's partition,
+ * then the known previous/boot partitions; never enumerate arbitrary HDDs. */
+static Int32 _MainLoopScanHddSgbStem(
+    const Char *pSourcePath, const Char *pStem, Int32 kind,
     Char *pChosen, Uint32 nChosen)
 {
+    Char root[32];
+    Char dir[64];
+    if (!MainLoopHddSystemRootForSource(
+            pSourcePath, root, sizeof(root)))
+        return 0;
+    if (snprintf(dir, sizeof(dir), "%s/SYSTEM", root) >=
+        (int)sizeof(dir))
+        return 0;
+    return _MainLoopScanSgbStemDirectory(
+        dir, pStem, kind, pChosen, nChosen);
+}
+
+static Bool _MainLoopFindStrictSgbStem(
+    const Char *pStem, Int32 kind,
+    Char *pChosen, Uint32 nChosen,
+    const Char *pHddRomSource = NULL)
+{
+    AuroraHddFirmwareIOGuard hddFirmwareIO(pHddRomSource);
     static const Char *const preferred[] = {
         "mass0:/SNESticle/SYSTEM",
         "mass1:/SNESticle/SYSTEM",
@@ -4713,6 +4755,14 @@ static Bool _MainLoopFindStrictSgbStem(
         if (result < 0) return FALSE;
     }
 
+    if (pHddRomSource && !strncmp(pHddRomSource, "hdd0:", 5))
+    {
+        result = _MainLoopScanHddSgbStem(
+            pHddRomSource, pStem, kind, pChosen, nChosen);
+        if (result > 0) return TRUE;
+        if (result < 0) return FALSE;
+    }
+
     pActiveRoot = MainLoopSramGetBrowseRoot();
     if (pActiveRoot && *pActiveRoot &&
         snprintf(active, sizeof(active), "%s/SYSTEM",
@@ -4722,6 +4772,22 @@ static Bool _MainLoopFindStrictSgbStem(
             active, pStem, kind, pChosen, nChosen);
         if (result > 0) return TRUE;
         if (result < 0) return FALSE;
+    }
+
+    /* AURORA_HDD_FULL_STORAGE_SAFE_V2_20261013 : do this AFTER the legacy USB + active root checks;
+     * no change to existing firmware priorities or CRC requirements. */
+    {
+        const Char *sources[] = { pHddRomSource, _RomPath,
+                                  MainGetBootPath(), NULL };
+        for (i = 0; i < 3; ++i)
+        {
+            if (!sources[i] || !sources[i][0])
+                continue;
+            result = _MainLoopScanHddSgbStem(
+                sources[i], pStem, kind, pChosen, nChosen);
+            if (result > 0) return TRUE;
+            if (result < 0) return FALSE;
+        }
     }
 
     for (i = 0; fallback[i]; ++i)
@@ -4878,8 +4944,11 @@ static Bool _MainLoopLoadGbBios(
  * title palette and accept its boot-time palette button combinations. */
 static Bool _MainLoopLoadRequiredGbcBios(
     Uint8 *pOut, Uint32 nOutBytes,
-    Char *pChosen, Uint32 nChosenBytes)
+    Char *pChosen, Uint32 nChosenBytes,
+    const Char *pHddRomSource)
 {
+    /* Keep the selected PFS partition pinned through CRC AND final fread. */
+    AuroraHddFirmwareIOGuard hddReadIO(pHddRomSource);
     static const Char *kStems[] = { "cgb_boot", "gbc_bios", "cgb_bios", NULL };
     Char path[1024];
     FILE *fp;
@@ -4894,7 +4963,8 @@ static Bool _MainLoopLoadRequiredGbcBios(
 
     for (i = 0; kStems[i]; ++i)
     {
-        if (_MainLoopFindStrictSgbStem(kStems[i], 4, path, sizeof(path)))
+        if (_MainLoopFindStrictSgbStem(kStems[i], 4, path, sizeof(path),
+                                       pHddRomSource))
             break;
         path[0] = 0;
     }
@@ -5873,7 +5943,8 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
         bGbcFile = _MainLoopGbContentIsGbc(FileName) ? TRUE : FALSE;
         gbcBiosPath[0] = 0;
         if (!_MainLoopLoadRequiredGbcBios(
-                gbcBios, sizeof(gbcBios), gbcBiosPath, sizeof(gbcBiosPath)))
+                gbcBios, sizeof(gbcBios), gbcBiosPath, sizeof(gbcBiosPath),
+                OriginalPath))
         {
             _MainLoopFreeRomBuffer();
             _MainLoopUnloadRom();

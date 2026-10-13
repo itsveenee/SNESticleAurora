@@ -7,6 +7,7 @@ enum MainLoopSramDeviceE
     MAINLOOP_SRAMDEVICE_AUTO,
     MAINLOOP_SRAMDEVICE_USB,
     MAINLOOP_SRAMDEVICE_MEMCARD,
+    MAINLOOP_SRAMDEVICE_HDD, /* V2: append-only, old video.cfg ordinals stable */
     MAINLOOP_SRAMDEVICE_NUM
 };
 
@@ -50,6 +51,11 @@ Bool MainLoopEnsureSystemDirectory(Char *pOut, Int32 nOutBytes);
 Bool MainLoopEnsureSwcDirectory(Char *pOut, Int32 nOutBytes); /* AURORA_SWC_MEGA_V9_20260831 */
 Bool MainLoopFindSystemFileDirectory(Char *pOut, Int32 nOutBytes,
                                      const Char *pFileName);
+/* AURORA_HDD_FULL_STORAGE_SAFE_V2_20261013: one explicit PFS partition, no HDD-wide scan. */
+Bool MainLoopHddSystemRootForSource(const Char *pSourcePath,
+                                    Char *pRoot, Int32 nRootBytes);
+Bool MainLoopHddLogicalDataPath(const Char *pSourcePath,
+                                const Char *pLeaf, Char *pOut, Int32 nOutBytes);
 Bool MainLoopSramNeedsMemoryCardPreflight();
 /* AURORA_BENCHMARK_CHAINED_V3_20261010_STATE_H_BEGIN */
 #if AURORA_FRONTEND_PROFILER
