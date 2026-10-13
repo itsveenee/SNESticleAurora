@@ -2392,6 +2392,29 @@ if (trigger & (PAD_CROSS | PAD_START))
     }
     else if (m_iSelect == 19)
     {
+        /* AURORA_ISSUE38_OSD_SAFE_UNMOUNT_V6_20261013
+         * A PFS filesystem can remain mounted after HDD boot/config I/O.
+         * Serialize the final sync/umount against BGM filesystem activity.
+         * Abort exit without muting audio if PFS reports an error/busy.
+         * ExecOSD() is __attribute__((noreturn)): if it hangs, there is
+         * no subsequent callback capable of remounting the partition.
+         * Non-HDD paths never enter this branch or load HDD modules. */
+        if (HddOsdHasMountedPfs())
+        {
+            BgmIOBegin();
+            const int osdStorage = HddOsdSyncAndUnmount();
+            if (osdStorage < 0)
+            {
+                BgmIOEnd();
+                MainLoopStatusPrintf(300,
+                    "Exit cancelled: HDD unmount failed.");
+                printf("[OSD] Aborted before ExecOSD: PFS error=%d\n",
+                       osdStorage);
+                return;
+            }
+            /* Intentionally keep BgmIOBegin() scope active: ExecOSD does
+             * not return and no further filesystem work is permitted. */
+        }
         if (Aud_IsInitialized()) Aud_Setvol(0);
         ExecOSD(0, NULL);
     }

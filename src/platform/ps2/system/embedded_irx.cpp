@@ -537,6 +537,45 @@ extern "C" int HddMapPath(const char *uiPath, char *out, int outsz)
     return 1;
 }
 
+/* AURORA_ISSUE38_OSD_SAFE_UNMOUNT_V6_20261013
+ * Exit-to-OSD experiment: only act on a PFS mount owned by HddMapPath().
+ * Never attempt to probe DEV9 or load HDD modules just for OSD.
+ * The PFS driver returns -EBUSY if an open file still owns the mount.
+ * Do NOT clear our partition cache unless unmount actually succeeded.
+ * fileXio is used in blocking mode by the frontend (FXIO_WAIT).
+ */
+extern "C" int HddOsdHasMountedPfs(void)
+{
+    return (s_hdd_loaded && s_hdd_mounted[0]) ? 1 : 0;
+}
+
+extern "C" int HddOsdSyncAndUnmount(void)
+{
+    int result;
+    if (!HddOsdHasMountedPfs()) return 0;
+
+    result = fileXioSync("pfs0:", 0);
+    if (result < 0)
+    {
+        printf("[OSD] HDD PFS sync failed: %d (partition=%s)\n",
+               result, s_hdd_mounted);
+        return result;
+    }
+
+    result = fileXioUmount("pfs0:");
+    if (result < 0)
+    {
+        printf("[OSD] HDD PFS umount failed: %d (partition=%s)\n",
+               result, s_hdd_mounted);
+        return result;
+    }
+
+    printf("[OSD] HDD PFS synchronized and unmounted: %s\n",
+           s_hdd_mounted);
+    s_hdd_mounted[0] = 0; /* success only: avoid stale EE mount cache */
+    return 0;
+}
+
 /* MMCE and MX4SIO both hook the active sio2man transport.  wLaunchELF builds
  * either feature against the same homebrew SIO2 stack; dynamically stacking
  * both hooks is unsafe and has caused SIO2 deadlocks on real hardware.

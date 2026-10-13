@@ -83,6 +83,13 @@ int  UsbBdmLoadEmbeddedIrx(void);
 int  HddSupportIsEnabled(void);
 void HddSupportSetEnabled(int enabled);
 int  HddLoadEmbeddedIrx(void);
+/* AURORA_ISSUE38_OSD_SAFE_UNMOUNT_V6_20261013
+ * Return 1 only if the already-loaded Aurora HDD driver has an active PFS
+ * mount. Neither function initializes HDD or selects a partition.
+ * HddOsdSyncAndUnmount returns 0 for success/no mount, <0 on failure.
+ */
+int HddOsdHasMountedPfs(void);
+int HddOsdSyncAndUnmount(void);
 
 /* MMCE (MemCard PRO2 / SD2PSX via mmceman) -> mmce0:/mmce1:.  O driver e'
    carregado sob demanda.  Depois da carga, cada porta e' validada com o
