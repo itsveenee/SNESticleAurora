@@ -759,8 +759,10 @@ static Bool _MainLoopZipTryStorageRoot(Char *pOut, Int32 nOutBytes,
     if (!pOut || !pRoot || !*pRoot || !pLeaf || !*pLeaf)
         return FALSE;
     /* Only the two storage driver namespaces; never mcN: or mmceN:. */
+    /* AURORA_HDD_ISSUE38_V3_20261013 : pfs0: is admitted ONLY after source partition mount. */
     if (strncasecmp(pRoot, "mass", 4) != 0 &&
-        strcasecmp(pRoot, "mx4sio:") != 0)
+        strcasecmp(pRoot, "mx4sio:") != 0 &&
+        strcmp(pRoot, "pfs0:") != 0)
         return FALSE;
     for (i = 0; i < 3; ++i)
     {
@@ -841,6 +843,26 @@ static Bool _MainLoopPrepareZipTempPath(
     pOut[0] = 0;
     s_ZipExtractBlockedOnMemoryCard = FALSE;
 
+    /* AURORA_HDD_ISSUE38_V3_20261013 : HDD source -> corresponding writable PFS partition.
+     * Never create a ZIP temporary on a memory card or in EE RAM. */
+    if (pZipSource && HddSupportIsEnabled())
+    {
+        if (!strncmp(pZipSource, "hdd0:", 5) &&
+            HddLoadEmbeddedIrx() >= 0)
+        {
+            char sourceMapped[1024];
+            if (HddMapPath(pZipSource, sourceMapped,
+                           sizeof(sourceMapped)) == 1 &&
+                _MainLoopZipTryStorageRoot(
+                    pOut, nOutBytes, "pfs0:", pLeaf))
+                return TRUE;
+        }
+        else if (!strncmp(pZipSource, "pfs0:", 5) &&
+                 _MainLoopZipTryStorageRoot(
+                     pOut, nOutBytes, "pfs0:", pLeaf))
+            return TRUE; /* PFS already mounted by FHDB/launcher. */
+    }
+
     /* First try the device containing the ZIP: includes mass2:, mass3:,
      * ... without assuming the source is always a plugged-in USB stick. */
     if (_MainLoopZipSourceStorageRoot(pZipSource, root, sizeof(root)) &&
@@ -863,6 +885,26 @@ static Bool _MainLoopPrepareZipTempPath(
            pZipSource ? pZipSource : "UNKNOWN");
     return FALSE;
 }
+
+/* AURORA_HDD_ISSUE38_V3_20261013
+ * Exclusive filesystem scope during HDD game loading (including ZIP
+ * extraction). The BGM worker must not remount shared pfs0: in this scope.
+ * There is no IOP reset, module preload or change to audio synthesis. */
+class AuroraIssue38HddLoadScope
+{
+    Bool m_active;
+public:
+    explicit AuroraIssue38HddLoadScope(const char *source)
+      : m_active(source && (!strncmp(source, "hdd0:", 5) ||
+                            !strncmp(source, "pfs0:", 5)))
+    {
+        if (m_active) BgmIOBegin();
+    }
+    ~AuroraIssue38HddLoadScope()
+    {
+        if (m_active) BgmIOEnd();
+    }
+};
 
 /* AURORA_LOADER_REVIEW_V2_20260915
  * ZIP preflight already uses fileXio random access. Keep extraction on the
@@ -2439,6 +2481,76 @@ done:
     return ok;
 }
 
+/* AURORA_HDD_ISSUE38_V3_20261013
+ * During a game switch _RomPath is cleared before FDS/SCD/PCECD firmware
+ * preflight. Always resolve from the NEW game path, not the prior ROM.
+ * The existing v2 function returns the partition-local mounted PFS root. */
+static Bool AuroraIssue38FirmwareDirectory(
+    const char *source, char *out, Int32 outBytes)
+{
+    char root[64];
+    int n;
+    if (!out || outBytes <= 0) return FALSE;
+    out[0] = 0;
+    if (!source) return FALSE;
+    if (!strncmp(source, "pfs0:", 5))
+    {
+        /* FHDB provided only an already mounted PFS path. */
+        if (!HddSupportIsEnabled()) return FALSE;
+        n = snprintf(out, (size_t)outBytes, "pfs0:/SNESticle/SYSTEM");
+        return n >= 0 && n < outBytes ? TRUE : FALSE;
+    }
+    if (strncmp(source, "hdd0:", 5) ||
+        !MainLoopHddSystemRootForSource(source, root, sizeof(root)))
+        return FALSE;
+    n = snprintf(out, (size_t)outBytes, "%s/SYSTEM", root);
+    if (n < 0 || n >= outBytes) { out[0] = 0; return FALSE; }
+    return TRUE;
+}
+
+static Bool AuroraIssue38FindFirmware(
+    const char *source, const char *name, char *out, Int32 outBytes)
+{
+    char dir[512];
+    char path[1024];
+    FILE *f;
+    int n;
+    if (!name || !*name ||
+        !AuroraIssue38FirmwareDirectory(source, dir, sizeof(dir)))
+        return FALSE;
+    n = snprintf(path, sizeof(path), "%s/%s", dir, name);
+    if (n < 0 || n >= (int)sizeof(path)) return FALSE;
+    f = fopen(path, "rb");
+    if (!f) return FALSE;
+    fclose(f);
+    n = snprintf(out, (size_t)outBytes, "%s", dir);
+    if (n < 0 || n >= outBytes) return FALSE;
+    return TRUE;
+}
+
+static Bool AuroraIssue38EnsureSystem(
+    const char *source, char *out, Int32 outBytes)
+{
+    char dir[512];
+    char root[512];
+    if (!AuroraIssue38FirmwareDirectory(source, dir, sizeof(dir)))
+        return FALSE;
+    if (snprintf(root, sizeof(root), "%s", dir) >= (int)sizeof(root))
+        return FALSE;
+    char *slash = strrchr(root, '/');
+    if (!slash) return FALSE;
+    *slash = 0;
+    /* Reuse the ZIP storage directory helper: mkdir/stat and fileXioDopen
+     * fallback for iomanX devices that do not implement newlib stat. */
+    if (!_MainLoopZipEnsureStorageDir(root))
+        return FALSE;
+    if (!_MainLoopZipEnsureStorageDir(dir))
+        return FALSE;
+    if (snprintf(out, (size_t)outBytes, "%s", dir) >= outBytes)
+        return FALSE;
+    return TRUE;
+}
+
 /* AURORA_CD_SRAM_NOTICES_20260824
  * A CUE and its BIN/audio tracks stay on storage. This path allocates no
  * frontend ROM buffer, which is essential inside the EE's 32 MiB budget. */
@@ -2458,7 +2570,9 @@ static Bool _MainLoopExecuteDisc(const char *pMappedPath,
         !pOriginalPath || !pBasePath)
         return FALSE;
 
-    if (!MainLoopEnsureSystemDirectory(
+    if (!AuroraIssue38EnsureSystem(
+            pOriginalPath, SystemDirectory, (Int32)sizeof(SystemDirectory)) &&
+        !MainLoopEnsureSystemDirectory(
             SystemDirectory, (Int32)sizeof(SystemDirectory)))
     {
         MainLoopModalPrintf(60 * 4,
@@ -2569,7 +2683,11 @@ static Bool _MainLoopExecuteDisc(const char *pMappedPath,
         {
             CandidateSystemDirectory[0] = 0;
 
-            if (!MainLoopFindSystemFileDirectory(
+            if (!AuroraIssue38FindFirmware(
+                    pOriginalPath, kSegaCdSystemFiles[i],
+                    CandidateSystemDirectory,
+                    (Int32)sizeof(CandidateSystemDirectory)) &&
+                !MainLoopFindSystemFileDirectory(
                     CandidateSystemDirectory,
                     (Int32)sizeof(CandidateSystemDirectory),
                     kSegaCdSystemFiles[i]))
@@ -2593,7 +2711,11 @@ static Bool _MainLoopExecuteDisc(const char *pMappedPath,
     }
     else
     {
-        if (MainLoopFindSystemFileDirectory(
+        if (AuroraIssue38FindFirmware(
+                pOriginalPath, "syscard3.pce",
+                CandidateSystemDirectory,
+                (Int32)sizeof(CandidateSystemDirectory)) ||
+            MainLoopFindSystemFileDirectory(
                 CandidateSystemDirectory,
                 (Int32)sizeof(CandidateSystemDirectory),
                 "syscard3.pce"))
@@ -2716,8 +2838,13 @@ static Bool _MainLoopExecuteFdsPath(const char *pMappedPath,
      * first. Only if no BIOS is found do we fall back to ensuring the normal
      * firmware directory, so the subsequent error reports the intended path.
      */
-    if (!MainLoopFindSystemFileDirectory(
+    if (!AuroraIssue38FindFirmware(
+            pOriginalPath, "disksys.rom",
+            SystemDirectory, (Int32)sizeof(SystemDirectory)) &&
+        !MainLoopFindSystemFileDirectory(
             SystemDirectory, (Int32)sizeof(SystemDirectory), "disksys.rom") &&
+        !AuroraIssue38EnsureSystem(
+            pOriginalPath, SystemDirectory, (Int32)sizeof(SystemDirectory)) &&
         !MainLoopEnsureSystemDirectory(
             SystemDirectory, (Int32)sizeof(SystemDirectory)))
     {
@@ -2830,11 +2957,11 @@ static Bool _MainLoopExecuteFdsZip(const char *pZipPath,
 
     if (!_MainLoopPrepareZipTempPath(
             tempPath, (Int32)sizeof(tempPath),
-            "aurora_fds_zip.fds", pZipPath))
+            "aurora_fds_zip.fds", pOriginalPath))
     {
         if (!s_ZipExtractBlockedOnMemoryCard)
             MainLoopModalPrintf(
-                60 * 4, "ZIP requires writable USB/MX4SIO");
+                60 * 4, "ZIP requires writable USB/MX4SIO/HDD");
         return FALSE;
     }
 
@@ -5190,11 +5317,11 @@ static Bool _MainLoopExecuteGbaZipMemory(const char *pZipPath,
 
     if (!_MainLoopPrepareZipTempPath(
             tempPath, (Int32)sizeof(tempPath),
-            "aurora_gba_zip.gba", pZipPath))
+            "aurora_gba_zip.gba", pOriginalPath))
     {
         if (!s_ZipExtractBlockedOnMemoryCard)
             MainLoopModalPrintf(
-                60 * 4, "ZIP requires writable USB/MX4SIO");
+                60 * 4, "ZIP requires writable USB/MX4SIO/HDD");
         return FALSE;
     }
 
@@ -5265,6 +5392,7 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
         return FALSE;
 
     snprintf(OriginalPath, sizeof(OriginalPath), "%s", pFileName);
+    AuroraIssue38HddLoadScope hddLoadScope(OriginalPath);
     if (HddMapPath(pFileName, hddPath, sizeof(hddPath)) == 1)
         pFileName = hddPath;
 
@@ -5563,11 +5691,11 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
         {
             if (!_MainLoopPrepareZipTempPath(
                     tempPath, (Int32)sizeof(tempPath),
-                    "aurora_snes_zip.sfc", pFileName))
+                    "aurora_snes_zip.sfc", OriginalPath))
             {
                 if (!s_ZipExtractBlockedOnMemoryCard)
                     MainLoopModalPrintf(60 * 4,
-                        "ZIP requires writable USB/MX4SIO");
+                        "ZIP requires writable USB/MX4SIO/HDD");
                 return FALSE;
             }
             if (!_MainLoopExtractZipEntryToFile(

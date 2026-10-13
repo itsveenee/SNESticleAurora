@@ -5,6 +5,10 @@
 #include <string.h>
 #include <stdio.h>
 #include <sys/stat.h>
+#define NEWLIB_PORT_AWARE
+#include <fileXio.h>
+#include <fileXio_rpc.h>
+#undef NEWLIB_PORT_AWARE
 #include <kernel.h>
 #include <libpad.h>
 #include "types.h"
@@ -393,10 +397,14 @@ typedef struct
  * Keep the partition in hdd0: form: pfs0: can be remounted by the browser. */
 static Char s_AuroraVideoHddCfg[300] = {0};
 extern char *MainGetBootDir();
+extern char *MainGetBootPath();
+extern Char _RomPath[1024];
 
 static Bool _AuroraVideoCfgIsHdd(const char *pPath)
 {
-    return pPath && !strncmp(pPath, "hdd0:", 5) && pPath[5];
+    return pPath &&
+        (!strncmp(pPath, "hdd0:", 5) ||
+         !strncmp(pPath, "pfs0:", 5)) && pPath[5];
 }
 
 static Bool _AuroraVideoCfgMappedPath(
@@ -405,7 +413,14 @@ static Bool _AuroraVideoCfgMappedPath(
     int n;
     if (!pPath || !pOut || nOut == 0) return FALSE;
     if (_AuroraVideoCfgIsHdd(pPath))
+    {
+        if (!strncmp(pPath, "pfs0:", 5))
+        {
+            n = snprintf(pOut, nOut, "%s", pPath);
+            return n >= 0 && (size_t)n < nOut ? TRUE : FALSE;
+        }
         return HddMapPath(pPath, pOut, (int)nOut) == 1 ? TRUE : FALSE;
+    }
     n = snprintf(pOut, nOut, "%s", pPath);
     return n >= 0 && (size_t)n < nOut ? TRUE : FALSE;
 }
@@ -468,7 +483,13 @@ static Bool _AuroraVideoCfgWrite(
         {
             struct stat st;
             if (stat(parent, &st) < 0 || !S_ISDIR(st.st_mode))
-                return FALSE;
+            {
+                /* AURORA_HDD_ISSUE38_V3_20261013 : some PFS implementations expose
+                 * fileXio directory operations but not newlib stat(). */
+                int dfd = fileXioDopen(parent);
+                if (dfd < 0) return FALSE;
+                fileXioDclose(dfd);
+            }
         }
     }
     f = fopen(mapped, "wb");
@@ -481,29 +502,54 @@ static Bool _AuroraVideoCfgWrite(
 
 static Bool _AuroraVideoCfgActivateHddBootFallback(void)
 {
-    const char *boot = MainGetBootDir();
+    /* AURORA_HDD_ISSUE38_V3_20261013
+     * Prioritize the ELF's *partition*, not merely a memory-card config.
+     * Boot pfs0: from FHDB may lack logical partition information: in that
+     * case the already-mounted pfs0: is supported as a startup fallback.
+     * After a game is opened, prefer its unambiguous hdd0:/PART mapping. */
+    const char *bootDir = MainGetBootDir();
+    const char *bootPath = MainGetBootPath();
+    const char *sources[3] = { bootDir, bootPath, _RomPath };
+    char candidate[300], mapped[512];
     int previous = HddSupportIsEnabled();
-    char candidate[300];
-    char mapped[512];
-    int n;
-    if (s_AuroraVideoHddCfg[0]) return TRUE;
-    if (!_AuroraVideoCfgIsHdd(boot)) return FALSE;
-    /* MainGetBootDir is a DIRECTORY ending with '/', never a ROM path. */
-    if (!MainLoopHddLogicalDataPath(boot, "video.cfg",
-                                     candidate, sizeof(candidate))) return FALSE;
+    int i;
 
-    /* Never probe an HDD from a USB/memory-card boot. The boot path here
-     * proves that this session was launched from an internal HDD. */
-    if (!previous) HddSupportSetEnabled(1);
-    if (HddLoadEmbeddedIrx() < 0 ||
-        HddMapPath(candidate, mapped, sizeof(mapped)) != 1)
+    /* A known logical HDD boot identity wins; do not silently point at
+     * another partition when the browser has remounted pfs0:. */
+    for (i = 0; i < 3; ++i)
     {
+        const char *source = sources[i];
+        if (!source || strncmp(source, "hdd0:", 5)) continue;
+        if (!MainLoopHddLogicalDataPath(source, "video.cfg",
+                                         candidate, sizeof(candidate)))
+            continue;
+        if (!previous) HddSupportSetEnabled(1);
+        if (HddLoadEmbeddedIrx() >= 0 &&
+            HddMapPath(candidate, mapped, sizeof(mapped)) == 1)
+        {
+            snprintf(s_AuroraVideoHddCfg,
+                     sizeof(s_AuroraVideoHddCfg), "%s", candidate);
+            return TRUE;
+        }
         if (!previous) HddSupportSetEnabled(0);
-        return FALSE;
     }
-    snprintf(s_AuroraVideoHddCfg,
-             sizeof(s_AuroraVideoHddCfg), "%s", candidate);
-    return TRUE;
+    /* An already known logical HDD config remains valid. */
+    if (!strncmp(s_AuroraVideoHddCfg, "hdd0:", 5)) return TRUE;
+
+    /* FHDB sometimes starts the ELF via pfs0: without retaining the APA
+     * partition name in argv. Do NOT mount a different partition or probe
+     * random hdd0: partitions here. Use the partition already mounted by
+     * FHDB. Once a game is chosen the loop above can pin hdd0:/PART. */
+    if ((bootDir && !strncmp(bootDir, "pfs0:", 5)) ||
+        (bootPath && !strncmp(bootPath, "pfs0:", 5)))
+    {
+        if (!previous) HddSupportSetEnabled(1);
+        snprintf(s_AuroraVideoHddCfg,
+                 sizeof(s_AuroraVideoHddCfg),
+                 "pfs0:/SNESticle/video.cfg");
+        return TRUE;
+    }
+    return s_AuroraVideoHddCfg[0] ? TRUE : FALSE;
 }
 
 static void _VideoCfgPath(char *pOut)
@@ -642,6 +688,9 @@ void VideoSettingsSave(void)
 	cfg.gbavol = g_GbaVolume;
 	cfg.gbablending = GpSPGetFrameBlending() ? 1 : 0;
 	cfg.pce6button = PceBridge_Get6Button() ? 1 : 0; /* AURORA_PCE_PAD6_V1_20261009 */
+    /* AURORA_HDD_ISSUE38_V3_20261013 : after a ROM has been launched, replace any
+     * uncertain pfs0: boot alias with hdd0:/PART from the selected ROM. */
+    (void)_AuroraVideoCfgActivateHddBootFallback();
 	_VideoCfgPath(path);
 	BgmIOBegin();
     (void)_AuroraVideoCfgWrite(path, (Uint8 *)&cfg, sizeof(cfg));
@@ -691,6 +740,10 @@ void VideoSettingsLoad(void)
 	MainLoopTurboSetSpeed(MAINLOOP_TURBO_SPEED_NORMAL);
 	SNCPUSetOverclockLevel(_pSnes ? _pSnes->GetCpu() : NULL, SNCPU_OVERCLOCK_OFF);
 	_VideoApplyCompatFlags(0);
+    /* AURORA_HDD_ISSUE38_V3_20261013 : select HDD before probing the config header.
+     * When no HDD file exists we may import the legacy MC file, but all
+     * future saves go to this session's HDD partition. */
+    (void)_AuroraVideoCfgActivateHddBootFallback();
 	_VideoCfgPath(path);
 
     /* AURORA_HDD_FULL_STORAGE_SAFE_V2_20261013 : preserve MC priority; only an actual HDD boot
@@ -699,8 +752,12 @@ void VideoSettingsLoad(void)
     if (!_AuroraVideoCfgRead(path, (Uint8 *)&header, sizeof(header)) ||
         header.magic != VIDEOCFG_MAGIC)
     {
-        if (_AuroraVideoCfgActivateHddBootFallback())
-            _VideoCfgPath(path);
+        /* AURORA_HDD_ISSUE38_V3_20261013 : import existing v16-v54 MC preferences when
+         * the new HDD location has no video.cfg yet. Never rewrite MC. */
+        if (s_AuroraVideoHddCfg[0])
+        {
+            snprintf(path, sizeof(path), "%s/video.cfg", _SramPath);
+        }
     }
 	memset(&header, 0, sizeof(header));
 	if (_AuroraVideoCfgRead(path, (Uint8 *)&header, sizeof(header)) &&
