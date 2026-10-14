@@ -93,6 +93,7 @@ If the repository was cloned without `--recurse-submodules`, run
 * J.R.R. Tolkien's The Lord of the Rings (SNES) black screen fixed.
 * Kishin Douji Zenki: Tenchi Meidou (SNES) black screen fixed.
 * The Lost Vikings 1 and 2 (SNES) black screen fixed.
+* Super 3D Noah's Ark (SNES) black screen fixed.
 * Blackthorne (SNES) black screen fixed.
 * Magical Pop'n (SNES) freeze fixed.
 * Accele Brid (SNES) freeze fixed.

@@ -722,6 +722,87 @@ static Int32 _SNRomHeaderScore(const Uint8 *pRom, Uint32 uRomBytes,
 	return nScore;
 }
 
+/* AURORA_SNESDEV_HEADERLESS_HIROM_V1_FINAL_20261014
+ * The internal SNES cart header is a software convention, not a mandatory
+ * electrical device. For a raw/headerless ROM with no acceptable cart header,
+ * use the RESET vectors as a SECONDARY, conservative mapping hint.
+ *
+ * SNESdev: $00:FFFC is the CPU RESET vector. The file offset is $007FFC
+ * for LoROM, $00FFFC for HiROM. A reset vector below $8000 cannot fetch
+ * cartridge ROM through the ordinary $00 upper-half reset mirror.
+ *
+ * This deliberately does NOT relax _SNRomIsValidCartInfo(), scoring,
+ * Type-1 deinterleave, ExLoROM/ExHiROM, or BSC slot detection. Only a
+ * headerless, well-aligned <=4 MiB ROM with an INVALID LoROM reset vector
+ * and a credible HiROM reset prologue can use this fallback. The caller
+ * additionally rejects 512-byte external copier headers and requires
+ * pCartInfo == NULL after all normal mapping/normalization logic.
+ */
+static Bool _SNRomHeaderlessHiRomReset(const Uint8 *pRom, Uint32 nRomBytes)
+{
+    Uint16 uLoReset, uHiReset;
+    Uint32 uEntry;
+    Uint16 uDestination;
+    Uint8 uBank;
+
+    if (!pRom || nRomBytes < 0x10000u || nRomBytes > 0x400000u ||
+        (nRomBytes & 0xFFFFu) != 0u)
+        return FALSE;
+
+    uLoReset = (Uint16)((Uint16)pRom[0x7FFCu] |
+                        ((Uint16)pRom[0x7FFDu] << 8));
+    uHiReset = (Uint16)((Uint16)pRom[0xFFFCu] |
+                        ((Uint16)pRom[0xFFFDu] << 8));
+    if (uLoReset >= 0x8000u || uHiReset < 0x8000u)
+        return FALSE;
+
+    /* HiROM's bank $00:8000-$FFFF mirrors ROM's physical $008000-$00FFFF.
+     * Bounds checked before peeking the first four reset-handler bytes. */
+    uEntry = (Uint32)uHiReset;
+    if (uEntry + 3u >= nRomBytes)
+        return FALSE;
+
+    switch (pRom[uEntry])
+    {
+        case 0x18: /* CLC; XCE: common cold boot to native 65816 */
+        case 0x38: /* SEC; XCE: explicit 6502/emulation setup */
+            return (pRom[uEntry + 1u] == 0xFBu) ? TRUE : FALSE;
+
+        case 0x78: /* SEI: accept only a recognizable following init opcode */
+            switch (pRom[uEntry + 1u])
+            {
+                case 0x18: /* CLC */
+                case 0x38: /* SEC */
+                case 0xD8: /* CLD */
+                case 0xC2: /* REP */
+                case 0xE2: /* SEP */
+                case 0x4C: /* JMP */
+                case 0x5C: /* JML */
+                case 0xEA: /* NOP */
+                    return TRUE;
+                default:
+                    return FALSE;
+            }
+
+        case 0x4C: /* JMP absolute: reset bank remains $00 */
+            uDestination = (Uint16)((Uint16)pRom[uEntry + 1u] |
+                       ((Uint16)pRom[uEntry + 2u] << 8));
+            return (uDestination >= 0x8000u) ? TRUE : FALSE;
+
+        case 0x5C: /* JML: destination must be visible as cartridge ROM */
+            uDestination = (Uint16)((Uint16)pRom[uEntry + 1u] |
+                       ((Uint16)pRom[uEntry + 2u] << 8));
+            uBank = pRom[uEntry + 3u];
+            if (uBank == 0x7Eu || uBank == 0x7Fu)
+                return FALSE; /* WRAM: not a reliable cold-boot entry point */
+            return (uDestination >= 0x8000u ||
+                    (uBank >= 0x40u && uBank <= 0x7Du) ||
+                    uBank >= 0xC0u) ? TRUE : FALSE;
+        default:
+            return FALSE;
+    }
+}
+
 /* A type-1 interleaved image places a header which claims the opposite
    mapper at the otherwise valid header location.  The checksum guard keeps
    random ROM data from being mistaken for a header. */
@@ -1782,6 +1863,22 @@ if (m_pRomData && m_uRomBytes)
 			m_eMapping = SNROM_MAPPING_EXLOROM;
 		}
 	}
+
+    /* AURORA_SNESDEV_HEADERLESS_HIROM_V1_FINAL_20261014
+     * Run ONLY after legacy validation, Type-1 deinterleave and ExLoROM
+     * normalization. Headered ROMs / conventional mapper families keep
+     * their exact previous flow (particularly RPG Tsukuru 2 / BSC).
+     * Exclude the 512-byte external-header path used by SWC/FIG dumps;
+     * Front copier BIOS/DRAM mapping lives in independent code. */
+    if (pCartInfo == NULL && nHeaderBytes == 0u &&
+        m_eMapping == SNROM_MAPPING_LOROM &&
+        _SNRomHeaderlessHiRomReset(m_pRomData, m_uRomBytes))
+    {
+        m_eMapping = SNROM_MAPPING_HIROM;
+#if SNDBG_LOG
+        DLog("[rom-map] headerless reset fallback: LoROM RESET invalid, HiROM RESET credible");
+#endif
+    }
 
 	SetCartInfo(pCartInfo);
 
