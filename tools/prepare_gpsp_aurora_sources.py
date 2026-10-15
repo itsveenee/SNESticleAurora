@@ -2454,6 +2454,124 @@ static s32 load_gamepak_raw_memory(const void *data, size_t data_size)
 
     patch_multicore_profiler(stage, profiler_header)
 
+    # AURORA_UNUSED_GPSP_COLOR_LUT_PRUNE_V1_20261014
+    # Aurora's PS2 frontend hard-wires gpsp_color_correction=disabled and
+    # rejects dynamic override. Retain GBA frame mixing/RTC/TFA/serial/audio.
+    # Apply AFTER the V25 ASM audits and external profiler instrumenter:
+    # V25 originally generates unused CC and CC+MIX callsites, so merely
+    # dropping gba_cc_lut.c would produce an unresolved global in the ELF.
+    _prune_video = stage / "libretro/libretro.c"
+    _prune_make = stage / "Makefile.common"
+    _prune_asm = stage / "aurora_gpsp_ps2_hotpaths.S"
+
+    def _prune_once(_data, _old, _new, _what):
+        _num = _data.count(_old)
+        if _num != 1:
+            raise SystemExit("gpSP COLOR PRUNE: %s: expected 1 match; got %d" % (_what, _num))
+        return _data.replace(_old, _new, 1)
+
+    def _prune_region(_data, _start, _end, _what):
+        if _data.count(_start) != 1 or _data.count(_end) != 1:
+            raise SystemExit("gpSP COLOR PRUNE: missing/duplicate %s region" % _what)
+        _a = _data.index(_start)
+        _b = _data.index(_end, _a + len(_start))
+        return _data[:_a] + _data[_b:]
+
+    _px = _prune_video.read_text(encoding="utf-8")
+    # AURORA_GPSP_LUT_V24_20261014: V13 LUT helper survived V23 CC-region pruning.
+    _v24_dead_helper = (
+        '/* AURORA_GPSP_GBA_V13_PS2_COLOR_CORRECTION_20260911 */\n'
+        'static inline uint16_t aurora_gpsp_color_correct(uint16_t c)\n'
+        '{\n'
+        '#if defined(PS2) && defined(USE_XBGR1555_FORMAT)\n'
+        '   return gba_cc_lut[c & 0x7FFFU];\n'
+        '#else\n'
+        '   return gba_cc_lut[((c & 0xFFC0U) >> 1) | (c & 0x1FU)];\n'
+        '#endif\n'
+        '}\n'
+        '\n'
+    )
+    _px = _prune_once(_px, _v24_dead_helper, "", "unused V13 LUT helper")
+    _px = _prune_once(_px, '#include "../gba_cc_lut.h"\n', '', 'LUT include')
+    # AURORA_GPSP_MIX_V26_BOUNDARY_20261014: retain original V2 mix mask / #defines.
+    _px = _prune_region(_px, 'static void video_post_process_cc(void)\n',
+                       '/* AURORA_GPSP_GBA_V2_TFA_BLEND_20260911', 'cc-only function')
+    _px = _prune_region(_px, 'static void video_post_process_cc_mix(void)\n',
+                       'static void init_post_processing(void)\n', 'cc+mix function')
+    # Both CC function-pointer uses are removed. Preserve the existing
+    # frame-mixing function, framebuffer swap and allocation-failure path.
+    _px = _prune_once(_px,
+        '      if (post_process_cc && mix_active)\n'
+        '         video_post_process = video_post_process_cc_mix;\n'
+        '      else if (post_process_cc)\n'
+        '         video_post_process = video_post_process_cc;\n'
+        '      else if (mix_active)\n'
+        '         video_post_process = video_post_process_mix;\n',
+        '      if (mix_active)\n'
+        '         video_post_process = video_post_process_mix;\n',
+        'postprocessing dispatch')
+    _px = _prune_region(_px,
+                       '   var.key              = "gpsp_color_correction";\n',
+                       '   var.key               = "gpsp_frame_mixing";\n',
+                       'color setting block')
+    # The option is now fixed by construction, not merely convention.
+    _px = _prune_once(_px,
+         '   var.key               = "gpsp_frame_mixing";\n',
+         '   post_process_cc_prev = post_process_cc;\n'
+         '   post_process_cc = false; /* PS2: permanently unavailable */\n'
+         '   var.key               = "gpsp_frame_mixing";\n',
+         'fixed color choice')
+    # Two unused declarations are generated for PS2 assembler helpers.
+    _px = _prune_once(_px,
+        'extern void aurora_gpsp_ps2_cc_asm(\n'
+        '      u16 *dst, const u16 *src, const u16 *lut);\n',
+        '', 'CC ASM prototype')
+    _px = _prune_once(_px,
+        'extern void aurora_gpsp_ps2_cc_mix_asm(\n'
+        '      u16 *dst, const u16 *curr, const u16 *prev, const u16 *lut);\n',
+        '', 'CC+mix ASM prototype')
+    # AURORA_GPSP_LUT_V25_ORDER_20261014: all CC consumer functions MUST already be pruned.
+    if "aurora_gpsp_color_correct" in _px:
+        raise SystemExit("gpSP LUT V25: leftover color-correction consumer")
+    for _forbidden in ('gba_cc_lut', 'video_post_process_cc_mix',
+                       'video_post_process_cc(', 'aurora_gpsp_ps2_cc_asm',
+                       'aurora_gpsp_ps2_cc_mix_asm'):
+        if _forbidden in _px:
+            raise SystemExit('gpSP COLOR PRUNE: surviving code reference: '+_forbidden)
+    for _required in ('static void video_post_process_mix(void)',
+                      'aurora_gpsp_ps2_mix_asm(', 'gpsp_frame_mixing',
+                      'post_process_mix'):
+        if _required not in _px:
+            raise SystemExit('gpSP COLOR PRUNE: removed a required component: '+_required)
+    _prune_video.write_text(_px, encoding="utf-8", newline="\n")
+
+    _pm = _prune_make.read_text(encoding="utf-8")
+    _pm = _prune_once(_pm, '             $(CORE_DIR)/gba_cc_lut.c \\\n',
+                      '', 'LUT source object')
+    if 'gba_cc_lut.c' in _pm:
+        raise SystemExit('gpSP COLOR PRUNE: LUT still compiled')
+    _prune_make.write_text(_pm, encoding="utf-8", newline="\n")
+
+    # The CC ASM helpers only consume the LUT through an argument, not via
+    # a global relocation. Still, remove both unused routines so the
+    # .text section preserves *only* frame mixing and sound draining.
+    _as = _prune_asm.read_text(encoding="utf-8")
+    _as = _prune_region(_as,
+        '/* void aurora_gpsp_ps2_cc_asm(',
+        '/* void aurora_gpsp_ps2_mix_asm(', 'unused color ASM')
+    _as = _prune_region(_as,
+        '/* void aurora_gpsp_ps2_cc_mix_asm(',
+        '/* void aurora_gpsp_ps2_sound_drain_asm(', 'unused color+mix ASM')
+    for _forbidden in ('.global aurora_gpsp_ps2_cc_asm',
+                       '.global aurora_gpsp_ps2_cc_mix_asm'):
+        if _forbidden in _as:
+            raise SystemExit('gpSP COLOR PRUNE: stranded ASM export: '+_forbidden)
+    for _required in ('.global aurora_gpsp_ps2_mix_asm',
+                      '.global aurora_gpsp_ps2_sound_drain_asm'):
+        if _required not in _as:
+            raise SystemExit('gpSP COLOR PRUNE: missing required ASM: '+_required)
+    _prune_asm.write_text(_as, encoding="utf-8", newline="\n")
+
     stamp.write_text(digest + "\n", encoding="utf-8")
     print(f"[ gpSP stage ] V21: SMALL JIT memory + 4 MiB paged ROM + TFA pre-reserve (V15 SIO) + pager I/O + full PS2 JIT cache sync: {stage}")
 

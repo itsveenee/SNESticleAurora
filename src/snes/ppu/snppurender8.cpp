@@ -4521,15 +4521,10 @@ static void _FetchMode7(Uint8 *pLine, SnesPPU *pPPU, Int32 iLine, SNMaskT *pPrio
 	dx = (m7sel & 0x01) ? -m7a : m7a;
 	dy = (m7c == 0) ? 0 : ((m7sel & 0x01) ? -m7c : m7c);
 
-	/* AURORA_V85_MODE7_HALF
-	 * Optional performance compromise. Full remains the exact old path. */
-	Int32 nMode7Pixels = 256;
-	if (SNPPURenderGetSoftwareHackFlags() & SNPPU_HACK_MODE7_HALF)
-	{
-		nMode7Pixels = 128;
-		dx *= 2;
-		dy *= 2;
-	}
+	/* AURORA_MODE7_FULL_RETIRE_V1_20261014:
+	 * The old Half path was retired. Always use the unmodified Full
+	 * coordinates and 256-pixel fetch. Keep the constant for profiling. */
+	const Int32 nMode7Pixels = 256;
 
 	/* M7SEL repeat values 0 and 1 both wrap. Value 2 is transparent/backdrop
 	 * outside the 1024x1024 map, value 3 repeats character 0. */
@@ -4589,24 +4584,6 @@ static void _FetchMode7(Uint8 *pLine, SnesPPU *pPPU, Int32 iLine, SNMaskT *pPrio
 #if AURORA_SMK_PROFILER
 	const Uint32 uSmkMode7FetchEnd = bSmkProfile ? ProfCtrGetCycle() : 0u;
 #endif
-
-	if (nMode7Pixels == 128)
-	{
-#if AURORA_FRONTEND_PROFILER
-		const Uint32 uAuroraM7HalfStart = ProfCtrGetCycle();
-#endif
-		Int32 i;
-		for (i = 127; i >= 0; i--)
-		{
-			Uint8 uPixel = pLine[i];
-			pLine[i * 2 + 0] = uPixel;
-			pLine[i * 2 + 1] = uPixel;
-		}
-#if AURORA_FRONTEND_PROFILER
-		AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_M7_HALF_EXPAND,
-			ProfCtrGetCycle() - uAuroraM7HalfStart, 128u);
-#endif
-	}
 
 	/* AURORA_MODE7_EXTBG_COMPOSITOR_V1_20260903
 	 * BG1 keeps the full 8-bit Mode 7 sample; EXTBG derives BG2 separately. */

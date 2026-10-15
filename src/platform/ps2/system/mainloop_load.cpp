@@ -32,6 +32,7 @@ static char s_SmdExternalCartPath[1024] = {0}; /* AURORA_SUPER_MAGIC_DRIVE_V1_20
 #include "pce/beetle/pce_bridge.h"
 #include "mainloop_state.h"
 #include "mainloop_ui.h"
+#include "snppurender.h" /* AURORA_LEGACY_PPU_BGOBJ_V23_20261014 */
 #include "uiVideo.h" /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908: SGB BIOS selector */
 #include "mainloop_bgm.h" /* AURORA_V4_16_SAFE_GAME_SWITCH_FLUSH_20260830 */
 #include "snes.h"
@@ -2069,6 +2070,7 @@ _MainLoopSwcCartSRAMDetach();
     _pSystem = NULL;
     _RomPath[0] = 0;
     MainLoopStateOnRomChanged();
+    AuroraSnesLegacyCommitOnRomLoad(); /* next ROM only */
 
 }
 
@@ -3667,6 +3669,7 @@ static Bool _MainLoopSwcInsertCartridge(const char *pPath)
         return FALSE;
     }
 
+    AuroraSnesLegacyCommitOnRomLoad(); /* hot cartridge, not disk change */
     if (!_pSnes->InsertSuperWildCardCartridge(_pSnesRom))
     {
         _pSnesRom->Unload();

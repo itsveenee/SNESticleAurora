@@ -132,6 +132,8 @@ static Bool   s_SafeFrameskipOverrunPending = FALSE;
  * measured Take()->pre-VBlank work fits the learned period.
  * CRC-unlimited policy never arms this state. */
 static Bool   s_SafeFrameskipRecoveryPending = FALSE;
+/* AURORA_SAFE_FRAMESKIP_PRESENTED_RECOVERY_V35_20261015: only ACTUALLY PRESENTED, on-budget host ticks count. */
+static Uint32 s_SafeFrameskipHealthyPresentCount = 0u;
 
 /* Exact 2/5 token bucket. Capacity 6 preserves the one-unit remainder
  * when +2 credit crosses the 5-unit skip cost; <10 still banks at most one
@@ -220,6 +222,7 @@ void MainLoopSafeFrameskipSetRomIdentityCRC32(
     s_SafeFrameskipPreviousSkipped = FALSE;
     s_SafeFrameskipPhaseSwapCount = 0u;
     s_SafeFrameskipRecoveryPending = FALSE;
+    s_SafeFrameskipHealthyPresentCount = 0u;
 }
 
 /* UI pause preserves scheduler phase without sampling time spent in menus. */
@@ -264,6 +267,7 @@ static void _MainLoopSafeFrameskipResetRuntime(void)
     s_SafeFrameskipLastPresentedWorkValid = FALSE;
     s_SafeFrameskipOverrunPending = FALSE;
     s_SafeFrameskipRecoveryPending = FALSE;
+    s_SafeFrameskipHealthyPresentCount = 0u;
     s_SafeFrameskipCredit = 5;
     s_SafeFrameskipPreviousSkipped = FALSE;
     s_SafeFrameskipPhaseSwapCount = 0;
@@ -401,6 +405,7 @@ void MainLoopSafeFrameskipSetGameplayActive(Bool active)
                  s_SafeFrameskipCommittedFrame == frame) ? TRUE : FALSE;
 
             s_SafeFrameskipGameplayActive = FALSE;
+            s_SafeFrameskipHealthyPresentCount = 0u;
             s_SafeFrameskipUiFreezeValid = (system != NULL) ? TRUE : FALSE;
             s_SafeFrameskipUiFreezeHadAim = sameCommitted;
             s_SafeFrameskipUiFreezeAimPhase =
@@ -466,6 +471,7 @@ void MainLoopSafeFrameskipSetGameplayActive(Bool active)
         s_SafeFrameskipFrontendLastFlip = 0;
         s_SafeFrameskipTickStart = 0;
         s_SafeFrameskipPreFlip = 0;
+        s_SafeFrameskipHealthyPresentCount = 0u;
         s_SafeFrameskipGameplayActive = TRUE;
     }
 }
@@ -726,16 +732,41 @@ static void _MainLoopSafeFrameskipAfterFlip(void)
          * Sustained/near-sustained load keeps recovery armed; Take() then uses
          * the v3.3 half-period residual threshold. CRC unlimited mode never
          * arms recovery, so Top Gear/Top Racer max policy is unchanged. */
+        /* AURORA_SAFE_FRAMESKIP_PRESENTED_RECOVERY_V35_20261015
+         * A transient overload can leave Aim eight host periods late.
+         * Demanding 25% headroom forever after that overload can
+         * lock a now-on-budget scene into persistent frameskip.
+         * Preserve the original immediate <=75% proof, but also
+         * accept THREE consecutive real presentations whose
+         * measured pre-VBlank host work fits in ONE full period.
+         * Hidden ticks are NEVER counted. An over-budget/invalid
+         * presentation clears the streak. No new hot-path timer,
+         * new clock, token policy or emulated-state modification.
+         */
+        if (recoveryWasPending && hostWorkValid &&
+            s_SafeFrameskipPeriod != 0u &&
+            hostWork <= s_SafeFrameskipPeriod)
+        {
+            if (s_SafeFrameskipHealthyPresentCount < 3u)
+                ++s_SafeFrameskipHealthyPresentCount;
+        }
+        else
+        {
+            s_SafeFrameskipHealthyPresentCount = 0u;
+        }
+
         if (recoveryWasPending &&
             hostWorkValid &&
             s_SafeFrameskipPeriod > 0u &&
-            ((Uint64)hostWork * 4u) <=
-                ((Uint64)s_SafeFrameskipPeriod * 3u))
+            (((Uint64)hostWork * 4u <=
+              (Uint64)s_SafeFrameskipPeriod * 3u) ||
+             s_SafeFrameskipHealthyPresentCount >= 3u))
         {
             s_SafeFrameskipAim = now + s_SafeFrameskipPeriod;
             s_SafeFrameskipOverrunPending = FALSE;
             s_SafeFrameskipRecoveryPending = FALSE;
             s_SafeFrameskipPreviousSkipped = FALSE;
+            s_SafeFrameskipHealthyPresentCount = 0u;
             recoveryRebased = TRUE;
         }
 

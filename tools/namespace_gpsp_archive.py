@@ -59,9 +59,8 @@ def main():
         # AURORA_GPSP_GBA_V2_TFA_BLEND_20260911
         "aurora_tfa_set_storage", "aurora_tfa_reset_protocol",
         "aurora_tfa_active", "aurora_tfa_dirty", "aurora_tfa_clear_dirty",
-        # AURORA_GPSP_GBA_V25_PS2_MIPS_POSTFX_AUDIO_20260929
-        "aurora_gpsp_ps2_cc_asm", "aurora_gpsp_ps2_mix_asm",
-        "aurora_gpsp_ps2_cc_mix_asm", "aurora_gpsp_ps2_sound_drain_asm"
+        # AURORA_GPSP_NAMESPACE_V27_20261015: color ASM intentionally retired; MIX and AUDIO retained.
+        "aurora_gpsp_ps2_mix_asm", "aurora_gpsp_ps2_sound_drain_asm"
     }
     missing = sorted(required - symbols)
     if missing:
@@ -82,8 +81,8 @@ def main():
     for sym in ("GPSP_retro_init", "GPSP_retro_load_game", "GPSP_retro_run",
                 "GPSP_retro_serialize", "GPSP_retro_get_memory_data",
                 "GPSP_aurora_tfa_set_storage", "GPSP_aurora_tfa_dirty",
-                "GPSP_aurora_gpsp_ps2_cc_asm", "GPSP_aurora_gpsp_ps2_mix_asm",
-                "GPSP_aurora_gpsp_ps2_cc_mix_asm", "GPSP_aurora_gpsp_ps2_sound_drain_asm"):
+                "GPSP_aurora_gpsp_ps2_mix_asm",
+                "GPSP_aurora_gpsp_ps2_sound_drain_asm"):
         if sym not in verify:
             raise SystemExit(f"namespaced archive missing {sym}")
     print(f"namespaced {len(symbols)} gpSP globals -> {a.output}")

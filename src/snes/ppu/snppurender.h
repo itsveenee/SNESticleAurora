@@ -49,6 +49,11 @@ enum
 
 extern Uint8 g_SnesSoftwareLayerMask;
 extern Uint8 g_SnesSoftwareHackFlags;
+extern Bool g_AuroraSnesLegacyMode; /* AURORA_LEGACY_PPU_BGOBJ_V23_20261014: active for current ROM */
+extern Bool g_AuroraSnesLegacyRequested; /* saved preference; next ROM */
+void AuroraSnesLegacySetEnabled(Bool enabled);
+void AuroraSnesLegacyCommitOnRomLoad(void);
+void SnesPPUInvalidateChrCacheLegacy(Uint32 address, Uint32 words);
 
 /* AURORA_OBJ_LIMIT_V1_2
  * Level 0 keeps the untouched SNES limits. Scanline mode caps fetched OBJ
@@ -324,6 +329,19 @@ private:
 
 	void RenderLine8Planar(Int32 iLine, SnesRender8pInfoT *pRenderInfo);
 	void RenderLine8(Int32 iLine,  SnesRender8pInfoT *pRenderInfo);
+	void RenderLine8Legacy(Int32 iLine, SnesRender8pInfoT *pRenderInfo); /* AURORA_LEGACY_PPU_BGOBJ_V23_20261014 */
+	/* Separate legacy methods. No fields, so class layout/ABI is intact. */
+	void DecodeBGInfoLegacy(SnesBGInfoT *pBGInfo);
+	void DecodeWindowsLegacy(SNMaskT *pWindow, SNMaskT *pBGWindow);
+	Uint32 FetchBGLegacy(SnesBGInfoT *pBGInfo, struct SnesRenderTileT *pTiles, Int32 nTiles, Int32 iLine, Uint32 &uOldVramAddr);
+	Uint32 FetchBGOffsetLegacy(SnesBGInfoT *pBGInfo, struct SnesRenderTileT *pTiles, Int32 nTiles, Int32 iLine, Uint16 *pOffset, Uint32 uOffsetMask, Bool bVOffset);
+	Uint32 FetchOffsetLegacy(SnesBGInfoT *pBGInfo, Uint16 *pOffset, Int32 iLine, Uint32 &uOldVramAddr, Bool bVOffset);
+	Int32 CheckOBJLegacy(SnesRenderObjT *pObjs, Int32 iObj, Int32 nObjs, Uint8 *pObjList, Int32 MaxObjLine, Int32 iLine);
+	Int32 CheckOBJLegacy(Uint8 *pObjY, Uint8 *pObjSize, Int32 iObj, Int32 nObjs, Uint8 *pObjList, Int32 MaxObjLine, Int32 iLine);
+	Int32 CheckOBJLegacy(Uint8 *pObjList, Int32 iLine);
+	void UpdateOBJVisibilityLegacy(Uint8 *pObjY, Uint8 *pObjSize, Int32 iObj, Int32 nObjs);
+	void UpdateOBJLegacy(Uint8 *pObjY, Uint8 *pObjSize);
+
 	void RenderLine8Mode7(Int32 iLine,  SnesRender8pInfoT *pRenderInfo);
 
     void UpdateOBJ(Uint8 *pObjY, Uint8 *pObjSize);

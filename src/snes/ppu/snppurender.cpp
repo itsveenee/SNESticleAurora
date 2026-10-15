@@ -8,6 +8,7 @@
 #include "snppu.h"
 #include "snppurender.h"
 #include "snppuchrcache.h"
+extern void SnesPPUInvalidateChrCacheLegacy(Uint32, Uint32); /* AURORA_LEGACY_PPU_BGOBJ_V23_20261014 */
 #include "rendersurface.h"
 #include "snmask.h"
 #include "snmaskop.h"
@@ -68,6 +69,26 @@ Uint8 g_SnesSoftwareLayerMask = (Uint8)(
     SNESPPU_MASK_BG1 | SNESPPU_MASK_BG2 | SNESPPU_MASK_BG3 |
     SNESPPU_MASK_BG4 | SNESPPU_MASK_OBJ);
 Uint8 g_SnesSoftwareHackFlags = 0;
+/* The menu preference is NOT the running renderer. Gameplay uses only
+ * g_AuroraSnesLegacyMode, latched at a ROM lifetime boundary. */
+/* AURORA_SNES_LEGACY_ALWAYS_ON_V29_20261015: both flags are permanently ON from process startup.
+ * video.cfg is backward compatible but cannot disable the legacy renderer.
+ * Preserve the ROM-boundary CHR flush (including SWC hot cartridge loads). */
+Bool g_AuroraSnesLegacyMode = TRUE; /* AURORA_LEGACY_PPU_BGOBJ_V23_20261014 */
+Bool g_AuroraSnesLegacyRequested = TRUE;
+void AuroraSnesLegacySetEnabled(Bool enabled)
+{
+    (void)enabled; /* Historical setting retained only for config ABI. */
+    g_AuroraSnesLegacyRequested = TRUE;
+}
+void AuroraSnesLegacyCommitOnRomLoad(void)
+{
+    /* A different ROM must never inherit the preceding ROM's CHR cache. */
+    SnesPPUInvalidateChrCacheLegacy(0, SNESPPU_VRAM_NUMWORDS);
+    g_AuroraSnesLegacyRequested = TRUE;
+    g_AuroraSnesLegacyMode = TRUE;
+}
+
 Uint8 g_SnesObjLimitLevel = SNPPU_OBJ_LIMIT_OFF;
 Uint8 g_SnesObjLimitMode = SNPPU_OBJ_LIMIT_MODE_SCANLINE;
 Int32 g_SnesObjLimitTileBudget = SNPPU_MAXOBJCHR;
@@ -107,7 +128,9 @@ void SNPPURenderSetSoftwareLayerMask(Uint8 uMask)
 
 void SNPPURenderSetSoftwareHackFlags(Uint8 uFlags)
 {
-    Uint8 uNew = (Uint8)(uFlags & SNPPU_HACK_ALL);
+    /* AURORA_MODE7_FULL_RETIRE_V1_20261014: reject the retired Half
+     * bit even if a caller bypasses video.cfg's existing migration. */
+    Uint8 uNew = (Uint8)(uFlags & SNPPU_HACK_ALL & ~SNPPU_HACK_MODE7_HALF);
     if ((uNew ^ g_SnesSoftwareHackFlags) & SNPPU_HACK_FRAME_SKIP)
         g_SoftwareFramePhase = 0;
     g_SnesSoftwareHackFlags = uNew;
@@ -310,9 +333,13 @@ void SnesPPURender::RenderLine(Int32 iLine)
 			{
 				/* PPU detail: no-target OBJ maintenance */
 				AURORA_SNES_PPU_DETAIL_BEGIN(AURORA_SNES_PPU_DETAIL_OBJ_UPDATE);
-				UpdateOBJ(m_pRenderInfo->uObjY, m_pRenderInfo->uObjSize);
+				if (g_AuroraSnesLegacyMode) UpdateOBJLegacy(m_pRenderInfo->uObjY, m_pRenderInfo->uObjSize);
+			else UpdateOBJ(m_pRenderInfo->uObjY, m_pRenderInfo->uObjSize);
 				/* AURORA_SNES_SAFE_PERF_V4_20260919: pRegs already points at this same register image. */
-				UpdateOBJVisibility(m_pRenderInfo->uObjY,
+				if (g_AuroraSnesLegacyMode) UpdateOBJVisibilityLegacy(m_pRenderInfo->uObjY,
+					m_pRenderInfo->uObjSize, pRegs->oampri.w,
+					SNESPPU_OBJ_NUM);
+			else UpdateOBJVisibility(m_pRenderInfo->uObjY,
 					m_pRenderInfo->uObjSize, pRegs->oampri.w,
 					SNESPPU_OBJ_NUM);
 				m_UpdateFlags &= ~SNESPPURENDER_UPDATE_OBJ;
@@ -600,10 +627,12 @@ static Bool bPrint = TRUE;
 #endif
 			/* PPU detail: presented OBJ update */
 			AURORA_SNES_PPU_DETAIL_BEGIN(AURORA_SNES_PPU_DETAIL_OBJ_UPDATE);
-			UpdateOBJ(pRenderInfo->uObjY, pRenderInfo->uObjSize);
+			if (g_AuroraSnesLegacyMode) UpdateOBJLegacy(pRenderInfo->uObjY, pRenderInfo->uObjSize);
+			else UpdateOBJ(pRenderInfo->uObjY, pRenderInfo->uObjSize);
 
             PROF_ENTER("UpdateOBJVisibility");
-            UpdateOBJVisibility(pRenderInfo->uObjY, pRenderInfo->uObjSize, pRegs->oampri.w, SNESPPU_OBJ_NUM);
+            if (g_AuroraSnesLegacyMode) UpdateOBJVisibilityLegacy(pRenderInfo->uObjY, pRenderInfo->uObjSize, pRegs->oampri.w, SNESPPU_OBJ_NUM);
+			else UpdateOBJVisibility(pRenderInfo->uObjY, pRenderInfo->uObjSize, pRegs->oampri.w, SNESPPU_OBJ_NUM);
             PROF_LEAVE("UpdateOBJVisibility");
 #if SNDBG_LOG
 			{
@@ -638,7 +667,8 @@ static Bool bPrint = TRUE;
 	    if (m_UpdateFlags & SNESPPURENDER_UPDATE_WINDOW)
         {
 			if (!(uHackFlags & SNPPU_HACK_WINDOWS_OFF))
-			DecodeWindows(pRenderInfo->WindowMask, pRenderInfo->BGWindow);
+			if (g_AuroraSnesLegacyMode) DecodeWindowsLegacy(pRenderInfo->WindowMask, pRenderInfo->BGWindow);
+			else DecodeWindows(pRenderInfo->WindowMask, pRenderInfo->BGWindow);
     		m_UpdateFlags &= ~SNESPPURENDER_UPDATE_WINDOW;
         }
 
@@ -646,7 +676,10 @@ static Bool bPrint = TRUE;
 
 		// render line
 		AURORA_SNES_PPU_DETAIL_BEGIN(AURORA_SNES_PPU_DETAIL_RASTER);
-		RenderLine8(iLine, pRenderInfo);
+		if (g_AuroraSnesLegacyMode)
+			RenderLine8Legacy(iLine, pRenderInfo);
+		else
+			RenderLine8(iLine, pRenderInfo);
 		AURORA_SNES_PPU_DETAIL_END(AURORA_SNES_PPU_DETAIL_RASTER);
 
 		/* PPU detail: post-raster color math / blender / GS submission. */
@@ -1012,6 +1045,9 @@ void SnesPPURender::UpdateVRAM(Uint32 uVramAddr)
 void SnesPPURender::UpdateVRAMRange(Uint32 uVramAddr, Uint32 nWords)
 {
 	SnesPPUInvalidateChrCache(uVramAddr, nWords);
+	/* Both renderers have independent CHR caches; invalidate both. */
+	if (g_AuroraSnesLegacyMode)
+		SnesPPUInvalidateChrCacheLegacy(uVramAddr, nWords);
 
 	/* O cache CHR ja foi invalidado acima. Estes bits cuidam dos caches
 	   derivados de tilemap/scroll na proxima scanline. */
