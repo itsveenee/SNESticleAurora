@@ -16,6 +16,8 @@ Game Boy Advance emulation uses the pinned **gpSP** fork at `src/third_party/gps
 
 SNESticle Aurora code covered by the GPL remains under GNU GPLv2; separately licensed third-party components remain under their own terms. **Code license and project branding are separate.** The applicable software licenses grant rights in the code; they **do not grant permission to use the SNESticle Aurora name** or the project-specific **Aurora** identity/branding for an unofficial fork, modified build, redistributed binary, or derivative project. Unless separately authorized by **@itsveenee**, use a distinct project/product name and distinct branding. Factual attribution such as “based on SNESticle Aurora” remains welcome. See [BRANDING.md](BRANDING.md).
 
+A consolidated [third-party license index](LICENSES/README.md) lists the mirrored notices.
+
 Project lineage and attribution are documented in [CREDITS.md](CREDITS.md). See LICENSE, [BRANDING.md](BRANDING.md), and the third-party license files for licensing details.
 
 Keep in mind: this project uses **AI-generated code**, but the changes are tested by me, and I'm a Human according to reCAPTCHA.
@@ -45,7 +47,7 @@ If the repository was cloned without `--recurse-submodules`, run
 ## What's new?
 
 #### Emulation:
-* Support added for more NES mappers: 13, 16, 18, 27, 48, 64, 65, 67, 68, 72, 77, 80, 82, 92, 96, 99, 101, 105, 118, 119, 151, 153, 155, 157, 158, 159, 162, 163, 164, 185, 188, 210, 216, and 552. Every licensed NES and Famicom game and most of the bootleg and unlicensed games will boot now.
+* Support added for more NES mappers (besides what QuickNES already supported): 12, 13, 14, 15, 16, 17, 18, 27, 29, 36, 38, 41, 42, 43, 47, 48, 50, 64, 65, 66, 67, 68, 69, 70, 71, 72, 74, 77, 78, 79, 80, 81, 82, 83, 90, 92, 93, 94, 95, 96, 97, 99, 101, 103, 104, 105, 107, 108, 112, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 132, 133, 137, 138, 139, 141, 142, 143, 144, 145, 146, 147, 148, 149, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 166, 167, 173, 176, 177, 178, 183, 185, 187, 188, 189, 192, 194, 195, 196, 197, 208, 210, 215, 216, 223, 224, 225, 227, 228, 238, 242, 243, 245, 258, 263, 268, 302, 303, 304, 305, 306, 309, 312, 346, 415, 525, 538, 549, 551, 552, 553, 554, and 557. Every licensed NES and Famicom game and most of the bootleg and unlicensed games will boot now.
 * Famicom Disk System (firmware not included), press L2+TRIANGLE to change the disk side.
 * Famiclone audio option for NES games (swap duty cycles, a known hardware bug in some Famiclones you can intentionally turn on).
 * Changed SRAM and RAM initialization for both NES and SNES. This will fix all the very few games that rely on specific initial values to work properly.
@@ -83,12 +85,12 @@ If the repository was cloned without `--recurse-submodules`, run
 ## Emulation progress
 
 #### Fixed:
-* Pilotwings (SNES) and Secret of Mana (SNES) mode 7 rendering, also fixes other games that rely on it.
-* Secret of Mana (SNES) mode 5 rendering, also fixes other games that rely on it.
+* Pilotwings (SNES) and Secret of Mana (SNES) mode 7 rendering fixed, also fixes other games that rely on it.
+* Secret of Mana (SNES) mode 5 rendering fixed, also fixes other games that rely on it.
 * Addams Family (SNES) graphical glitches and timing issues fixed.
 * Sunset Riders (SNES) graphical glitches fixed.
 * Super Mario All-Stars (SNES) graphical glitches fixed.
-* Sonic Blast Man (SNES) wrong colors fixed.
+* Sonic Blast Man (SNES) graphical glitches fixed.
 * Ys (SMS) graphical glitches fixed.
 * J.R.R. Tolkien's The Lord of the Rings (SNES) black screen fixed.
 * Kishin Douji Zenki: Tenchi Meidou (SNES) black screen fixed.
@@ -102,7 +104,7 @@ If the repository was cloned without `--recurse-submodules`, run
 * Many other graphical glitches and inaccuracies on many games and emulated systems were fixed.
 
 #### To be fixed:
-* Top Gear (SNES) performance *(in progress, safe frameskip helps a lot).*
+* Top Gear (SNES) performance *(in progress, safe frameskip helps a lot).* Partially fixed.
 * Speedy Gonzales in Los Gatos Banditos (SNES) performance *(in progress, safe frameskip won't help much).*
 * SNES SA-1 Emulation (experimental state, unplayable).
 * SNES FX1 and FX2 emulation (experimental state, unplayable).

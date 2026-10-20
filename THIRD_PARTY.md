@@ -1,5 +1,7 @@
 # Third-party components
 
+A complete mirror index is available at [LICENSES/README.md](LICENSES/README.md).
+
 SNESticle Aurora contains or integrates code from third-party projects. Their original license files and source-file notices remain authoritative.
 
 <!-- AURORA_BRANDING_THIRD_PARTY_V9_20260821 -->

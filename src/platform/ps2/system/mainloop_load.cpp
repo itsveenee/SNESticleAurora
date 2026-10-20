@@ -6193,9 +6193,14 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
     if (pSystem == _pNes && !_pNes->IsRomReady())
     {
         printf("[QuickNES] ROM rejected; aborting launch before mainloop\n");
+        /* Preserve the error before _MainLoopUnloadRom() resets the bridge. */
+        const int missingMapper = QuicknesBridge_LastUnsupportedMapper();
         _MainLoopUnloadRom();
-        MainLoopModalPrintf(60 * 3,
-            "ERROR: QuickNES cannot run this NES image (format/mapper/FDS)");
+        if (missingMapper >= 0)
+            MainLoopModalPrintf(60 * 3, "Missing INES mapper %d", missingMapper);
+        else
+            MainLoopModalPrintf(60 * 3,
+                "ERROR: QuickNES cannot run this NES image (format/FDS)");
         return FALSE;
     }
 

@@ -22,6 +22,7 @@ enum { QUICKNES_STATE_CAPACITY = 64 * 1024 };
 bool QuicknesBridge_Init(void);
 void QuicknesBridge_Shutdown(void);
 bool QuicknesBridge_LoadGame(const void *pData, size_t nBytes, const char *pName);
+int QuicknesBridge_LastUnsupportedMapper(void); /* negative = other error */
 void QuicknesBridge_UnloadGame(void);
 void QuicknesBridge_Reset(void);
 void QuicknesBridge_SoftReset(void);

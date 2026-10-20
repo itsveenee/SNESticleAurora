@@ -1366,7 +1366,7 @@ void MainLoopRender()
 			const Int32 textW = FontGetStrWidth(_MainLoop_ModalStr);
 			const Int32 textX = 128 - textW / 2;
 			const Bool bErrorModal =
-				!strncmp(_MainLoop_ModalStr, "ERROR:", 6) ? TRUE : FALSE;
+				(!strncmp(_MainLoop_ModalStr, "ERROR:", 6) || !strncmp(_MainLoop_ModalStr, "Missing INES mapper", 19)) ? TRUE : FALSE;
 
 			/* AURORA_TSUKURU_8M_GBA_LOAD_AUDIO_REDERR_V1_20260913_RED_ERRORS
 			 * Loader failures can leave the previous framebuffer white, black or

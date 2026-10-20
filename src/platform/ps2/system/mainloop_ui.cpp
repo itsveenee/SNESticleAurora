@@ -1,5 +1,7 @@
 #include <stdio.h>
 #include <stdarg.h>
+#include <string.h>
+#include <delaythread.h>
 
 #include "types.h"
 #include "console.h"
@@ -19,6 +21,24 @@ void MainLoopModalPrintf(Int32 Time, const Char *pFormat, ...)
 
 	_MainLoop_ModalCount = Time;
 
+
+
+	/* AURORA_QN_MISSING_WALLCLOCK_2S_V1
+	 * This blocking loader modal historically did Time consecutive redraws
+	 * without any real-time pacing. On a fast loop, 180 frames could pass
+	 * before a human could read the message. Draw BOTH GS framebuffers
+	 * and keep the result displayed for two real seconds. Only this
+	 * QuickNES diagnostic uses this path. */
+	if (!strncmp(_MainLoop_ModalStr, "Missing INES mapper", 19) ||
+	    !strncmp(_MainLoop_ModalStr, "ERROR: Missing INES mapper", 26))
+	{
+		_MainLoop_ModalCount = 3;
+		MainLoopRender();
+		MainLoopRender();
+		DelayThread(2000000); /* PS2SDK: microseconds */
+		_MainLoop_ModalCount = 0;
+		return;
+	}
 	// render frame to display text
 	while (Time > 0)
 	{
@@ -141,7 +161,7 @@ void _UICycle(int dir)
     {
         idx = (idx + dir + 6) % 6;
         CScreen *scr = _UIByIdx(idx);
-        if (scr)
+        if (scr && idx != 2 && idx != 3)
         {
             if (scr == (CScreen*)_MainLoop_pStateScreen)
             {
@@ -192,7 +212,7 @@ void _MainLoopCycleScreen(int dir)
     {
         idx = (idx + dir + 6) % 6;
         CScreen *scr = _MainLoopGetScreenByIndex(idx);
-        if (scr)
+        if (scr && idx != 2 && idx != 3)
         {
             if (scr == (CScreen*)_MainLoop_pStateScreen)
             {

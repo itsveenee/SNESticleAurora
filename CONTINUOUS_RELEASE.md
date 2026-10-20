@@ -30,6 +30,7 @@ The original source-file notices and each component's own license remain authori
 | Beetle PCE Fast | `LICENSES/Beetle-PCE-Fast-GPL-2.0.txt` — GNU GPLv2 |
 | Gambatte | `LICENSES/Gambatte-GPL-2.0.txt` — GNU GPLv2 |
 | gpSP | `LICENSES/gpSP-GPL-2.0.txt` — gpSP source/COPYING describes GNU GPLv2-or-later |
+| ZSNES DSP-3 HLE | `LICENSES/ZSNES-DSP3-GPL-2.0.txt` — GNU GPLv2 |
 
 **Important:** PicoDrive's `COPYING` contains additional/non-commercial redistribution conditions. Because Aurora links PicoDrive statically into the combined ELF, do not redistribute a PicoDrive-enabled combined binary unless you have confirmed separate permission or another lawful basis. See [`THIRD_PARTY.md`](THIRD_PARTY.md) for the repository's current component-by-component notices.
 

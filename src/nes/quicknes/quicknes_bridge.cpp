@@ -949,9 +949,14 @@ void QuicknesBridge_Shutdown(void)
     s_Initialized = false;
 }
 
+/* AURORA_QN_MISSING_MAPPER_DIAGNOSTIC_V1 */
+static int s_QuicknesMissingMapper = -1;
+int QuicknesBridge_LastUnsupportedMapper(void) { return s_QuicknesMissingMapper; }
+
 bool QuicknesBridge_LoadGame(const void *pData, size_t nBytes, const char *pName)
 {
     (void)pName;
+    s_QuicknesMissingMapper = -1;
 
     if (!pData || nBytes < 16 || !QuicknesBridge_Init())
         return false;
@@ -966,6 +971,8 @@ bool QuicknesBridge_LoadGame(const void *pData, size_t nBytes, const char *pName
     const char *err = s_pEmu->load_ines(reader);
     if (err)
     {
+        if (!strcmp(err, "Unsupported mapper"))
+            s_QuicknesMissingMapper = qNesMapperCode(pData, nBytes, NULL);
         printf("[QuickNES/native] load_ines failed: %s\n", err);
         s_pEmu->close();
         s_GameLoaded = false;

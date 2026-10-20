@@ -86,3 +86,25 @@ __pycache__/
 # Tooling caches, not source code
 .cache/
 # <<< AURORA_SUBMODULE_SYNC_GITIGNORE_V1 <<<
+
+# >>> AURORA_LICENSES_REPO_HYGIENE_V1_20261015 >>>
+# New local patch originals/backups should not be committed.
+# Git already tracking older copies will keep tracking them.
+.aurora_*_originals/
+.aurora_*_backup/
+.aurora_*_backups/
+.aurora_*_snapshots/
+
+# Additional scratch rebuilds, patch snapshots and machine-local workspaces
+.snesticle_rebuild*/
+*.pre-*
+*.before_*
+.venv/
+venv/
+.coverage
+htmlcov/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+# <<< AURORA_LICENSES_REPO_HYGIENE_V1_20261015 <<<

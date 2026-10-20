@@ -55,6 +55,17 @@ The NES integration uses the pinned QuickNES/libretro fork at `src/third_party/q
 
 Its bundled notices remain authoritative; the top-level GPLv2 mirror is `LICENSES/QuickNES-GPL-2.0.txt`.
 
+### FCEUmm (Famicom Disk System)
+
+The experimental FDS-only integration uses `src/third_party/fceumm-fds`,
+from the FCEU/FCEUX/FCEUmm lineage and libretro contributors.
+
+- **Aurora integration fork:** `itsveenee/Fceumm-PS2`
+- **Aurora PS2 integration:** Vinícius Nunes (`@itsveenee`)
+
+The original source notices and `Copying` remain authoritative; the mirror
+is `LICENSES/FCEUmm-GPL-2.0.txt`.
+
 ### PicoDrive
 
 The experimental Mega Drive / Genesis, Master System / Mark III, Game Gear, 32X and Sega CD integration uses the pinned PicoDrive submodule at `src/third_party/picodrive`.
@@ -94,3 +105,10 @@ submodule and its PS2 dynarec target.
 
 The mirrored license is `LICENSES/gpSP-GPL-2.0.txt`; original source notices in
 the submodule remain authoritative.
+
+### ZSNES DSP-3 and DSP-4 HLE
+
+DSP-3/DSP-4 coprocessor HLE originates from the ZSNES project and its
+contributors. Aurora retains the relevant copyright/source notices. The
+pinned GPLv2 text for DSP-3 is mirrored as `LICENSES/ZSNES-DSP3-GPL-2.0.txt`;
+DSP-4 attribution is also recorded in the root `LICENSE`.

@@ -63,21 +63,31 @@ Those portions retain the copyright of their original authors:
 
 
 ----------------------------------------------------------------------------
-AURORA_THIRD_PARTY_CORE_NOTICE_V6_20260824
+AURORA_THIRD_PARTY_CORE_NOTICE_V7_20261015
 THIRD-PARTY EMULATOR CORE NOTICE
 
-The project integrates separately copyrighted emulator cores whose own
-license files and source notices remain controlling for their code:
+The project integrates separately copyrighted emulator cores and HLE code.
+Their own source-file copyright notices and original licenses remain
+controlling. The following project-local copies are reference mirrors:
 
   QuickNES             LICENSES/QuickNES-GPL-2.0.txt
+  FCEUmm/FDS           LICENSES/FCEUmm-GPL-2.0.txt
   PicoDrive            LICENSES/PicoDrive-COPYING.txt
   Beetle PCE Fast      LICENSES/Beetle-PCE-Fast-GPL-2.0.txt
   Gambatte             LICENSES/Gambatte-GPL-2.0.txt
+  gpSP / gameplaySP    LICENSES/gpSP-GPL-2.0.txt
+  ZSNES DSP-3 HLE      LICENSES/ZSNES-DSP3-GPL-2.0.txt
 
-Those files do not replace the authoritative notices inside each pinned
-submodule. PicoDrive terms are not identical to this project's
-GPLv2 terms; review all applicable conditions before distributing a combined
-binary. Sega CD and PC Engine CD firmware is not included in this project.
+The original gameplaySP/gpSP author is Exophase; later work includes gpSP
+and libretro contributors. For complete component provenance and the mirror
+index, see CREDITS.md, THIRD_PARTY.md and LICENSES/README.md.
+
+PicoDrive's COPYING contains additional/non-commercial restrictions which
+may be incompatible with distribution of a statically linked GPLv2-only
+combined binary. Do not distribute a PicoDrive-enabled combined binary
+without separately checking applicable rights. Do not remove or replace the
+original license notices in any third-party component. Nintendo/Sega/NEC
+firmware and copyrighted game images are not supplied.
 ----------------------------------------------------------------------------
 
 
