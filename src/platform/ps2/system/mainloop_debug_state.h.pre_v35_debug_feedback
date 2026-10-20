@@ -1,9 +1,0 @@
-#pragma once
-
-#include "types.h"
-
-#if AURORA_SNES_DEBUG_STATE
-/* AURORA_SNES_DEBUG_STATE_V34_FINAL_20261002
- * Manual, menu-only capture. No per-frame hooks or normal-state format changes. */
-Bool MainLoopSaveSnesDebugState(void);
-#endif
