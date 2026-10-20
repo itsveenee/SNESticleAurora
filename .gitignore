@@ -1,110 +1,130 @@
-# Build output
-build/
-refs/
-logs/
-.snesticle_rebuild/
-.snesticle_rebuild_v2/
+# SNESticle Aurora — .gitignore
+# Revisado a partir da arvore da branch main (20/10/2026).
+# Ignora artefatos locais sem ocultar fontes, assets, licencas,
+# scripts de tools/ e os modulos IRX precompilados de irx/.
 
-# Compiled/generated files
+# -----------------------------------------------------------------------------
+# 1. Arvore de compilacao, logs e areas de trabalho locais
+# -----------------------------------------------------------------------------
+/build/
+/refs/
+/logs/
+/.snesticle_rebuild*/
+/.ps2dev-env
+
+# Arquivos intermediarios e produtos de compilacao PS2 / GCC
 *.o
-*.elf
-*.log
-*.tar.gz
-*.bak*
-
-# Local Python scripts
-*.py
-
-# Local helper scripts
-backup.sh
-copy.sh
-
-# Local PS2DEV environment
-.ps2dev-env
-
-# Editor/temp files
-.#*
-*~
-
-src/platform/ps2/iop/aurora_ps2mouse/*.elf
-src/platform/ps2/iop/aurora_ps2mouse/*.irx
-src/platform/ps2/iop/aurora_ps2mouse/obj/
-
-# Required PCE build tool
-!tools/namespace_pce_archive.py
-# AURORA_CONTINUOUS_PCE_PREPARE_TRACKED_V21_20260928
-!tools/prepare_beetle_pce_fast_sources.py
-!tools/namespace_fceumm_fds_archive.py
-!tools/prepare_fceumm_fds_sources.py
-
-!tools/prepare_gambatte_sgb_sources.py
-
-# Required gpSP build tools
-!tools/namespace_gpsp_archive.py
-!tools/prepare_gpsp_aurora_sources.py
-
-!tools/strip_gambatte_sgb_stage.py
-
-# >>> AURORA_SUBMODULE_SYNC_GITIGNORE_V1 >>>
-# Compiled dependency files, static libraries, and linker output
+*.obj
 *.d
 *.a
+*.elf
 *.symbols.map
 /SNESticle.map
+*.log
 
-# Python caches. Source helpers in tools/ are NOT temporary build files.
+# Compilacao do driver PS2 Mouse: nao confundir com os IRX de /irx/.
+/src/platform/ps2/iop/aurora_ps2mouse/obj/
+/src/platform/ps2/iop/aurora_ps2mouse/*.irx
+
+# Diagnosticos e perfis gerados localmente
+*.gcda
+*.gcno
+*.gcov
+*.profraw
+*.profdata
+*.dmp
+/gmon.out
+/perf.data*
+
+# -----------------------------------------------------------------------------
+# 2. Scripts de uso pessoal e temporarios de patches
+# -----------------------------------------------------------------------------
+# Os scripts Python versionados estao em tools/; somente scripts avulsos
+# na RAIZ sao considerados locais. Nao ignorar Python genericamente:
+# futuras ferramentas em tools/ e novas fontes continuam visiveis ao Git.
+/*.py
+/backup.sh
+/copy.sh
+
+# Copias feitas por patches (incluindo sufixos de versao vN)
+*.bak*
+*.pre_*
+*.pre-*
+*.before_*
+*.before-*
+*.orig
+*.rej
+
+# Backups/instantaneos de patches gerados na raiz
+/.aurora_*_originals/
+/.aurora_*_backup/
+/.aurora_*_backups/
+/.aurora_*_snapshots/
+
+# -----------------------------------------------------------------------------
+# 3. Python: bytecode, ambientes virtuais e ferramentas de analise
+# -----------------------------------------------------------------------------
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-!tools/*.py
+.tox/
+.nox/
+.venv/
+venv/
+.coverage
+.coverage.*
+htmlcov/
 
-# Local experiments, snapshots, and automated patch backups
-*.pre_*
-*.before-*
-*.orig
-*.rej
+# -----------------------------------------------------------------------------
+# 4. Pacotes locais e dados de usuario (na raiz do repositorio)
+# -----------------------------------------------------------------------------
+/*.zip
+/*.7z
+/*.tar
+/*.tar.gz
+/*.tgz
+/*.iso
+
+# Configuracoes locais. Manter SMB.CNF.example versionavel.
+/SMB.CNF
+.env
+.env.*
+!.env.example
+.cache/
+
+# Firmware, jogos e dados em tempo de execucao: jamais fontes do Aurora
+/ROMS/
+/roms/
+/BIOS/
+/SYSTEM/
+/SNESticle/
+
+# Saves do EverDrive: a pasta sera apagada do repositorio.
+# Impede que saves pessoais voltem a ser adicionados depois.
+/ED64P/SDSAVE/
+
+# -----------------------------------------------------------------------------
+# 5. Residuos de editores e sistema operacional
+# -----------------------------------------------------------------------------
 *.swp
 *.swo
 *.tmp
 *.temp
-*.profraw
-*.profdata
-*.dmp
-
-# Locally generated distribution archives at repository root
-/*.zip
-/*.7z
-/*.tar
-
-# Credentials and local machine configuration
-.env
-.env.*
-!.env.example
-
-# Tooling caches, not source code
-.cache/
-# <<< AURORA_SUBMODULE_SYNC_GITIGNORE_V1 <<<
-
-# >>> AURORA_LICENSES_REPO_HYGIENE_V1_20261015 >>>
-# New local patch originals/backups should not be committed.
-# Git already tracking older copies will keep tracking them.
-.aurora_*_originals/
-.aurora_*_backup/
-.aurora_*_backups/
-.aurora_*_snapshots/
-
-# Additional scratch rebuilds, patch snapshots and machine-local workspaces
-.snesticle_rebuild*/
-*.pre-*
-*.before_*
-.venv/
-venv/
-.coverage
-htmlcov/
+*~
+.#*
 .idea/
 .vscode/
 .DS_Store
 Thumbs.db
-# <<< AURORA_LICENSES_REPO_HYGIENE_V1_20261015 <<<
+Desktop.ini
+
+# -----------------------------------------------------------------------------
+# Manter versionados (nao ignorar):
+#   Makefile, .gitmodules, .github/, LICENSE, LICENSES/, *.md,
+#   assets/, docs/, src/, tools/*.py, tools/Makefile.*, irx/*.irx.
+#   Arquivos *.lst em src/ podem ser insumos necessarios ao build.
+#   Os 6 cores externos sao submodulos Git em src/third_party/.
+# Nao ignorar *.irx, *.bin, *.lst ou *.py globalmente.
+# -----------------------------------------------------------------------------

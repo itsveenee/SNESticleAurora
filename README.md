@@ -47,7 +47,7 @@ If the repository was cloned without `--recurse-submodules`, run
 ## What's new?
 
 #### Emulation:
-* Support added for more NES mappers (besides what QuickNES already supported): 12, 13, 14, 15, 16, 17, 18, 27, 29, 36, 38, 41, 42, 43, 47, 48, 50, 64, 65, 66, 67, 68, 69, 70, 71, 72, 74, 77, 78, 79, 80, 81, 82, 83, 90, 92, 93, 94, 95, 96, 97, 99, 101, 103, 104, 105, 107, 108, 112, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 132, 133, 137, 138, 139, 141, 142, 143, 144, 145, 146, 147, 148, 149, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 166, 167, 173, 176, 177, 178, 183, 185, 187, 188, 189, 192, 194, 195, 196, 197, 208, 210, 215, 216, 223, 224, 225, 227, 228, 238, 242, 243, 245, 258, 263, 268, 302, 303, 304, 305, 306, 309, 312, 346, 415, 525, 538, 549, 551, 552, 553, 554, and 557. Every licensed NES and Famicom game and most of the bootleg and unlicensed games will boot now.
+* QuickNES now supports 180 NES mappers, 87 of which were added by this project. Every official NES and Famicom game + most of unlicensed and bootleg games will work.
 * Famicom Disk System (firmware not included), press L2+TRIANGLE to change the disk side.
 * Famiclone audio option for NES games (swap duty cycles, a known hardware bug in some Famiclones you can intentionally turn on).
 * Changed SRAM and RAM initialization for both NES and SNES. This will fix all the very few games that rely on specific initial values to work properly.
