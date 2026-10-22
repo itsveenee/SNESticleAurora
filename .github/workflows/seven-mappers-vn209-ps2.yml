@@ -1,0 +1,29 @@
+name: SNESticleAurora vN209 - All Seven Mappers Soft Reset Integrity
+on:
+  push:
+    branches: ['experiment/seven-mappers-vn209-jy-softreset']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Verify source pins and 35/209 reset smoke generator
+        run: |
+          test "$(git -C src/third_party/quicknes rev-parse HEAD)" = "ab995b13ed8d0c935b0c263ed4253c062592a05a"
+          test -f src/third_party/quicknes/tests/experimental_vn209/build_jy_softreset_roms.py
+          test -f src/third_party/quicknes/tests/experimental_vn208/build_558_mirrors.py
+      - name: Build complete SNESticleAurora for PS2
+        run: make -j8 AUTO_INSTALL=yes LTO_LINK_JOBS=2
+      - name: Check ELF was linked
+        run: find . -type f -name 'SNESticle*.elf' -size +64k | grep -q .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SNESticleAurora-vN209-SEVEN-JY-SOFTRESET-PS2-EXPERIMENTAL
+          path: '**/SNESticle*.elf'
+          if-no-files-found: error
