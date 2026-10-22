@@ -21,7 +21,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          EXPECTED="e78e52a801b1e8ae950d5362826b9daf5fe59a62"
+          EXPECTED="b56ca2dee5f7dd9f6475e321e416bb3e3f9e6025"
           ACTUAL="$(git -C src/third_party/quicknes rev-parse HEAD)"
           test "$ACTUAL" = "$EXPECTED"
           test "$(git ls-tree HEAD src/third_party/quicknes | awk '{print $3}')" = "$EXPECTED"
@@ -43,6 +43,6 @@ jobs:
       - name: Save test ELF as build evidence
         uses: actions/upload-artifact@v4
         with:
-          name: SNESticleAurora-vN187-SEVEN-MMC5-FDS-PS2-EXPERIMENTAL
+          name: SNESticleAurora-vN190-SEVEN-MMC5-FDS-PS2-EXPERIMENTAL
           path: '**/SNESticle*.elf'
           if-no-files-found: error
