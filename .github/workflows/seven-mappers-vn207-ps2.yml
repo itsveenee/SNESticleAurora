@@ -1,0 +1,30 @@
+name: Aurora vN207 - Seven Mappers Register Accuracy (PS2)
+on:
+  push:
+    branches: ['experiment/seven-mappers-vn207-register-accuracy']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  ps2-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Verify pinned QuickNES seven mapper model
+        run: |
+          test "$(git -C src/third_party/quicknes rev-parse HEAD)" = "6660372acba13add370dde4b8c928d6e246720de"
+          for x in aurora_vn106_mapper219.hpp aurora_vn107_mapper249.hpp aurora_vn71_mapper272_CANDIDATE.hpp aurora_vn66_mapper540_quicknes_CANDIDATE.hpp aurora_vn71_mapper558_CANDIDATE.hpp aurora_vN118_mapper35_209_FAST_CANDIDATE.hpp; do
+            test -f "src/third_party/quicknes/nes_emu/mappers/$x"
+          done
+      - name: Compile full SNESticleAurora/PS2
+        run: make -j8 AUTO_INSTALL=yes LTO_LINK_JOBS=2
+      - name: Validate output ELF is nonempty
+        run: find . -type f -name 'SNESticle*.elf' -size +64k | grep -q .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SNESticleAurora-vN207-SEVEN-HW-REGISTERS-PS2-EXPERIMENTAL
+          path: '**/SNESticle*.elf'
+          if-no-files-found: error
