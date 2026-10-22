@@ -1,0 +1,29 @@
+name: SNESticleAurora vN208 - All Seven Mappers and 558 Register Mirrors
+on:
+  push:
+    branches: ['experiment/seven-mappers-vn208-558-mirrors']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Validate precise QuickNES gitlink
+        run: |
+          test "$(git -C src/third_party/quicknes rev-parse HEAD)" = "4340900c8d98eca4715c341eeab16a346838a7ad"
+          test -f src/third_party/quicknes/tests/experimental_vn208/build_558_mirrors.py
+          test -f src/third_party/quicknes/tests/experimental_vn208/test_558_mirrors.py
+      - name: Rebuild entire SNESticleAurora PS2 program
+        run: make -j8 AUTO_INSTALL=yes LTO_LINK_JOBS=2
+      - name: Confirm nonempty PS2 executable
+        run: find . -type f -name 'SNESticle*.elf' -size +64k | grep -q .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SNESticleAurora-vN208-SEVEN-558-MIRRORS-PS2-EXPERIMENTAL
+          path: '**/SNESticle*.elf'
+          if-no-files-found: error
