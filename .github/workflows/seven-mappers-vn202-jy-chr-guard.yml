@@ -1,0 +1,55 @@
+name: vN202 - Seven Mappers CHR-RAM Protection (Experimental)
+
+on:
+  push:
+    branches:
+      - 'experiment/seven-mappers-vn202-jy-chr-guard'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-quicknes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Verify pinned QuickNES gitlink
+        run: |
+          test "$(git -C src/third_party/quicknes rev-parse HEAD)" = "57e18e9c3d3ede5001a4a8ea72fa2cff308ef901"
+      - name: Build QuickNES libretro for Linux
+        run: |
+          make -C src/third_party/quicknes clean
+          make -C src/third_party/quicknes -j4
+      - name: Execute generated JY CHR protection and nametable diagnostics
+        run: |
+          python3 src/third_party/quicknes/tests/experimental_vn202/test_jy_chr_guard.py src/third_party/quicknes/quicknes_libretro.so
+
+  ps2-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Verify pinned QuickNES and seven mapper registrations
+        run: |
+          test "$(git -C src/third_party/quicknes rev-parse HEAD)" = "57e18e9c3d3ede5001a4a8ea72fa2cff308ef901"
+          for mapper in 219 249; do
+            test -f "src/third_party/quicknes/nes_emu/mappers/aurora_vn$(test "$mapper" = 219 && echo 106 || echo 107)_mapper$mapper.hpp"
+          done
+          test -f src/third_party/quicknes/nes_emu/mappers/aurora_vN118_mapper35_209_FAST_CANDIDATE.hpp
+          test -f src/third_party/quicknes/nes_emu/mappers/aurora_vn71_mapper272_CANDIDATE.hpp
+          test -f src/third_party/quicknes/nes_emu/mappers/aurora_vn66_mapper540_quicknes_CANDIDATE.hpp
+          test -f src/third_party/quicknes/nes_emu/mappers/aurora_vn71_mapper558_CANDIDATE.hpp
+      - name: Build complete Aurora for PS2
+        run: make -j8 AUTO_INSTALL=yes LTO_LINK_JOBS=2
+      - name: Verify generated PS2 ELF
+        run: find . -type f -name 'SNESticle*.elf' -size +64k | grep -q .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SNESticleAurora-vN202-SEVEN-CHR-PROTECT-PS2-EXPERIMENTAL
+          path: '**/SNESticle*.elf'
+          if-no-files-found: error
