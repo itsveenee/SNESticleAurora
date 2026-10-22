@@ -1,0 +1,48 @@
+name: Experimental Aurora all seven NES mappers Linux core and PS2 ELF
+
+on:
+  push:
+    branches:
+      - 'experiment/seven-mappers-vn172-ps2'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Verify the experimental QuickNES gitlink
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED="a8c75f7a31f66f634b5fc61aacdc706e9db69a68"
+          ACTUAL="$(git -C src/third_party/quicknes rev-parse HEAD)"
+          test "$ACTUAL" = "$EXPECTED"
+          test "$(git ls-tree HEAD src/third_party/quicknes | awk '{print $3}')" = "$EXPECTED"
+          test -f src/third_party/quicknes/nes_emu/mappers/aurora_vn106_mapper219.hpp
+          test -f src/third_party/quicknes/nes_emu/mappers/aurora_vn107_mapper249.hpp
+          test -f src/third_party/quicknes/nes_emu/mappers/aurora_vN118_mapper35_209_FAST_CANDIDATE.hpp
+          test -f src/third_party/quicknes/nes_emu/mappers/aurora_vn71_mapper272_CANDIDATE.hpp
+          test -f src/third_party/quicknes/nes_emu/mappers/aurora_vn66_mapper540_quicknes_CANDIDATE.hpp
+          test -f src/third_party/quicknes/nes_emu/mappers/aurora_vn71_mapper558_CANDIDATE.hpp
+          echo "Experimental QuickNES pinned to $ACTUAL"
+      - name: Build complete SNESticleAurora for PS2
+        run: make -j8 AUTO_INSTALL=yes LTO_LINK_JOBS=2
+      - name: Locate produced ELF
+        shell: bash
+        run: |
+          set -euo pipefail
+          find . -type f -name 'SNESticle*.elf' -printf '%p %s bytes\n'
+          find . -type f -name 'SNESticle*.elf' -size +64k | grep -q .
+      - name: Save test ELF as build evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: SNESticleAurora-vN172-SEVEN-QuickNES-Mappers-PS2-EXPERIMENTAL
+          path: '**/SNESticle*.elf'
+          if-no-files-found: error
