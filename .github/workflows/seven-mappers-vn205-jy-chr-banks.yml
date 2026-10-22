@@ -1,0 +1,46 @@
+name: vN205 Seven Mapper JY CHR RAM Banking (Experimental)
+on:
+  push:
+    branches: ['experiment/seven-mappers-vn205-jy-chr-bank-write']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Assert pinned mapper implementation
+        run: test "$(git -C src/third_party/quicknes rev-parse HEAD)" = "25bfb0f4fdec977fd8e14e7ca1061f27c1f06ba0"
+      - name: Recompile native QuickNES from sources
+        run: |
+          make -C src/third_party/quicknes clean
+          make -C src/third_party/quicknes -j4
+      - name: Real CPU/PPU CHR banking, protection and NT integrity
+        run: |
+          python3 src/third_party/quicknes/tests/experimental_vn205/test_jy_chr_guard.py src/third_party/quicknes/quicknes_libretro.so
+      - name: Legacy and negative JYASIC regression matrix
+        run: |
+          cd src/third_party/quicknes
+          python3 tests/experimental_vn203/build_jy_chr_protect_roms.py
+          python3 tests/experimental_vn203/test_jy_chr_protect.py "$PWD/quicknes_libretro.so" --strict
+  ps2-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Assert pinned mapper implementation
+        run: test "$(git -C src/third_party/quicknes rev-parse HEAD)" = "25bfb0f4fdec977fd8e14e7ca1061f27c1f06ba0"
+      - name: Build complete Aurora/PS2
+        run: make -j8 AUTO_INSTALL=yes LTO_LINK_JOBS=2
+      - name: Verify test ELF
+        run: find . -type f -name 'SNESticle*.elf' -size +64k | grep -q .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Aurora-vN205-JY-CHR-BANK-WRITE-PS2-EXPERIMENTAL
+          path: '**/SNESticle*.elf'
+          if-no-files-found: error
