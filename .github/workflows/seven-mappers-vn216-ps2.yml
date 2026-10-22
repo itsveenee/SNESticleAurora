@@ -1,0 +1,29 @@
+name: SNESticleAurora vN216 - Seven Mappers Integrated PS2 ELF
+on:
+  push:
+    branches: ['experiment/seven-mappers-vn216-consolidated']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  ps2:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Verify pinned QuickNES containing seven mappers and EEPROM tests
+        run: |
+          test "$(git -C src/third_party/quicknes rev-parse HEAD)" = "471e6a5723eb94aa09b824716ffd5583f0dbe9a8"
+          test -f src/third_party/quicknes/tests/experimental_vn215/test_558_eeprom_serial.cpp
+          test -f src/third_party/quicknes/tests/experimental_vn213/test_jy_prgram.py
+      - name: Build complete native SNESticleAurora for PS2
+        run: make -j8 AUTO_INSTALL=yes LTO_LINK_JOBS=2
+      - name: Verify generated PS2 ELF
+        run: find . -type f -name 'SNESticle*.elf' -size +64k | grep -q .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SNESticleAurora-vN216-SEVEN-MAPPERS-CONSOLIDATED-PS2-EXPERIMENTAL
+          path: '**/SNESticle*.elf'
+          if-no-files-found: error
