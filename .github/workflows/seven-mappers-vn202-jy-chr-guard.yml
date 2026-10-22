@@ -18,7 +18,7 @@ jobs:
           submodules: recursive
       - name: Verify pinned QuickNES gitlink
         run: |
-          test "$(git -C src/third_party/quicknes rev-parse HEAD)" = "57e18e9c3d3ede5001a4a8ea72fa2cff308ef901"
+          test "$(git -C src/third_party/quicknes rev-parse HEAD)" = "7d43a9dd26c774ff5b63fe3ac97182f6905f557a"
       - name: Build QuickNES libretro for Linux
         run: |
           make -C src/third_party/quicknes clean
@@ -36,7 +36,7 @@ jobs:
           fetch-depth: 0
       - name: Verify pinned QuickNES and seven mapper registrations
         run: |
-          test "$(git -C src/third_party/quicknes rev-parse HEAD)" = "57e18e9c3d3ede5001a4a8ea72fa2cff308ef901"
+          test "$(git -C src/third_party/quicknes rev-parse HEAD)" = "7d43a9dd26c774ff5b63fe3ac97182f6905f557a"
           for mapper in 219 249; do
             test -f "src/third_party/quicknes/nes_emu/mappers/aurora_vn$(test "$mapper" = 219 && echo 106 || echo 107)_mapper$mapper.hpp"
           done
