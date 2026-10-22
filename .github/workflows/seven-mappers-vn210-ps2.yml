@@ -1,0 +1,30 @@
+name: SNESticleAurora vN210 - Seven Mapper IRQ Downclock PS2
+on:
+  push:
+    branches: ['experiment/seven-mappers-vn210-jy-downclock']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  ps2:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Verify fully integrated seven-mapper QuickNES
+        run: |
+          test "$(git -C src/third_party/quicknes rev-parse HEAD)" = "91382b5f801173961c0cb2d86947c7de2189a571"
+          for file in aurora_vn106_mapper219.hpp aurora_vn107_mapper249.hpp aurora_vN118_mapper35_209_FAST_CANDIDATE.hpp aurora_vn71_mapper272_CANDIDATE.hpp aurora_vn66_mapper540_quicknes_CANDIDATE.hpp aurora_vn71_mapper558_CANDIDATE.hpp; do
+            test -f "src/third_party/quicknes/nes_emu/mappers/$file"
+          done
+      - name: Compile complete Aurora including QuickNES for PS2
+        run: make -j8 AUTO_INSTALL=yes LTO_LINK_JOBS=2
+      - name: Verify nonzero executable
+        run: find . -type f -name 'SNESticle*.elf' -size +64k | grep -q .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SNESticleAurora-vN210-SEVEN-JY-IRQ-PS2-EXPERIMENTAL
+          path: '**/SNESticle*.elf'
+          if-no-files-found: error
