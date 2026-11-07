@@ -13,7 +13,7 @@ import sys
 import tarfile
 import tempfile
 
-EXPECTED_HEAD = "9807e82d2138f3a1576b7e0b316f9736ecc20d96"
+EXPECTED_HEAD = "9d9fb1e331e5fc20daa1f5d9f83db03c026a34bb"
 EXPECTED_BLOBS = {
     "Makefile.common": "f10aecd5b405dfcb664ac2fe8da2e08f0ea86252",
     "mednafen/pce_fast/huc6280.c": "535df65b8b6e84ef165ef81b8be2fd568f0d47b4",
