@@ -6,6 +6,7 @@
  * This TU exists only in AURORA_C4_PROFILER=1 builds.
  */
 #include "aurora_c4_profiler.h"
+#include "mainloop_safe_frameskip.h"
 
 #if AURORA_C4_PROFILER
 
@@ -297,6 +298,7 @@ static Uint32 CalibrateClockPair(void)
 /* AURORA_C4_ADD_SMK_TARGET_V8_3_MIX1_1_20261004: SMK joins the existing C4 target gate; schema unchanged. */
 static const char *FamilyName(Uint32 c)
 {
+    c = AuroraRomIdentityCRCForDetection(c);
     switch(c){
     case 0x7A33E836u: case 0x17657DB6u: case 0xC946DCA0u: case 0x3EAA5697u:
     case 0x762AF827u: case 0x50F2D1BCu: case 0x3ADEF543u:
@@ -311,6 +313,7 @@ static const char *FamilyName(Uint32 c)
 }
 static const char *VariantName(Uint32 c)
 {
+    c = AuroraRomIdentityCRCForDetection(c);
     switch(c){
     case 0x7A33E836u:return "Europe EnFrDe";
     case 0x17657DB6u:return "Europe EnFrDe Rev 1";
@@ -340,6 +343,7 @@ static const char *VariantName(Uint32 c)
 }
 static const char *FileKey(Uint32 c)
 {
+    c = AuroraRomIdentityCRCForDetection(c);
     switch(c){
     case 0x7A33E836u:case 0x17657DB6u:case 0xC946DCA0u:case 0x3EAA5697u:
     case 0x762AF827u:case 0x50F2D1BCu:case 0x3ADEF543u:case 0xCAF432AAu:case 0xECA2C2D1u:return "DKC";
@@ -352,6 +356,7 @@ static const char *FileKey(Uint32 c)
 }
 static Bool IsC4CRC(Uint32 c)
 {
+    c = AuroraRomIdentityCRCForDetection(c);
     switch(c){
     case 0x7A33E836u:case 0x17657DB6u:case 0xC946DCA0u:case 0x3EAA5697u:
     case 0x762AF827u:case 0x50F2D1BCu:case 0x3ADEF543u:case 0xCAF432AAu:case 0xECA2C2D1u:

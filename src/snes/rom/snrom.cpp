@@ -5,6 +5,7 @@
 #include "types.h"
 #include "snrom.h"
 #include "snio.h"
+#include "platform/ps2/system/mainloop_safe_frameskip.h"
 #include "dataio.h"
 #include "sndbglog.h"
 
@@ -1601,7 +1602,7 @@ Emu::Rom::LoadErrorE SnesRom::LoadRom(CDataIO *pFileIO, Uint8 *pBuffer, Uint32 n
 				? _SNRomRuntimeCRC32(m_pRomData, m_uRomBytes) : 0;
 
 		m_uRuntimeCRC32 = uRuntimeCRC;
-		SnesTurboFileSelectForCRC(uRuntimeCRC);
+		SnesTurboFileSelectForCRC(AuroraRomIdentityCRCForDetection(uRuntimeCRC));
 
 	}
 
@@ -1616,7 +1617,7 @@ Emu::Rom::LoadErrorE SnesRom::LoadRom(CDataIO *pFileIO, Uint8 *pBuffer, Uint32 n
 	if (m_pRomData && m_uRomBytes == 0x80000u)
 	{
 		const Uint32 uPilotwingsCRC =
-			_SNRomRuntimeCRC32(m_pRomData, m_uRomBytes);
+			AuroraRomIdentityCRCForDetection(_SNRomRuntimeCRC32(m_pRomData, m_uRomBytes));
 		bOriginalDSP1Op28 =
 			(uPilotwingsCRC == 0x266C44EDu) || /* USA */
 			(uPilotwingsCRC == 0x77871727u) || /* Japan */
@@ -1630,7 +1631,7 @@ g_SnesCompatHongKong97SPCBoot = FALSE;
 #if SNES_HK97_SPC_BOOT
 if (m_pRomData && m_uRomBytes == 0x80000u)
 {
-    const Uint32 uHK97CRC = _SNRomHK97CRC32(m_pRomData, m_uRomBytes);
+    const Uint32 uHK97CRC = AuroraRomIdentityCRCForDetection(_SNRomHK97CRC32(m_pRomData, m_uRomBytes));
     g_SnesCompatHongKong97SPCBoot =
         (uHK97CRC == 0x11A6E64Bu) ||
         (uHK97CRC == 0xC6A95816u);
@@ -1645,7 +1646,7 @@ g_SnesCompatSunsetRidersObj128 = FALSE;
 if (m_pRomData && m_uRomBytes == 0x100000u)
 {
     const Uint32 uSunsetRidersCRC =
-        _SNRomRuntimeCRC32(m_pRomData, m_uRomBytes);
+        AuroraRomIdentityCRCForDetection(_SNRomRuntimeCRC32(m_pRomData, m_uRomBytes));
 
     g_SnesCompatSunsetRidersObj128 =
         (uSunsetRidersCRC == 0x52ADA404u) || /* USA */
@@ -1661,7 +1662,7 @@ g_SnesCompatTopGearFastRom = FALSE;
 #if SNES_CRC_ZERO_INIT || SNES_TOP_GEAR_FASTROM_HACK
 if (m_pRomData && m_uRomBytes)
 {
-    const Uint32 uCompatIdentityCRC = _SNRomZeroInitCRC32(m_pRomData, m_uRomBytes);
+    const Uint32 uCompatIdentityCRC = AuroraRomIdentityCRCForDetection(_SNRomZeroInitCRC32(m_pRomData, m_uRomBytes));
 #if SNES_CRC_ZERO_INIT
     g_SnesCompatZeroInit = _SNRomNeedsZeroInit(uCompatIdentityCRC);
 #endif
@@ -1686,7 +1687,7 @@ if (m_pRomData && m_uRomBytes)
 	 */
 	if (m_uRomBytes == 0x100000u && _SNRomIsValidCartInfo(pLoCartInfo))
 	{
-		const Uint32 uCompatCRC = _SNRomCompatCRC32(m_pRomData, m_uRomBytes);
+		const Uint32 uCompatCRC = AuroraRomIdentityCRCForDetection(_SNRomCompatCRC32(m_pRomData, m_uRomBytes));
 
 		const SNRomCompatEntryT *pCompat = NULL;
 

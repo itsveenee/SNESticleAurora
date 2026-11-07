@@ -18,6 +18,7 @@
 #include "rendersurface.h"
 #include "mixbuffer.h"
 #include "snio.h"
+#include "platform/ps2/system/mainloop_safe_frameskip.h"
 
 extern Int32 VideoGetGbcVolume(void);
 
@@ -754,7 +755,7 @@ Bool GambatteSystem::LoadGame(const Uint8 *pData, Uint32 nBytes, Uint32 uCRC,
     g_AuroraGbBootHost = m_p;
     m_p->gb.setBootloaderGetter(&AuroraGbCgbBootloaderGetter);
 
-    if (!m_p->turboFile.Init(uCRC))
+    if (!m_p->turboFile.Init(AuroraRomIdentityCRCForDetection(uCRC)))
     {
         if (g_AuroraGbBootHost == m_p) g_AuroraGbBootHost = NULL;
         m_p->loaded = FALSE;

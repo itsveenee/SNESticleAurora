@@ -31,6 +31,7 @@ static char s_SmdExternalCartPath[1024] = {0}; /* AURORA_SUPER_MAGIC_DRIVE_V1_20
 /* AURORA_PCE_EXPERIMENTAL_V1 */
 #include "pce/beetle/pce_bridge.h"
 #include "mainloop_state.h"
+#include "mainloop_safe_frameskip.h"
 #include "mainloop_ui.h"
 #include "snppurender.h" /* AURORA_LEGACY_PPU_BGOBJ_V23_20261014 */
 #include "uiVideo.h" /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908: SGB BIOS selector */
@@ -41,6 +42,10 @@ static char s_SmdExternalCartPath[1024] = {0}; /* AURORA_SUPER_MAGIC_DRIVE_V1_20
 #include "audmixbuffer.h"
 #include "emumovie.h"
 #include "mainloop_load.h"
+#include "aurora_core_build_config.h" /* AURORA_CORE_FLAGS_FINAL_20261104 */
+#if AURORA_NO_PICODRIVE
+int AuroraCoreFallbackProbeSegaCd(const char *path);
+#endif
 #include "mainloop_menu.h"
 #include "embedded_irx.h"   /* HddMapPath (hdd0:/PART -> pfs0:) */
 /* AURORA_HDD_FULL_STORAGE_SAFE_V2_20261013: used by partition-local BIOS discovery. */
@@ -64,6 +69,9 @@ static Bool _MainLoopEnsureSnesSystem()
 
 static Bool _MainLoopEnsureNesSystem()
 {
+#if AURORA_NO_QUICKNES
+    return FALSE;
+#endif
     if (_pNes) return TRUE;
     _pNes = new NesSystem();
     if (!_pNes) return FALSE;
@@ -73,6 +81,9 @@ static Bool _MainLoopEnsureNesSystem()
 
 static Bool _MainLoopEnsureFdsSystem()
 {
+#if AURORA_NO_FCEUMM
+    return FALSE;
+#endif
     if (_pFds) return TRUE;
     _pFds = new FdsSystem();
     if (!_pFds) return FALSE;
@@ -82,6 +93,9 @@ static Bool _MainLoopEnsureFdsSystem()
 
 static Bool _MainLoopEnsureSegaSystem()
 {
+#if AURORA_NO_PICODRIVE
+    return FALSE;
+#endif
     if (_pSega) return TRUE;
     _pSega = new SegaSystem();
     if (!_pSega) return FALSE;
@@ -91,6 +105,9 @@ static Bool _MainLoopEnsureSegaSystem()
 
 static Bool _MainLoopEnsurePceSystem()
 {
+#if AURORA_NO_PCE
+    return FALSE;
+#endif
     if (_pPce) return TRUE;
     _pPce = new PceSystem();
     if (!_pPce) return FALSE;
@@ -100,6 +117,9 @@ static Bool _MainLoopEnsurePceSystem()
 
 static Bool _MainLoopEnsureGbSystem()
 {
+#if AURORA_NO_GAMBATTE
+    return FALSE;
+#endif
     if (_pGb) return TRUE;
     _pGb = new GambatteSystem();
     if (!_pGb) return FALSE;
@@ -109,6 +129,9 @@ static Bool _MainLoopEnsureGbSystem()
 
 static Bool _MainLoopEnsureGbaSystem()
 {
+#if AURORA_NO_GPSP
+    return FALSE;
+#endif
     if (_pGba) return TRUE;
     _pGba = new GpSPSystem();
     if (!_pGba) return FALSE;
@@ -2069,6 +2092,7 @@ _MainLoopSwcCartSRAMDetach();
     _bStateSaved = FALSE;
     _pSystem = NULL;
     _RomPath[0] = 0;
+    AuroraRomIdentitySetNoIntroName(0u, NULL);
     MainLoopStateOnRomChanged();
     AuroraSnesLegacyCommitOnRomLoad(); /* next ROM only */
 
@@ -2589,7 +2613,13 @@ static Bool _MainLoopExecuteDisc(const char *pMappedPath,
     if (_MainLoopLooksLikeCdrdaoToc(pMappedPath))
         eDisc = 0;
     else
+    {
+#if AURORA_NO_PICODRIVE
+        eDisc = AuroraCoreFallbackProbeSegaCd(pMappedPath);
+#else
         eDisc = PicoDriveBridge_ProbeSegaCd(pMappedPath);
+#endif
+    }
 
     if (eDisc < 0)
     {
@@ -5372,6 +5402,41 @@ static Bool _MainLoopExecuteGbaZipMemory(const char *pZipPath,
 }
 
 
+/* AURORA_CORE_FLAGS_FINAL_20261104: preflight before unloading active ROM. */
+static Bool _MainLoopCoreNotCompiled(PathExtTypeE eType)
+{
+    switch (eType)
+    {
+#if AURORA_NO_QUICKNES
+        case MAINLOOP_ENTRYTYPE_NESROM: return TRUE;
+#endif
+#if AURORA_NO_FCEUMM
+        case MAINLOOP_ENTRYTYPE_NESFDSDISK:
+        case MAINLOOP_ENTRYTYPE_NESFDSBIOS: return TRUE;
+#endif
+#if AURORA_NO_PICODRIVE
+        case MAINLOOP_ENTRYTYPE_SEGAROM: return TRUE;
+#endif
+#if AURORA_NO_PCE
+        case MAINLOOP_ENTRYTYPE_PCEROM: return TRUE;
+#endif
+#if AURORA_NO_GAMBATTE
+        case MAINLOOP_ENTRYTYPE_GBROM: return TRUE;
+#endif
+#if AURORA_NO_GPSP
+        case MAINLOOP_ENTRYTYPE_GBAROM: return TRUE;
+#endif
+        default: return FALSE;
+    }
+}
+
+static Bool _MainLoopCorePreflight(PathExtTypeE type)
+{
+    if (!_MainLoopCoreNotCompiled(type)) return TRUE;
+    MainLoopModalPrintf(60 * 4, "Core not available in this build");
+    return FALSE;
+}
+
 Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
 {
     PathExtTypeE eType, eSourceType;
@@ -5405,6 +5470,65 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
 
     if (!PathExtResolve(FileName, &eType, TRUE))
         return FALSE;
+
+
+    /* AURORA_CORE_FLAGS_FINAL_20261104: no teardown for disabled cores. */
+    if (eType == MAINLOOP_ENTRYTYPE_ZIP)
+    {
+        unsigned int zipIndex = 0;
+        char member[512];
+        PathExtTypeE memberType;
+        Int32 bytes = MinizProbeZipFirstMatchInfo(
+            pFileName, &zipIndex, member, (int)sizeof(member),
+            _MainLoopZipDynamicEntryFilter);
+        if (bytes > 0 && PathExtResolve(member, &memberType, TRUE) &&
+            !_MainLoopCorePreflight(memberType))
+            return FALSE;
+    }
+    else if (eType == MAINLOOP_ENTRYTYPE_GZ)
+    {
+        char inner[1024];
+        PathExtTypeE innerType;
+        size_t len;
+        snprintf(inner, sizeof(inner), "%s", FileName);
+        len = strlen(inner);
+        if (len > 3 && !strcasecmp(inner + len - 3, ".gz"))
+        {
+            inner[len - 3] = 0;
+            if (PathExtResolve(inner, &innerType, TRUE) &&
+                !_MainLoopCorePreflight(innerType))
+                return FALSE;
+        }
+    }
+    else if (!_MainLoopCorePreflight(eType))
+        return FALSE;
+
+#if AURORA_NO_PICODRIVE && AURORA_NO_PCE
+    if (eType == MAINLOOP_ENTRYTYPE_CDIMAGE)
+    {
+        MainLoopModalPrintf(60 * 4, "Core not available in this build");
+        return FALSE;
+    }
+#endif
+    if (eType == MAINLOOP_ENTRYTYPE_CDIMAGE)
+    {
+        int kind;
+        if (_MainLoopLooksLikeCdrdaoToc(pFileName)) kind = 0;
+        else
+        {
+#if AURORA_NO_PICODRIVE
+            kind = AuroraCoreFallbackProbeSegaCd(pFileName);
+#else
+            kind = PicoDriveBridge_ProbeSegaCd(pFileName);
+#endif
+        }
+        if ((kind > 0 && AURORA_NO_PICODRIVE) ||
+            (kind == 0 && AURORA_NO_PCE))
+        {
+            MainLoopModalPrintf(60 * 4, "Core not available in this build");
+            return FALSE;
+        }
+    }
 
     if (eType == MAINLOOP_ENTRYTYPE_SNESPALETTE)
         return _MainLoopLoadSnesPalette(pFileName);
@@ -5599,6 +5723,15 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
     {
         nExpectedRomBytes = _MainLoopGetBinarySize(pFileName);
     }
+
+    /* Nome do membro ZIP ou nome original/GZ, antes do parser do core. */
+    AuroraRomIdentitySetNoIntroName(
+        eType == MAINLOOP_ENTRYTYPE_SNESROM ? 1u :
+        eType == MAINLOOP_ENTRYTYPE_NESROM ? 2u :
+        eType == MAINLOOP_ENTRYTYPE_GBROM ? 3u : 0u,
+        FileName);
+
+    if (!_MainLoopCorePreflight(eType)) return FALSE;
 
     /* AURORA_ROM_LIFETIME_RAMONLY_ZIP_V2_20260913: compressed GBA may only enter through RAM. */
     if (eType == MAINLOOP_ENTRYTYPE_GBAROM)

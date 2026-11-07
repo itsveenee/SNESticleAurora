@@ -345,6 +345,23 @@ CXXFLAGS := -G0 -O2 -pipe -fomit-frame-pointer -Wall $(CONSERVATIVE_FLAGS) -Wno-
 	-DSNES_CRC_ZERO_INIT=$(SNES_CRC_ZERO_INIT) \
 	-DSNES_HK97_SPC_BOOT=$(SNES_HK97_SPC_BOOT)
 
+# AURORA_CORE_FLAGS_FINAL_20261104: 0=incluído, 1=retirado do ELF
+NO_QUICKNES ?= 0
+NO_FCEUMM ?= 0
+NO_PICODRIVE ?= 0
+NO_PCE ?= 0
+NO_GAMBATTE ?= 0
+NO_GPSP ?= 0
+$(if $(filter 0 1,$(NO_QUICKNES)),,$(error NO_QUICKNES deve ser 0 ou 1))
+$(if $(filter 0 1,$(NO_FCEUMM)),,$(error NO_FCEUMM deve ser 0 ou 1))
+$(if $(filter 0 1,$(NO_PICODRIVE)),,$(error NO_PICODRIVE deve ser 0 ou 1))
+$(if $(filter 0 1,$(NO_PCE)),,$(error NO_PCE deve ser 0 ou 1))
+$(if $(filter 0 1,$(NO_GAMBATTE)),,$(error NO_GAMBATTE deve ser 0 ou 1))
+$(if $(filter 0 1,$(NO_GPSP)),,$(error NO_GPSP deve ser 0 ou 1))
+AURORA_OPTIONAL_CORE_DEFS := -DAURORA_NO_QUICKNES=$(NO_QUICKNES) -DAURORA_NO_FCEUMM=$(NO_FCEUMM) -DAURORA_NO_PICODRIVE=$(NO_PICODRIVE) -DAURORA_NO_PCE=$(NO_PCE) -DAURORA_NO_GAMBATTE=$(NO_GAMBATTE) -DAURORA_NO_GPSP=$(NO_GPSP)
+CFLAGS   += $(AURORA_OPTIONAL_CORE_DEFS)
+CXXFLAGS += $(AURORA_OPTIONAL_CORE_DEFS)
+
 # AURORA_V24_AUDIO_FRAME_BUDGET_SONICMAX_AUDIT_20261001
 # DSP-1 keeps v22.1's explicit source-level R5900 PLZCW/SinCos optimizations,
 # but does not force -finline-functions across the whole translation unit.
@@ -846,6 +863,32 @@ SRCS := \
 	src/pce/beetle/pce_bridge.cpp \
 	src/pce/beetle/pcesystem_beetle.cpp
 
+# AURORA_CORE_FLAGS_FINAL_20261104: flags remove os objetos reais dos wrappers GB/GBA.
+ifneq ($(filter 1,$(NO_QUICKNES) $(NO_FCEUMM) $(NO_PICODRIVE) $(NO_PCE)),)
+SRCS += src/platform/ps2/system/aurora_disabled_bridges.cpp
+endif
+ifneq ($(filter 1,$(NO_GAMBATTE) $(NO_GPSP)),)
+SRCS += src/platform/ps2/system/aurora_disabled_wrappers.cpp
+endif
+ifeq ($(NO_QUICKNES),1)
+SRCS := $(filter-out src/nes/quicknes/quicknes_bridge.cpp,$(SRCS))
+endif
+ifeq ($(NO_FCEUMM),1)
+SRCS := $(filter-out src/nes/fceumm/fceumm_fds_bridge.cpp,$(SRCS))
+endif
+ifeq ($(NO_PICODRIVE),1)
+SRCS := $(filter-out src/sega/picodrive/picodrive_bridge.cpp,$(SRCS))
+endif
+ifeq ($(NO_PCE),1)
+SRCS := $(filter-out src/pce/beetle/pce_bridge.cpp,$(SRCS))
+endif
+ifeq ($(NO_GAMBATTE),1)
+SRCS := $(filter-out src/gb/system/gambattesystem.cpp,$(SRCS))
+endif
+ifeq ($(NO_GPSP),1)
+SRCS := $(filter-out src/gba/system/gpspsystem.cpp,$(SRCS))
+endif
+
 # Diagnostic implementation objects are absent from a normal build, not just
 # runtime-disabled. Headers collapse their callsites to no-ops at =0.
 ifeq ($(AURORA_RUNTIME_TRACE),1)
@@ -1043,7 +1086,7 @@ FORCE_COMPILE_MODE:
 
 $(BUILD_CONFIG_FILE): FORCE_COMPILE_MODE | $(OBJ_DIR)
 	@mkdir -p "$(BUILD_META_DIR)"; \
-	mode='SNES_DIAGNOSTICS=$(SNES_DIAGNOSTICS) SNES_OBJ_CACHE=$(SNES_OBJ_CACHE) SNES_BG_CACHE=$(SNES_BG_CACHE) SNES_CHR_HFLIP_CACHE=$(SNES_CHR_HFLIP_CACHE) PROFILE=$(PROFILE) DSP4_CAPTURE=$(DSP4_CAPTURE) DSP4_STUB=$(DSP4_STUB) AURORA_SNES_COST_PROFILER=$(AURORA_SNES_COST_PROFILER) AURORA_SMK_PROFILER=$(AURORA_SMK_PROFILER) AURORA_RUNTIME_TRACE=$(AURORA_RUNTIME_TRACE) AURORA_EE_CRASH_DIAG=$(AURORA_EE_CRASH_DIAG) AURORA_EE_WATCHDOG_SELFTEST=$(AURORA_EE_WATCHDOG_SELFTEST) AURORA_SNES_DEBUG_STATE=$(AURORA_SNES_DEBUG_STATE) AURORA_SNES_TRACER=$(AURORA_SNES_TRACER) AURORA_C4_PROFILER=$(AURORA_C4_PROFILER) AURORA_FRONTEND_PROFILER=$(AURORA_FRONTEND_PROFILER) AURORA_SNES_BG2_FASTPATH=$(AURORA_SNES_BG2_FASTPATH)'; \
+	mode='SNES_DIAGNOSTICS=$(SNES_DIAGNOSTICS) SNES_OBJ_CACHE=$(SNES_OBJ_CACHE) SNES_BG_CACHE=$(SNES_BG_CACHE) SNES_CHR_HFLIP_CACHE=$(SNES_CHR_HFLIP_CACHE) PROFILE=$(PROFILE) DSP4_CAPTURE=$(DSP4_CAPTURE) DSP4_STUB=$(DSP4_STUB) AURORA_SNES_COST_PROFILER=$(AURORA_SNES_COST_PROFILER) AURORA_SMK_PROFILER=$(AURORA_SMK_PROFILER) AURORA_RUNTIME_TRACE=$(AURORA_RUNTIME_TRACE) AURORA_EE_CRASH_DIAG=$(AURORA_EE_CRASH_DIAG) AURORA_EE_WATCHDOG_SELFTEST=$(AURORA_EE_WATCHDOG_SELFTEST) AURORA_SNES_DEBUG_STATE=$(AURORA_SNES_DEBUG_STATE) AURORA_SNES_TRACER=$(AURORA_SNES_TRACER) AURORA_C4_PROFILER=$(AURORA_C4_PROFILER) AURORA_FRONTEND_PROFILER=$(AURORA_FRONTEND_PROFILER) AURORA_SNES_BG2_FASTPATH=$(AURORA_SNES_BG2_FASTPATH) NO_QUICKNES=$(NO_QUICKNES) NO_FCEUMM=$(NO_FCEUMM) NO_PICODRIVE=$(NO_PICODRIVE) NO_PCE=$(NO_PCE) NO_GAMBATTE=$(NO_GAMBATTE) NO_GPSP=$(NO_GPSP)'; \
 	if [ ! -f "$@" ] || [ "$$(cat "$@")" != "$$mode" ]; then \
 		printf '%s\n' "$$mode" > "$@"; \
 	fi
@@ -1284,7 +1327,8 @@ $(PICODRIVE_LIB): FORCE_PICODRIVE $(PICODRIVE_CONFIG_STAMP) $(PICODRIVE_PROFILER
 # AURORA_PCE_INCREMENTAL_BUILD_V1_MAKEFIX_20260824
 # AURORA_PCE_MIPS_STAGE_V1_20260928
 # Stage from the exact pinned submodule; never build or patch inside it.
-$(PCE_STAGE_STAMP): $(PCE_STAGE_INPUTS) $(PCE_PREPARE_TOOL) $(PCE_MIPS_SOURCE)
+# AURORA_ADP_VN4_STAGE: reconstruir stage após alterar qualquer input ADP.
+$(PCE_STAGE_STAMP): $(PCE_STAGE_INPUTS) $(PCE_PREPARE_TOOL) $(PCE_MIPS_SOURCE) $(PCE_DIR)/mednafen/cdrom/CDAccess_Image.c $(PCE_DIR)/mednafen/cdrom/aurora_adp.h $(PCE_DIR)/mednafen/cdstream.c $(PCE_DIR)/mednafen/cdstream.h # AURORA_AURADP_VN9_PCE
 	@printf '[ Beetle PCE Fast ] preparing pristine PS2 staging tree\n'
 	@$(PCE_PYTHON) "$(PCE_PREPARE_TOOL)" --source "$(PCE_DIR)" --stage "$(PCE_STAGE_DIR)" --asm "$(PCE_MIPS_SOURCE)" --profiler-header "$(AURORA_EXTERNAL_PROFILER_H)"
 	@test -f "$@"
@@ -1419,8 +1463,9 @@ $(GAMBATTE_LIB): $(GAMBATTE_GBC_ONLY_STAMP)
 	+@PATH="$(PS2DEV)/ee/bin:$(PS2DEV)/bin:$(PS2SDK)/bin:$$PATH" $(MAKE) --no-print-directory -C "$(GAMBATTE_STAGE_DIR)" -f Makefile.libretro platform=ps2 all
 
 # AURORA_FCEUMM_FDS_V0_5_RUNTIME_LINK
-$(TARGET): $(OBJS) $(PICODRIVE_LIB) $(QUICKNES_LIB) $(PCE_LIB) $(FCEUMM_FDS_LIB) $(GAMBATTE_LIB) $(GPSP_LIB) | $(OBJ_DIR)
-	$(call RUN_LINK,$@,$(EE_CXX) $(LTO_LINK_FLAGS) -Xlinker --gc-sections -Xlinker -Map -Xlinker "$(OBJ_DIR)/SNESticle.map" -o "$@" $(OBJS) "$(PICODRIVE_LIB)" "$(QUICKNES_LIB)" "$(PCE_LIB)" "$(FCEUMM_FDS_LIB)" "$(GAMBATTE_LIB)" "$(GPSP_LIB)" $(LIBDIRS) $(LIBS))
+AURORA_LINK_CORE_LIBS = $(if $(filter 0,$(NO_PICODRIVE)),$(PICODRIVE_LIB)) $(if $(filter 0,$(NO_QUICKNES)),$(QUICKNES_LIB)) $(if $(filter 0,$(NO_PCE)),$(PCE_LIB)) $(if $(filter 0,$(NO_FCEUMM)),$(FCEUMM_FDS_LIB)) $(if $(filter 0,$(NO_GAMBATTE)),$(GAMBATTE_LIB)) $(if $(filter 0,$(NO_GPSP)),$(GPSP_LIB))
+$(TARGET): $(OBJS) $(AURORA_LINK_CORE_LIBS) | $(OBJ_DIR)
+	$(call RUN_LINK,$@,$(EE_CXX) $(LTO_LINK_FLAGS) -Xlinker --gc-sections -Xlinker -Map -Xlinker "$(OBJ_DIR)/SNESticle.map" -o "$@" $(OBJS) $(AURORA_LINK_CORE_LIBS) $(LIBDIRS) $(LIBS))
 
 $(TARGET_STRIPPED): $(TARGET)
 	@cp -f "$(TARGET)" "$@"

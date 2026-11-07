@@ -926,6 +926,17 @@ def main():
             ["git", "archive", "--format=tar", "HEAD"], cwd=src)
         with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:") as tf:
             tf.extractall(tmp)
+        # AURORA_ADP_VN4_STAGE: apenas a trilha CDDA explicitamente editada.
+        # A cópia fonte é local; nenhuma outra parte do commit fixado muda.
+        for rel in ("mednafen/cdrom/CDAccess_Image.c",
+                    "mednafen/cdrom/aurora_adp.h",
+                    "mednafen/cdstream.c", "mednafen/cdstream.h"): # AURORA_AURADP_VN9_PCE
+            srcfile = src / rel
+            if not srcfile.is_file() or b"AURORA_ADP_VN" not in srcfile.read_bytes():
+                raise SystemExit("ADP stage input not installed: " + rel)
+            dst = tmp / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(srcfile, dst)
         # AURORA_ASM_AUDIT_V11_PCE_SELECTIVE_C_20260929
         # Final conservative PCE policy after comparing the current MIPS
         # kernels with the last pre-MIPS build.

@@ -3504,6 +3504,28 @@ static void _MainLoopStateLoadSettingsFromRomDevice()
     }
 }
 
+/* AURORA_CONFIG_USB_FIRST_STATE_V1_20261107: prefer a single USB alias without scanning drives.
+ * Do not alter save states or the already configured SRAM target. */
+static Bool _MainLoopStateConfigPreferredUsbPath(Char *pOut, Int32 nOut)
+{
+    const Char *boot = MainGetBootPath();
+    const Char *dev = "mass0:";
+    if (boot && !strncmp(boot, "mass1:", 6)) dev = "mass1:";
+    else if (boot && !strncmp(boot, "mass:", 5)) dev = "mass:";
+    if (!pOut || nOut <= 0) return FALSE;
+    Int32 n = snprintf(pOut, nOut, "%s/SNESticle/state.cfg", dev);
+    return n >= 0 && n < nOut ? TRUE : FALSE;
+}
+
+static Bool _MainLoopStateConfigHddBoot()
+{
+    const Char *boot = MainGetBootPath();
+    return boot && (!strncmp(boot, "hdd0:", 5) ||
+                    (!strncmp(boot, "pfs", 3) &&
+                     boot[3] >= '0' && boot[3] <= '9' &&
+                     boot[4] == ':')) ? TRUE : FALSE;
+}
+
 void MainLoopStateSettingsLoad()
 {
     MainLoopStateConfigT Config;
@@ -3527,12 +3549,23 @@ void MainLoopStateSettingsLoad()
         NULL
     };
     Char BootPath[1024];
+    Char PreferredUsbPath[128];
     Int32 i;
 
     _MainLoop_StateDevice = MAINLOOP_STATEDEVICE_AUTO;
     _MainLoop_StateSlot = 0;
     _MainLoop_StateDeviceChosen = FALSE;
     _MainLoop_StateConfigPath[0] = 0;
+
+    /* HDD boots retain the existing HDD/MC selection policy. Otherwise
+     * one direct USB read precedes the legacy Memory Card paths. */
+    PreferredUsbPath[0] = 0;
+    if (!_MainLoopStateConfigHddBoot() &&
+        _MainLoopStateConfigPreferredUsbPath(
+            PreferredUsbPath, sizeof(PreferredUsbPath)) &&
+        _MainLoopStateConfigRead(PreferredUsbPath, &Config) &&
+        _MainLoopStateConfigApply(&Config))
+        return;
 
     /* Preserve the existing mc0/mc1 priority so upgrades keep their chosen
        target. A standalone ELF directory and every enabled writable local
@@ -3574,6 +3607,7 @@ void MainLoopStateSettingsLoad()
     {
         for (i = 0; pMassPaths[i]; i++)
         {
+            if (!strcmp(pMassPaths[i], PreferredUsbPath)) continue;
             if (_MainLoopStateConfigRead(pMassPaths[i], &Config) &&
                 _MainLoopStateConfigApply(&Config))
             {
@@ -3642,7 +3676,27 @@ Bool MainLoopStateSettingsSave()
        prefer the writable ELF directory, then mc, mass/MX4SIO and MMCE.
        This makes the one-time choice persistent even without a memory card. */
     BgmIOBegin();
-    if (_MainLoop_StateConfigPath[0])
+    /* If USB provided the settings, write ONLY there; USB removal must
+     * not silently create a competing newer MC file. Otherwise attempt
+     * USB promotion at SAVE time and fall back to the old MC behavior. */
+    if (!strncmp(_MainLoop_StateConfigPath, "mass", 4))
+    {
+        bSaved = _MainLoopStateConfigWrite(_MainLoop_StateConfigPath,
+                                           &Config);
+        if (!bSaved) { BgmIOEnd(); return FALSE; }
+    }
+    else if (!_MainLoopStateConfigHddBoot() &&
+             strncmp(_MainLoop_StateConfigPath, "hdd0:", 5) &&
+             strncmp(_MainLoop_StateConfigPath, "pfs", 3) &&
+             strncmp(_MainLoop_StateConfigPath, "mmce", 4))
+    {
+        Char PreferredUsbPath[128];
+        if (_MainLoopStateConfigPreferredUsbPath(
+                PreferredUsbPath, sizeof(PreferredUsbPath)))
+            bSaved = _MainLoopStateConfigWrite(PreferredUsbPath, &Config);
+    }
+
+    if (!bSaved && _MainLoop_StateConfigPath[0])
     {
         bSaved = _MainLoopStateConfigWrite(
             _MainLoop_StateConfigPath,

@@ -23,6 +23,7 @@
 #include "pixelformat.h"
 #include "mixbuffer.h"
 #include "snio.h"
+#include "platform/ps2/system/mainloop_safe_frameskip.h"
 #include "snppurender.h"
 #include "input.h" /* AURORA_QN_ARKANOID_ANALOG_V2_20260828 */
 
@@ -64,6 +65,8 @@ extern "C" void quicknes_snesticle_ext_battlebox_clear_dirty(void);
 
 static bool s_Initialized = false;
 static bool s_GameLoaded  = false;
+/* AURORA_M176_CHR256K_VN3: no extra global scratch for non-176 carts. */
+static bool s_M176LargeState = false;
 static bool s_DutySwap    = false;
 static bool s_TurboPhase  = false;
 static bool s_SkipVideoNext = false; /* AURORA_SAFE_FRAMESKIP_GG_ZOOM_V2_2 */
@@ -987,12 +990,13 @@ bool QuicknesBridge_LoadGame(const void *pData, size_t nBytes, const char *pName
     {
         const int nes2Ext = qNes2DefaultExpansionDevice(pData, nBytes);
         const Uint32 payloadCrc = qNesPayloadCrc32(pData, nBytes);
+        const Uint32 detectCrc = AuroraRomIdentityCRCForDetection(payloadCrc);
         s_N163InternalBatterySave =
-            qN163UsesInternalBatteryRam(pData, nBytes, payloadCrc);
+            qN163UsesInternalBatteryRam(pData, nBytes, detectCrc);
 
         /* AURORA_PCE_SCALING_LIGHTGUN_TOGGLE_V2_20260830
          * Light Gun detection is deliberately CRC32-only. */
-        s_LightGunDetectedMode = qLightGunModeForCrc(payloadCrc);
+        s_LightGunDetectedMode = qLightGunModeForCrc(detectCrc);
         s_LightGunMode = s_LightGunEnabled
             ? s_LightGunDetectedMode
             : QN_GUN_NONE;
@@ -1005,7 +1009,7 @@ bool QuicknesBridge_LoadGame(const void *pData, size_t nBytes, const char *pName
          * when the user's Light Gun toggle is Off: Off means plain pads. */
         if (s_LightGunDetectedMode == QN_GUN_NONE)
         {
-            s_BattleBoxEnabled = qBattleBoxCrc(payloadCrc);
+            s_BattleBoxEnabled = qBattleBoxCrc(detectCrc);
             if (!s_BattleBoxEnabled)
             {
                 if (nes2Ext == 0x10)
@@ -1014,9 +1018,9 @@ bool QuicknesBridge_LoadGame(const void *pData, size_t nBytes, const char *pName
                     s_TurboFileEnabled = true;
                 else if (nes2Ext <= 0)
                 {
-                    s_ArkanoidVaus = (payloadCrc == 0xD89E5A67U);
+                    s_ArkanoidVaus = (detectCrc == 0xD89E5A67U);
                     if (!s_ArkanoidVaus)
-                        s_TurboFileEnabled = qLegacyTurboFileCrc(payloadCrc);
+                        s_TurboFileEnabled = qLegacyTurboFileCrc(detectCrc);
                 }
             }
         }
@@ -1058,6 +1062,8 @@ bool QuicknesBridge_LoadGame(const void *pData, size_t nBytes, const char *pName
                    (unsigned)payloadCrc);
     }
 
+    /* AURORA_M176_CHR256K_VN3: only successful M176 loads reserve large snapshots. */
+    s_M176LargeState = (qNesMapperCode(pData, nBytes, NULL) == 176);
     s_GameLoaded = true;
 
     /* Do not serialize merely to discover state size during ROM load. */
@@ -1276,7 +1282,9 @@ int QuicknesBridge_GetStateSize(void)
      * The previous implementation serialized once to determine the
      * size and then serialized a second time for the actual save.
      */
-    return s_GameLoaded ? QUICKNES_STATE_CAPACITY : 0;
+    /* AURORA_M176_CHR256K_VN3: reserve the larger state only for M176.
+       256 KiB CHRR + at most 32 KiB SRAM + emulator state/metadata. */
+    return s_GameLoaded ? (s_M176LargeState ? 384 * 1024 : QUICKNES_STATE_CAPACITY) : 0;
 }
 
 int QuicknesBridge_SaveState(void *pData, int nBytes)
@@ -1284,8 +1292,10 @@ int QuicknesBridge_SaveState(void *pData, int nBytes)
     if (!s_GameLoaded || !s_pEmu || !pData || nBytes <= 0)
         return 0;
 
-    if (nBytes > QUICKNES_STATE_CAPACITY)
-        nBytes = QUICKNES_STATE_CAPACITY;
+    /* AURORA_M176_CHR256K_VN3: preserve the 64 KiB cap for all other cores. */
+    const int maxState = QuicknesBridge_GetStateSize();
+    if (nBytes > maxState)
+        nBytes = maxState;
 
     /*
      * Exactly one native serialization.

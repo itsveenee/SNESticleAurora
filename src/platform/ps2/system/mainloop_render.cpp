@@ -80,6 +80,255 @@ extern "C" {
 
 static Uint32 _uVblankCycle;
 
+/* AURORA_NOINTRO_CRC_FALLBACK_V1_20261028: resolvedor para gates por jogo, fora de hot paths.
+ * O CRC real nunca é modificado: saves, ZIP, firmware e estados permanecem
+ * validados pela identidade original. Apenas o CRC passado aos gates pode
+ * receber um alias via nome No-Intro exato, sem extensão. */
+struct AuroraNoIntroAliasT { Uint8 system; Uint32 crc; const char *name; };
+static const AuroraNoIntroAliasT s_AuroraNoIntroAliases[] = {
+    { 1u, 0x07E01EF9u, "Super Mario World 2 - Yoshi's Island (Europe) (En,Fr,De) (Rev 1)" },
+    { 1u, 0x0F66698Bu, "Super Mario - Yoshi Island (Japan) (Rev 1)" },
+    { 1u, 0x11A6E64Bu, "Hong Kong '97 (Japan) (En,Ja,Zh-Hant) (Unl)" },
+    { 1u, 0x125A0C22u, "Dark Law - Meaning of Death (Japan)" },
+    { 1u, 0x12F0A699u, "Tactics Ogre - Let Us Cling Together (Japan) (Rev 2) (NP)" },
+    { 1u, 0x17657DB6u, "Donkey Kong Country (Europe) (En,Fr,De) (Rev 1)" },
+    { 1u, 0x19369514u, "Top Racer (World) (Piko Interactive)" },
+    { 1u, 0x19BDCB19u, "Derby Stallion 96 (Japan)" },
+    { 1u, 0x266C44EDu, "Pilotwings (USA)" },
+    { 1u, 0x271E1D07u, "Tactics Ogre - Let Us Cling Together (Japan) (Rev 1)" },
+    { 1u, 0x2AA7777Bu, "Ardy Lightfoot (Japan)" },
+    { 1u, 0x2B88BEE8u, "Top Gear 2 (USA)" },
+    { 1u, 0x2E8034ABu, "Addams Family, The (USA)" },
+    { 1u, 0x31DAEBB2u, "Top Racer 2 (Japan) (En)" },
+    { 1u, 0x32E29079u, "Derby Stallion II (Japan)" },
+    { 1u, 0x343E0DFBu, "Super Mario - Yoshi Island (Japan)" },
+    { 1u, 0x36768B55u, "Derby Stallion III (Japan) (Rev 3)" },
+    { 1u, 0x3AA01DBDu, "Lost Vikings 2 (USA)" },
+    { 1u, 0x3ADEF543u, "Super Donkey Kong (Japan) (Rev 1)" },
+    { 1u, 0x3C49A285u, "Lost Vikings II, The - Norse by Norsewest (Europe) (En,Fr,De)" },
+    { 1u, 0x3EAA5697u, "Donkey Kong Country (USA) (Rev 1)" },
+    { 1u, 0x493FDB13u, "Top Gear 3000 (Europe)" },
+    { 1u, 0x4CD45939u, "Daisenryaku Expert WWII - War in Europe (Japan)" },
+    { 1u, 0x4EE705ABu, "Lost Vikings, The (Germany)" },
+    { 1u, 0x50F2D1BCu, "Super Donkey Kong (Japan)" },
+    { 1u, 0x50FEF979u, "Viking no Daimeiwaku (Japan)" },
+    { 1u, 0x51A5F489u, "Ardy Lightfoot (USA)" },
+    { 1u, 0x525FFB26u, "Derby Stallion 98 (Japan) (NP)" },
+    { 1u, 0x52ADA404u, "Sunset Riders (USA)" },
+    { 1u, 0x531463E1u, "Top Gear 2 (Europe)" },
+    { 1u, 0x5441F25Bu, "Sonic Blast Man (Europe)" },
+    { 1u, 0x547CF7B9u, "Wizardry V - Saika no Chuushin (Japan) (En,Ja)" },
+    { 1u, 0x56410E5Eu, "Super Mario Kart (Europe)" },
+    { 1u, 0x5EBF7246u, "Sound Novel Tsukuru (Japan)" },
+    { 1u, 0x5F3E5279u, "Derby Stallion III (Japan) (Rev 2)" },
+    { 1u, 0x64EDFC5Du, "Sunset Riders (Europe)" },
+    { 1u, 0x66989491u, "Lost Vikings, The (Europe)" },
+    { 1u, 0x675B6382u, "RPG Tsukuru 2 (Japan)" },
+    { 1u, 0x6838BE08u, "Lost Vikings, The (USA)" },
+    { 1u, 0x6E8A1081u, "Lost Vikings, The (Spain)" },
+    { 1u, 0x75EEEB3Fu, "Derby Stallion III (Japan)" },
+    { 1u, 0x762AF827u, "Donkey Kong Country (USA) (Rev 2)" },
+    { 1u, 0x77871727u, "Pilotwings (Japan)" },
+    { 1u, 0x7A33E836u, "Donkey Kong Country (Europe) (En,Fr,De)" },
+    { 1u, 0x7E97AE6Au, "Derby Stallion III (Japan) (Rev 1)" },
+    { 1u, 0x82497F19u, "Addams Family, The (Europe) (En,Fr,De)" },
+    { 1u, 0x857980B2u, "Super Mario World 2 - Yoshi's Island (Europe) (En,Fr,De)" },
+    { 1u, 0x8886396Eu, "Sonic Blast Man (USA)" },
+    { 1u, 0x94093298u, "Lost Vikings, The (France) (En,Fr)" },
+    { 1u, 0xA20BE998u, "Top Gear 3000 (USA)" },
+    { 1u, 0xAF415C24u, "Ganpuru - Gunman's Proof (Japan)" },
+    { 1u, 0xB0150052u, "Top Gear (Europe)" },
+    { 1u, 0xB17E95D4u, "Mini Yonku Shining Scorpion - Let's & Go!! (Japan)" },
+    { 1u, 0xB9B9DF06u, "Planet's Champ TG 3000, The (Japan)" },
+    { 1u, 0xBC1A265Fu, "Kakinoki Shougi (Japan)" },
+    { 1u, 0xBE523800u, "Sonic Blast Man (Japan)" },
+    { 1u, 0xC17ECBA5u, "Wizardry VI - Kindan no Mahitsu (Japan)" },
+    { 1u, 0xC49D28A4u, "Magical Pop'n (Japan)" },
+    { 1u, 0xC6A95816u, "Hong Kong '97 (Japan) (En,Ja,Zh-Hant) (CM) (Unl)" },
+    { 1u, 0xC79C123Fu, "Ongaku Tsukuru Kanadeeru (Japan)" },
+    { 1u, 0xC8002453u, "Super Mario Kart (Japan)" },
+    { 1u, 0xC946DCA0u, "Donkey Kong Country (USA)" },
+    { 1u, 0xCAF432AAu, "Donkey Kong Country (USA, Europe) (Rev 2) (Virtual Console, Classic Mini, Switch Online)" },
+    { 1u, 0xCB0653D0u, "Speedy Gonzales - Los Gatos Bandidos (USA) (Rev 1)" },
+    { 1u, 0xCD80351Cu, "Addams Family, The (Japan)" },
+    { 1u, 0xCD80DB86u, "Super Mario Kart (USA)" },
+    { 1u, 0xCF98DDAAu, "Super Mario World 2 - Yoshi's Island (USA) (Rev 1)" },
+    { 1u, 0xD0DE3012u, "Speedy Gonzales in Los Gatos Bandidos (Europe) (Proto) (No. 04)" },
+    { 1u, 0xD138F224u, "Super Mario World 2 - Yoshi's Island (USA)" },
+    { 1u, 0xD239398Fu, "Ardy Lightfoot (Europe)" },
+    { 1u, 0xD34C49B7u, "Top Gear (USA)" },
+    { 1u, 0xDAF285A5u, "Tactics Ogre - Let Us Cling Together (Japan)" },
+    { 1u, 0xDEF45776u, "Pilotwings (Europe)" },
+    { 1u, 0xE20870EEu, "RPG Tsukuru - Super Dante (Japan)" },
+    { 1u, 0xE2DBAD76u, "Speedy Gonzales - Los Gatos Bandidos (USA)" },
+    { 1u, 0xE5A57B12u, "Top Racer (Japan) (En)" },
+    { 1u, 0xECA2C2D1u, "Super Donkey Kong (Japan) (Rev 1) (Virtual Console, Classic Mini, Switch Online)" },
+    { 1u, 0xEFE9E087u, "Speedy Gonzales in Los Gatos Bandidos (Europe) (Proto) (No. 14)" },
+    { 1u, 0xF1063FADu, "Super Mario - Yoshi Island (Japan) (Rev 2)" },
+    { 1u, 0xF1110FADu, "Down the World - Mervil's Ambition (Japan)" },
+    { 2u, 0x0AFB395Eu, "Gun Sight (Japan)" },
+    { 2u, 0x143DF524u, "Strike Wolf (Asia) (Unl)" },
+    { 2u, 0x149C0EC3u, "Famicom Shougi - Ryuuousen (Japan)" },
+    { 2u, 0x1BFE42ABu, "Mad City (Japan) (Virtual Console)" },
+    { 2u, 0x1CA9C322u, "Liesha Zhuluoji - Blood of Jurassic (China) (En) (Unl)" },
+    { 2u, 0x1CAE8DEFu, "Asder - 20-in-1 (USA) (Unl)" },
+    { 2u, 0x1F6660E6u, "Barker Bill's Trick Shooting (Europe)" },
+    { 2u, 0x21DD2174u, "Haja no Fuuin (Japan)" },
+    { 2u, 0x231BC76Eu, "Chiller (Australia) (Unl)" },
+    { 2u, 0x23D17F5Eu, "Lone Ranger, The (USA)" },
+    { 2u, 0x24598791u, "Duck Hunt (World)" },
+    { 2u, 0x2A3CA509u, "Downtown - Nekketsu Monogatari (Japan)" },
+    { 2u, 0x2A6559A1u, "Operation Wolf (Japan)" },
+    { 2u, 0x3488A174u, "Duck Hunt (Asia) (En) (Pirate)" },
+    { 2u, 0x39A18397u, "Downtown - Nekketsu Monogatari (Japan) (Virtual Console)" },
+    { 2u, 0x3BBFF3A6u, "Best Play Pro Yakyuu (Japan)" },
+    { 2u, 0x3E58A87Eu, "Freedom Force (USA)" },
+    { 2u, 0x4318A2F8u, "Barker Bill's Trick Shooting (USA)" },
+    { 2u, 0x47C2020Bu, "Hydlide 3 - Yami kara no Houmonsha (Japan)" },
+    { 2u, 0x497C6A69u, "Super Russian Roulette (World) (Aftermarket) (Unl)" },
+    { 2u, 0x498187B6u, "Wizardry - Proving Grounds of the Mad Overlord (Japan)" },
+    { 2u, 0x4D68CFB1u, "Crime Busters (Brazil) (En) (Unl)" },
+    { 2u, 0x4E959173u, "Gotcha! - The Sport! (USA)" },
+    { 2u, 0x5112DC21u, "Wild Gunman (World) (Rev 1)" },
+    { 2u, 0x5529431Fu, "Operation Wolf (Europe)" },
+    { 2u, 0x55397DB3u, "Wizardry II - Llylgamyn no Isan (Japan)" },
+    { 2u, 0x5C123EF7u, "Wizardry III - Diamond no Kishi (Japan)" },
+    { 2u, 0x5D4574E0u, "Hogan's Alley (Asia) (En) (Pirate)" },
+    { 2u, 0x5EE6008Eu, "Mechanized Attack (USA)" },
+    { 2u, 0x61061352u, "Master Shooter (Taiwan) (En) (Unl)" },
+    { 2u, 0x61A852EAu, "Battle Stadium - Senbatsu Pro Yakyuu (Japan)" },
+    { 2u, 0x64594DA3u, "Russian Roulette (World) (Aftermarket) (Unl)" },
+    { 2u, 0x67751094u, "Adventures of Bayou Billy, The (USA)" },
+    { 2u, 0x70DF0D3Du, "5-in-1 (1993) (Asia) (En) (Unl)" },
+    { 2u, 0x73FB55ACu, "Lightgun Game 2 in 1 - Cosmocop + Cyber Monster (Taiwan) (En) (Unl)" },
+    { 2u, 0x74BEA652u, "3-in-1 Supergun (Asia) (En) (Unl)" },
+    { 2u, 0x78B657ACu, "Armadillo (Japan)" },
+    { 2u, 0x790B295Bu, "To the Earth (Europe)" },
+    { 2u, 0x7C4EBDACu, "Super 4-in-1 - Fantasy Gun (Asia) (En) (Unl)" },
+    { 2u, 0x7FA2CC55u, "Castle Excellent (Japan) (En)" },
+    { 2u, 0x803B9979u, "J.League Fighting Soccer - The King of Ace Strikers (Japan)" },
+    { 2u, 0x8373021Eu, "Adventures of Bayou Billy, The (USA) (Virtual Console)" },
+    { 2u, 0x83EAF3B1u, "Best Keiba - Derby Stallion (Japan) (Rev 1)" },
+    { 2u, 0x851EB9BEu, "Shooting Range (USA)" },
+    { 2u, 0x8C4D59D6u, "Derby Stallion - Zenkoku Ban (Japan)" },
+    { 2u, 0x93216279u, "Rumble Station - 15 in 1 (USA) (Unl)" },
+    { 2u, 0x974E8840u, "Best Play Pro Yakyuu '90 (Japan)" },
+    { 2u, 0xA0FBF02Eu, "Lethal Weapon (Taiwan) (En) (Unl)" },
+    { 2u, 0xA1A33B85u, "Best Keiba - Derby Stallion (Japan)" },
+    { 2u, 0xB0480AE9u, "Laser Invasion (USA)" },
+    { 2u, 0xB133CFA7u, "Baby Boomer (Korea) (En) (Unl)" },
+    { 2u, 0xB79F2651u, "Chiller (USA) (Unl)" },
+    { 2u, 0xB811C054u, "Fleet Commander (Japan)" },
+    { 2u, 0xB8747ABFu, "Best Play Pro Yakyuu Special (Japan)" },
+    { 2u, 0xB8B9ACA3u, "Wild Gunman (Japan, USA) (En)" },
+    { 2u, 0xB9AB06AAu, "Money Game II, The - Kabutochou no Kiseki (Japan)" },
+    { 2u, 0xBBE40DC4u, "Baby Boomer (USA) (Unl)" },
+    { 2u, 0xBC9BFFCBu, "Adventures of Bayou Billy, The (Europe)" },
+    { 2u, 0xBCFDD7DEu, "Falling Tiles (World) (v1.1) (Aftermarket) (Unl)" },
+    { 2u, 0xBEB8AB01u, "Gumshoe (USA, Europe)" },
+    { 2u, 0xC22BC87Bu, "Seiryaku Simulation - Inbou no Wakusei - Shancara (Japan)" },
+    { 2u, 0xC2EF3422u, "Best Play Pro Yakyuu II (Japan)" },
+    { 2u, 0xC3DE7C69u, "Best Play Pro Yakyuu Special (Japan) (Rev 1)" },
+    { 2u, 0xC4F9251Au, "Super Mario IV (Asia) (Ja) (Pirate)" },
+    { 2u, 0xCA503F32u, "Itadaki Street - Watashi no Omise ni Yottette (Japan)" },
+    { 2u, 0xCEE5857Bu, "Ninjara Hoi! (Japan)" },
+    { 2u, 0xD0FBE052u, "Falling Tiles (World) (NESDev 2019) (Aftermarket) (Unl)" },
+    { 2u, 0xD68A6F33u, "Dungeon Kid (Japan)" },
+    { 2u, 0xD7CD7E8Eu, "Panesian Power (World) (NESDev 2011) (Aftermarket) (Unl)" },
+    { 2u, 0xD89E5A67u, "Arkanoid (Japan) (En)" },
+    { 2u, 0xDDCBDA16u, "Lightgun Game 2 in 1 - Tough Cop + Super Tough Cop (Taiwan) (En) (Unl)" },
+    { 2u, 0xDE8FD935u, "To the Earth (USA)" },
+    { 2u, 0xDF31B364u, "Cobra Mission (Taiwan) (En) (Unl)" },
+    { 2u, 0xDF3E45D2u, "Mad City (Japan)" },
+    { 2u, 0xE145B441u, "Day Dreamin' Davey (USA)" },
+    { 2u, 0xE19293A2u, "Best Play Pro Yakyuu (Japan) (Rev 1)" },
+    { 2u, 0xE85B4D3Du, "Hit Marmot (Taiwan) (En) (Unl)" },
+    { 2u, 0xEDC3662Bu, "Operation Wolf (USA)" },
+    { 2u, 0xFF24D794u, "Hogan's Alley (World)" },
+    { 3u, 0x0B614307u, "RPG Tsukuru GB (Japan)" },
+    { 3u, 0x219E42E3u, "Uchuujin Tanaka Tarou de - RPG Tsukuru GB 2 (Japan)" },
+};
+static const Uint32 s_AuroraNoIntroKnownSNES[] = { 0x07E01EF9u, 0x0F66698Bu, 0x11A6E64Bu, 0x125A0C22u, 0x12F0A699u, 0x17657DB6u, 0x19369514u, 0x19BDCB19u, 0x266C44EDu, 0x271E1D07u, 0x2AA7777Bu, 0x2B88BEE8u, 0x2E8034ABu, 0x31DAEBB2u, 0x32E29079u, 0x343E0DFBu, 0x36768B55u, 0x3AA01DBDu, 0x3ADEF543u, 0x3C49A285u, 0x3EAA5697u, 0x493FDB13u, 0x4CD45939u, 0x4EE705ABu, 0x50F2D1BCu, 0x50FEF979u, 0x51A5F489u, 0x525FFB26u, 0x52ADA404u, 0x531463E1u, 0x5441F25Bu, 0x547CF7B9u, 0x56410E5Eu, 0x5EBF7246u, 0x5F3E5279u, 0x64EDFC5Du, 0x66989491u, 0x675B6382u, 0x6838BE08u, 0x6E8A1081u, 0x75EEEB3Fu, 0x762AF827u, 0x77871727u, 0x7A33E836u, 0x7E97AE6Au, 0x82497F19u, 0x857980B2u, 0x8886396Eu, 0x916D9C92u, 0x94093298u, 0x9DDE5CEAu, 0xA20BE998u, 0xAF415C24u, 0xB0150052u, 0xB17E95D4u, 0xB9B9DF06u, 0xBC1A265Fu, 0xBE523800u, 0xC17ECBA5u, 0xC49D28A4u, 0xC6A95816u, 0xC79C123Fu, 0xC8002453u, 0xC946DCA0u, 0xCAF432AAu, 0xCB0653D0u, 0xCD80351Cu, 0xCD80DB86u, 0xCF98DDAAu, 0xD0DE3012u, 0xD138F224u, 0xD239398Fu, 0xD34C49B7u, 0xDAF285A5u, 0xDEF45776u, 0xE0BD6C71u, 0xE20870EEu, 0xE2DBAD76u, 0xE44F42BAu, 0xE5A57B12u, 0xECA2C2D1u, 0xEFE9E087u, 0xF1063FADu, 0xF1110FADu };
+static const Uint32 s_AuroraNoIntroKnownNES[] = { 0x012E12E3u, 0x01B87025u, 0x04A6B46Du, 0x051E60C6u, 0x0719E982u, 0x090568DFu, 0x0AFB395Eu, 0x0E9428FBu, 0x0F263E59u, 0x143DF524u, 0x149C0EC3u, 0x19B0A9F1u, 0x1A5CE587u, 0x1BFE42ABu, 0x1CA9C322u, 0x1CAE8DEFu, 0x1DA88F85u, 0x1E6C3344u, 0x1EC1DFEBu, 0x1F6660E6u, 0x21DD2174u, 0x231BC76Eu, 0x23D17F5Eu, 0x24598791u, 0x27ACE333u, 0x283D7727u, 0x2A3CA509u, 0x2A6559A1u, 0x2CE31186u, 0x2F72A0BEu, 0x30D00EF7u, 0x327DDDECu, 0x3469B714u, 0x3488A174u, 0x392E268Cu, 0x39A18397u, 0x3BBFF3A6u, 0x3C04E8EFu, 0x3E58A87Eu, 0x3E85BA0Fu, 0x3F8BB92Du, 0x407449DAu, 0x4318A2F8u, 0x431A5F59u, 0x44340DA6u, 0x44BEB4B0u, 0x47C0935Bu, 0x47C2020Bu, 0x48C66CEBu, 0x497C6A69u, 0x498187B6u, 0x4A3D4790u, 0x4B143FB6u, 0x4D3982BCu, 0x4D68CFB1u, 0x4E959173u, 0x4FBBFA74u, 0x5112DC21u, 0x522EE20Fu, 0x524BC479u, 0x5529431Fu, 0x55397DB3u, 0x58600A77u, 0x58B2FE44u, 0x5B3B5BC1u, 0x5C123EF7u, 0x5CC1E2C6u, 0x5D4574E0u, 0x5E8C77DBu, 0x5EE6008Eu, 0x61061352u, 0x61A852EAu, 0x62AF1BC4u, 0x6332E4CAu, 0x63506FB4u, 0x64594DA3u, 0x6519CB3Bu, 0x65AA77CEu, 0x67751094u, 0x6AF3DEF8u, 0x70DF0D3Du, 0x73CCDAE0u, 0x73FB55ACu, 0x74BEA652u, 0x78B657ACu, 0x790B295Bu, 0x7A018E1Fu, 0x7BAF8142u, 0x7C4EBDACu, 0x7C899CFAu, 0x7CDF51D5u, 0x7D01D4E0u, 0x7FA2CC55u, 0x7FC220F7u, 0x803B9979u, 0x82908FF7u, 0x8373021Eu, 0x83EAF3B1u, 0x8507A4F9u, 0x851EB9BEu, 0x8A7D9467u, 0x8B7DA8B8u, 0x8C4D59D6u, 0x91467F41u, 0x93216279u, 0x96BE8381u, 0x974E8840u, 0xA0FBF02Eu, 0xA1430EEBu, 0xA1A33B85u, 0xA39A8063u, 0xA671DA25u, 0xA7C6C842u, 0xA7F8BBC8u, 0xAA65ADBFu, 0xAA9F9765u, 0xAEF00A33u, 0xB037246Du, 0xB0480AE9u, 0xB133CFA7u, 0xB3D92E78u, 0xB79F2651u, 0xB811C054u, 0xB8747ABFu, 0xB8B9ACA3u, 0xB9AB06AAu, 0xBBE40DC4u, 0xBC9BFFCBu, 0xBCFDD7DEu, 0xBEB8AB01u, 0xC0F0D838u, 0xC22BC87Bu, 0xC267D861u, 0xC2EF3422u, 0xC3C9D852u, 0xC3DE7C69u, 0xC49F6407u, 0xC4F9251Au, 0xC616BAD5u, 0xCA2C23E2u, 0xCA503F32u, 0xCDC69231u, 0xCEE5857Bu, 0xCFD8D4A5u, 0xD0FBE052u, 0xD15009CCu, 0xD5BCF1E5u, 0xD68A6F33u, 0xD7CD7E8Eu, 0xD8015A7Au, 0xD89E5A67u, 0xDC33AED8u, 0xDDCBDA16u, 0xDE8FD935u, 0xDF31B364u, 0xDF3E45D2u, 0xE145B441u, 0xE18CD9AAu, 0xE19293A2u, 0xE46C7D6Bu, 0xE5620994u, 0xE615C8DFu, 0xE85B4D3Du, 0xEDC3662Bu, 0xEEC7995Au, 0xF24C0B66u, 0xF27F9E88u, 0xF4E7A58Cu, 0xF5E62944u, 0xFA08CCBFu, 0xFD9E5DD6u, 0xFF24D794u };
+static const Uint32 s_AuroraNoIntroKnownGBC[] = { 0x0B614307u, 0x219E42E3u };
+static char s_AuroraNoIntroName[512] = {0};
+static Uint8 s_AuroraNoIntroSystem = 0;
+
+static unsigned char AuroraNoIntroLower(unsigned char c)
+{
+    return (c >= 'A' && c <= 'Z') ? (unsigned char)(c + 'a' - 'A') : c;
+}
+
+static Bool AuroraNoIntroNameEqual(const char *a, const char *b)
+{
+    if (!a || !b) return FALSE;
+    while (*a && *b)
+    {
+        if (AuroraNoIntroLower((unsigned char)*a++) !=
+            AuroraNoIntroLower((unsigned char)*b++)) return FALSE;
+    }
+    return (*a == 0 && *b == 0) ? TRUE : FALSE;
+}
+
+static void AuroraNoIntroDropExtension(char *name)
+{
+    char *dot = strrchr(name, '.');
+    if (!dot || dot == name || !dot[1]) return;
+    /* Um título como "Dr. Mario" não tem extensão aqui. */
+    for (const char *p = dot + 1; *p; ++p)
+        if (*p == ' ' || *p == '(' || *p == ')' || *p == '/' || *p == '\\')
+            return;
+    if (strlen(dot + 1) > 12u) return;
+    *dot = 0;
+}
+
+void AuroraRomIdentitySetNoIntroName(Uint32 system, const char *path)
+{
+    s_AuroraNoIntroName[0] = 0;
+    s_AuroraNoIntroSystem = 0;
+    if (!path || !*path || system < 1u || system > 3u) return;
+    const char *base = path;
+    for (const char *p = path; *p; ++p)
+        if (*p == '/' || *p == '\\') base = p + 1;
+    const size_t n = strlen(base);
+    if (!n || n >= sizeof(s_AuroraNoIntroName)) return;
+    memcpy(s_AuroraNoIntroName, base, n + 1u);
+    /* Ex.: "Game (USA).sfc.gz" -> "Game (USA)". ZIP usa o membro interno. */
+    char *lastDot = strrchr(s_AuroraNoIntroName, '.');
+    if (lastDot && AuroraNoIntroNameEqual(lastDot, ".gz"))
+        *lastDot = 0;
+    AuroraNoIntroDropExtension(s_AuroraNoIntroName);
+    s_AuroraNoIntroSystem = (Uint8)system;
+}
+
+Uint32 AuroraRomIdentityCRCForDetection(Uint32 crc)
+{
+    if (!crc || !s_AuroraNoIntroSystem || !s_AuroraNoIntroName[0]) return crc;
+    const Uint32 *known = NULL;
+    size_t count = 0;
+    switch (s_AuroraNoIntroSystem)
+    {
+        case 1: known = s_AuroraNoIntroKnownSNES;
+                count = sizeof(s_AuroraNoIntroKnownSNES) / sizeof(Uint32); break;
+        case 2: known = s_AuroraNoIntroKnownNES;
+                count = sizeof(s_AuroraNoIntroKnownNES) / sizeof(Uint32); break;
+        case 3: known = s_AuroraNoIntroKnownGBC;
+                count = sizeof(s_AuroraNoIntroKnownGBC) / sizeof(Uint32); break;
+        default: return crc;
+    }
+    /* Nenhum nome substitui uma identidade já reconhecida pelo CRC. */
+    for (size_t i = 0; i < count; ++i)
+        if (crc == known[i]) return crc;
+    for (size_t i = 0; i < sizeof(s_AuroraNoIntroAliases) /
+                             sizeof(s_AuroraNoIntroAliases[0]); ++i)
+        if (s_AuroraNoIntroAliases[i].system == s_AuroraNoIntroSystem &&
+            AuroraNoIntroNameEqual(s_AuroraNoIntroName,
+                                   s_AuroraNoIntroAliases[i].name))
+            return s_AuroraNoIntroAliases[i].crc;
+    return crc;
+}
+
+
 /* AURORA_SAFE_FRAMESKIP_30FPS_FLOOR_V21_20261001
  *
  * Host-only catch-up scheduler with a hard presentation floor.
@@ -213,7 +462,8 @@ void MainLoopSafeFrameskipSetRomIdentityCRC32(
     const void *pSystemOwner, Uint32 crc32)
 {
     s_SafeFrameskipUnlimitedOwner =
-        (pSystemOwner && _MainLoopSafeFrameskipCRCUsesUnlimited(crc32))
+        (pSystemOwner && _MainLoopSafeFrameskipCRCUsesUnlimited(
+             AuroraRomIdentityCRCForDetection(crc32)))
             ? pSystemOwner : NULL;
 
     /* Media attach is a clean policy boundary. Do not inherit bucket or

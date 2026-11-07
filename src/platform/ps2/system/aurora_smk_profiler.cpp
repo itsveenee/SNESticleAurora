@@ -7,6 +7,7 @@
  * fixed-size counters; all RTC and filesystem work happens after menu entry.
  */
 #include "aurora_smk_profiler.h"
+#include "mainloop_safe_frameskip.h"
 
 #if AURORA_SMK_PROFILER
 
@@ -120,12 +121,14 @@ static void ResetLive(void)
 
 static Bool IsSmkCRC(Uint32 crc)
 {
+    crc = AuroraRomIdentityCRCForDetection(crc);
     return (crc == SMK_CRC_USA || crc == SMK_CRC_JAPAN ||
             crc == SMK_CRC_EUROPE) ? TRUE : FALSE;
 }
 
 static const char *RegionName(Uint32 crc)
 {
+    crc = AuroraRomIdentityCRCForDetection(crc);
     switch (crc)
     {
         case SMK_CRC_USA: return "USA";

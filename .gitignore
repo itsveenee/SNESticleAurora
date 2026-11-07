@@ -1,10 +1,10 @@
 # SNESticle Aurora — .gitignore
-# Revisado a partir da arvore da branch main (20/10/2026).
-# Ignora artefatos locais sem ocultar fontes, assets, licencas,
-# scripts de tools/ e os modulos IRX precompilados de irx/.
+# Revisado com a arvore local de 07/11/2026.
+# Ignora compilacao, temporarios e backups sem ocultar fontes, assets,
+# licencas, ferramentas versionadas ou IRX precompilados em irx/.
 
 # -----------------------------------------------------------------------------
-# 1. Arvore de compilacao, logs e areas de trabalho locais
+# 1. Build, logs e areas de trabalho locais
 # -----------------------------------------------------------------------------
 /build/
 /refs/
@@ -12,7 +12,7 @@
 /.snesticle_rebuild*/
 /.ps2dev-env
 
-# Arquivos intermediarios e produtos de compilacao PS2 / GCC
+# Intermediarios e produtos de compilacao PS2 / GCC.
 *.o
 *.obj
 *.d
@@ -22,11 +22,11 @@
 /SNESticle.map
 *.log
 
-# Compilacao do driver PS2 Mouse: nao confundir com os IRX de /irx/.
+# Driver PS2 Mouse: somente saidas compiladas; manter imports.lst e fontes.
 /src/platform/ps2/iop/aurora_ps2mouse/obj/
 /src/platform/ps2/iop/aurora_ps2mouse/*.irx
 
-# Diagnosticos e perfis gerados localmente
+# Diagnosticos e perfis locais.
 *.gcda
 *.gcno
 *.gcov
@@ -37,16 +37,14 @@
 /perf.data*
 
 # -----------------------------------------------------------------------------
-# 2. Scripts de uso pessoal e temporarios de patches
+# 2. Scripts pessoais, backups e patches locais
 # -----------------------------------------------------------------------------
-# Os scripts Python versionados estao em tools/; somente scripts avulsos
-# na RAIZ sao considerados locais. Nao ignorar Python genericamente:
-# futuras ferramentas em tools/ e novas fontes continuam visiveis ao Git.
+# Python versionado fica em tools/. Scripts avulsos na RAIZ sao locais.
 /*.py
 /backup.sh
 /copy.sh
 
-# Copias feitas por patches (incluindo sufixos de versao vN)
+# Inclui .bak.AURORA_*, .usbconfig.bak e copias pre/before/orig/rej.
 *.bak*
 *.pre_*
 *.pre-*
@@ -55,14 +53,18 @@
 *.orig
 *.rej
 
-# Backups/instantaneos de patches gerados na raiz
-/.aurora_*_originals/
-/.aurora_*_backup/
-/.aurora_*_backups/
-/.aurora_*_snapshots/
+# Backups Aurora, inclusive variantes como:
+# .aurora_adp_backups/
+# .aurora_core_flags_backup_FINAL_*/
+# .aurora_nointro_crc32_backup_v1/
+# Nao ancorar na raiz: os prefixos podem aparecer em subpastas comuns.
+# Em submodulos Git, repetir esta regra no ignore do proprio submodulo.
+.aurora_*_backup*/
+.aurora_*_originals/
+.aurora_*_snapshots/
 
 # -----------------------------------------------------------------------------
-# 3. Python: bytecode, ambientes virtuais e ferramentas de analise
+# 3. Python: bytecode, ambientes e analise
 # -----------------------------------------------------------------------------
 __pycache__/
 *.py[cod]
@@ -78,8 +80,9 @@ venv/
 htmlcov/
 
 # -----------------------------------------------------------------------------
-# 4. Pacotes locais e dados de usuario (na raiz do repositorio)
+# 4. Pacotes locais e dados de usuario
 # -----------------------------------------------------------------------------
+# Arquivos de distribuicao/arquivamento avulsos na raiz.
 /*.zip
 /*.7z
 /*.tar
@@ -87,26 +90,25 @@ htmlcov/
 /*.tgz
 /*.iso
 
-# Configuracoes locais. Manter SMB.CNF.example versionavel.
+# Configuracoes locais (SMB.CNF.example continua versionavel).
 /SMB.CNF
 .env
 .env.*
 !.env.example
 .cache/
 
-# Firmware, jogos e dados em tempo de execucao: jamais fontes do Aurora
+# Conteudo de execucao no console; manter bibliotecas e arquivos de src/.
 /ROMS/
 /roms/
 /BIOS/
 /SYSTEM/
 /SNESticle/
 
-# Saves do EverDrive: a pasta sera apagada do repositorio.
-# Impede que saves pessoais voltem a ser adicionados depois.
+# Saves pessoais do EverDrive.
 /ED64P/SDSAVE/
 
 # -----------------------------------------------------------------------------
-# 5. Residuos de editores e sistema operacional
+# 5. Residuos de editores e sistemas operacionais
 # -----------------------------------------------------------------------------
 *.swp
 *.swo
@@ -121,10 +123,10 @@ Thumbs.db
 Desktop.ini
 
 # -----------------------------------------------------------------------------
-# Manter versionados (nao ignorar):
+# Manter versionados (nao ignorar globalmente):
 #   Makefile, .gitmodules, .github/, LICENSE, LICENSES/, *.md,
 #   assets/, docs/, src/, tools/*.py, tools/Makefile.*, irx/*.irx.
-#   Arquivos *.lst em src/ podem ser insumos necessarios ao build.
-#   Os 6 cores externos sao submodulos Git em src/third_party/.
+#   *.lst pode ser insumo de build; *.bin e *.cfg podem ser dados de cores.
+#   src/third_party/ contem submodulos Git; cada submodulo tem ignore proprio.
 # Nao ignorar *.irx, *.bin, *.lst ou *.py globalmente.
 # -----------------------------------------------------------------------------
