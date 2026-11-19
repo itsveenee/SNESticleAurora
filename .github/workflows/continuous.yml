@@ -9,7 +9,9 @@ permissions:
 
 concurrency:
   group: continuous-release
-  cancel-in-progress: true
+  # Obsolete pending pushes may coalesce; never interrupt an active release.
+  cancel-in-progress: false
+  queue: single
 
 jobs:
   build:
